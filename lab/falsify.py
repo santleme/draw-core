@@ -272,9 +272,7 @@ def score_report(report: dict) -> tuple[float, dict]:
             1.0 - float(iou) if iou is not None else (0.0 if absent_final else 1.0)
         ),
         "no_canvas": (
-            0.0
-            if iou is not None or absent_final or unscorable_worst
-            else 1.0
+            0.0 if iou is not None or absent_final or unscorable_worst else 1.0
         ),
         "erase_residual": min(
             1.0, (verdict.get("residual_confirmed_in_erased_px") or 0) / 4000.0

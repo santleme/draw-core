@@ -116,9 +116,7 @@ def _project(mask, corners, page_to_scene, canvas_hw, scene_map=None):
     )
 
 
-def audit(
-    video, gt_path, *, fps=None, models=None, save_masks=None, verify="manifest"
-):
+def audit(video, gt_path, *, fps=None, models=None, save_masks=None, verify="manifest"):
     # models=() quebrava no .get: dict vazio e não tupla.
     models = models or {}
     with np.load(gt_path, allow_pickle=False) as archive:
