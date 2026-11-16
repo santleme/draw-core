@@ -101,3 +101,22 @@ def test_build_panel_sem_warp():
     frame = np.full((60, 80, 3), 255, np.uint8)
     panel = build_panel(frame, None, None, None)
     assert panel.shape == (60, 80, 3)
+
+
+def test_select_worst_top_k_zero_devolve_vazio():
+    from lab.replay_lab import select_worst
+
+    records = [{"frame": i, "sig_quad_jump_px": 10.0} for i in range(3)]
+    assert select_worst(records, 0) == []
+    assert select_worst(records, -1) == []
+
+
+def test_select_worst_frame_eh_indice_do_arquivo():
+    # Registro pulado (frame ilegível não entra): posição e frame
+    # divergem — a seleção tem de devolver o índice do arquivo.
+    from lab.replay_lab import select_worst
+
+    records = [{"frame": f, "sig_quad_jump_px": 0.0} for f in (0, 1, 3, 4)]
+    records[2]["sig_quad_jump_px"] = 99.0
+    worst = select_worst(records, 1, min_gap=0)
+    assert worst[0]["frame"] == 3

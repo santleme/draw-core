@@ -147,7 +147,7 @@ def _rank(values):
 def select_worst(records, top_k, min_gap=2):
     """Piores K por soma de postos dos sinais; vizinhos a <min_gap
     frames de um já escolhido são suprimidos (dedupe)."""
-    if not records:
+    if not records or top_k <= 0:
         return []
     jumps = _rank([r.get("sig_quad_jump_px") or 0.0 for r in records])
     areas = _rank([r.get("sig_area_change") or 0.0 for r in records])
@@ -433,7 +433,9 @@ def main(argv=None):
     )
     worst = select_worst(records, args.top_k)
     # 2ª passagem determinística: artefatos só dos selecionados.
-    wanted = {w["index"] for w in worst}
+    # `frame` é o índice do arquivo — frames ilegíveis são pulados e
+    # a posição no vetor de registros deixa de coincidir com ele.
+    wanted = {w["frame"] for w in worst}
     run_replay(
         args.corpus,
         out,
@@ -447,17 +449,19 @@ def main(argv=None):
     index = [
         {
             **w,
-            "file": by_idx[w["index"]]["file"],
+            "file": by_idx[w["frame"]]["file"],
             "signals": {
-                k: by_idx[w["index"]].get(k)
+                k: by_idx[w["frame"]].get(k)
                 for k in (
                     "sig_quad_jump_px",
                     "sig_area_change",
                     "sig_canvas_growth_px",
                     "sig_presence_flip",
+                    "sig_tracker_jump_px",
+                    "sig_quad_aspect",
                 )
             },
-            "panel": f"panel_{w['index']:04d}.png",
+            "panel": f"panel_{w['frame']:04d}.png",
         }
         for w in worst
     ]
