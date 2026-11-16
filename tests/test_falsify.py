@@ -114,3 +114,42 @@ def test_score_report_weights_documented_failures():
         "checkpoints": [{"iou": 0.8}, {"iou": 0.1}],
     }
     assert score_report(worst)[1]["worst_phase_loss"] == pytest.approx(0.9)
+
+
+def test_score_report_ausencia_final_nao_penaliza():
+    from lab.falsify import score_report
+
+    report = {
+        "verdict": {"status": "ausência (folha fora de cena)", "absence": True},
+        "checkpoints": [
+            {"frame": 10, "iou": 0.9},
+            {"frame": 20, "status": "ausência (folha fora de cena)", "absence": True},
+        ],
+    }
+    score, comp = score_report(report)
+    assert comp["no_canvas"] == 0.0
+    assert comp["iou_loss"] == 0.0
+    assert comp["worst_phase_loss"] == pytest.approx(0.1)
+
+
+def test_score_report_sem_canvas_real_ainda_reprova():
+    from lab.falsify import score_report
+
+    report = {
+        "verdict": {"status": "canvas ausente no evento final"},
+        "checkpoints": [{"frame": 20, "status": "sem âncora/canvas"}],
+    }
+    score, comp = score_report(report)
+    assert comp["no_canvas"] == 1.0
+    assert comp["iou_loss"] == 1.0
+    assert comp["worst_phase_loss"] == 1.0
+
+
+def test_audit_models_default_aceito():
+    # models=None é o default; audit com tupla vazia quebrava no .get.
+    import inspect
+
+    from lab import eval_scenario
+
+    sig = inspect.signature(eval_scenario.audit)
+    assert sig.parameters["models"].default is None

@@ -252,13 +252,30 @@ def score_report(report: dict) -> tuple[float, dict]:
     que quebrou."""
     verdict = report.get("verdict", {})
     iou = verdict.get("final_iou")
+    checkpoints = report.get("checkpoints", [])
     worst_phase = min(
-        (c["iou"] for c in report.get("checkpoints", []) if "iou" in c),
+        (c["iou"] for c in checkpoints if "iou" in c),
         default=None,
     )
+    # Ausência no fim (lift_out deixou a folha fora de cena) não é
+    # pontuável: iou/no_canvas zerados em vez de penalizar o canvas
+    # que persistiu corretamente.
+    absent_final = bool(verdict.get("absence"))
+    # Nenhum checkpoint pontuável E todos marcados como ausência:
+    # o cenário não deu geometria para julgar — também não é falha.
+    all_absent = bool(checkpoints) and all(
+        c.get("absence") for c in checkpoints if "iou" not in c
+    )
+    unscorable_worst = worst_phase is None and all_absent
     components = {
-        "iou_loss": 1.0 - float(iou) if iou is not None else 1.0,
-        "no_canvas": 1.0 if iou is None else 0.0,
+        "iou_loss": (
+            1.0 - float(iou) if iou is not None else (0.0 if absent_final else 1.0)
+        ),
+        "no_canvas": (
+            0.0
+            if iou is not None or absent_final or unscorable_worst
+            else 1.0
+        ),
         "erase_residual": min(
             1.0, (verdict.get("residual_confirmed_in_erased_px") or 0) / 4000.0
         ),
@@ -268,10 +285,13 @@ def score_report(report: dict) -> tuple[float, dict]:
             else 0.0
         ),
         # Sem nenhum checkpoint com IoU, nunca houve canvas: é o
-        # pior cenário possível, não ausência de sinal.
-        "worst_phase_loss": 1.0 - float(worst_phase)
-        if worst_phase is not None
-        else 1.0,
+        # pior cenário possível, não ausência de sinal — a menos que
+        # TODOS os checkpoints sem IoU sejam ausências legítimas.
+        "worst_phase_loss": (
+            1.0 - float(worst_phase)
+            if worst_phase is not None
+            else (0.0 if unscorable_worst else 1.0)
+        ),
     }
     score = (
         components["iou_loss"]

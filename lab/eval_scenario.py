@@ -116,7 +116,11 @@ def _project(mask, corners, page_to_scene, canvas_hw, scene_map=None):
     )
 
 
-def audit(video, gt_path, *, fps=None, models=(), save_masks=None, verify="manifest"):
+def audit(
+    video, gt_path, *, fps=None, models=None, save_masks=None, verify="manifest"
+):
+    # models=() quebrava no .get: dict vazio e não tupla.
+    models = models or {}
     with np.load(gt_path, allow_pickle=False) as archive:
         bundle = {key: archive[key] for key in archive.files}
     missing = {"events", "stroke_phase", "stroke_erased", "page_ink_final"} - set(
@@ -243,7 +247,20 @@ def audit(video, gt_path, *, fps=None, models=(), save_masks=None, verify="manif
             "phase_start": phase["start"],
         }
         if snap["corners"] is None or snap["confirmed"] is None:
-            entry["status"] = "sem âncora/canvas"
+            # lift_out tira a folha de cena de propósito: sem âncora
+            # nessa fase é ausência geometricamente impossível de
+            # pontuar, não falha — o canvas persistido não é julgado
+            # por um frame em que a folha nem aparece.
+            absent = phase["kind"] == "lift_out"
+            entry["status"] = (
+                "ausência (folha fora de cena)" if absent else "sem âncora/canvas"
+            )
+            entry["absence"] = absent
+            entry["confirmed_px"] = (
+                None
+                if snap["confirmed"] is None
+                else int((np.asarray(snap["confirmed"]) > 0).sum())
+            )
             checkpoints.append(entry)
             continue
         corners = snap["corners"]
@@ -257,15 +274,11 @@ def audit(video, gt_path, *, fps=None, models=(), save_masks=None, verify="manif
         entry.update(pixel_metrics(confirmed, truth))
         entry["confirmed_px"] = int(confirmed.sum())
         entry["provisional_px"] = int(provisional.sum())
-        x, y, w, h = (int(v) for v in bundle["erase_rect"])
-        if w and h:
-            rect_mask = np.zeros(shape, np.uint8)
-            rect_mask[y : y + h, x : x + w] = 255
-            rect_canvas = (
-                _project(rect_mask, corners, page_to_scene, canvas_hw, scene_map) > 0
-            )
-            entry["confirmed_in_erased_px"] = int((confirmed & rect_canvas).sum())
-        redraw_masks = phase_stroke_masks(1)
+        # Redesenho esperado: só exclui do residual quando a fase 1 já
+        # foi aplicada — antes dela, tinta no retângulo é resíduo de
+        # verdade mesmo onde um traço futuro vai cair.
+        redraw_canvas = np.zeros(confirmed.shape, bool)
+        redraw_masks = phase_stroke_masks(1) if writes_seen >= 2 else []
         if redraw_masks:
             redraw = np.zeros(shape, np.uint8)
             for mask in redraw_masks:
@@ -278,6 +291,18 @@ def audit(video, gt_path, *, fps=None, models=(), save_masks=None, verify="manif
                 float((confirmed & redraw_canvas).sum()) / denom
             )
             entry["redraw_provisional_px"] = int((provisional & redraw_canvas).sum())
+        x, y, w, h = (int(v) for v in bundle["erase_rect"])
+        if w and h:
+            rect_mask = np.zeros(shape, np.uint8)
+            rect_mask[y : y + h, x : x + w] = 255
+            rect_canvas = (
+                _project(rect_mask, corners, page_to_scene, canvas_hw, scene_map) > 0
+            )
+            # Resíduo = confirmado no retângulo apagado FORA do que o
+            # redesenho legítimo cobre — traço de fase 1 dentro do
+            # retângulo é tinta esperada, não sobra da borracha.
+            residual = confirmed & rect_canvas & ~redraw_canvas
+            entry["confirmed_in_erased_px"] = int(residual.sum())
         checkpoints.append(entry)
 
     final = _final_checkpoint(checkpoints, events)
@@ -287,6 +312,7 @@ def audit(video, gt_path, *, fps=None, models=(), save_masks=None, verify="manif
         "pipeline": pipeline,
         "verdict": {
             "status": final.get("status"),
+            "absence": bool(final.get("absence")),
             "final_iou": final.get("iou"),
             "final_recall": final.get("recall"),
             "final_confirmed_px": final.get("confirmed_px"),
