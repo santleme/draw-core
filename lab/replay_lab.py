@@ -254,13 +254,14 @@ def run_replay(
     sheet_model=None,
     ink_model=None,
     panel_frames=None,
-    verify=None,
+    verify="manifest",
 ):
     """Roda o corpus pelo laço real. detector/page_clean injetáveis
     (testes); por omissão, os modelos reais. panel_frames: conjunto
     de índices (na enumeração com stride) cujos artefatos se gravam;
-    None = só telemetria (1ª passagem). verify=None usa o verificador
-    do manifesto; testes com modelos gerados passam verify=False."""
+    None = só telemetria (1ª passagem). verify é o callable de
+    integridade dos modelos: "manifest" injeta o verificador de
+    assets/manifest.json; None desliga (bancadas/testes fora dele)."""
     from draw.app import _detect_sheet_combined_traced
     from draw.contracts import DetectionResult, FramePacket
     from draw.infra.manifest import verify_model
@@ -272,7 +273,7 @@ def run_replay(
     from draw.tracker import _gate_info_from_trace
     from lab.sim_writer import _parse_flags
 
-    if verify is None:
+    if verify == "manifest":
         verify = verify_model
     config = _parse_flags(flags or [])
 
