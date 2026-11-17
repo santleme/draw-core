@@ -87,6 +87,10 @@ def _final_checkpoint(checkpoints, events):
             "frame": final["frame"],
             "phase": final["phase"],
             "confirmed_px": final.get("confirmed_px"),
+            # Sem isto a isencao de ausencia nunca chegava ao verdict
+            # — o dict reconstruido dropava a flag e o score_report
+            # penalizava o lift_out final como perda de canvas.
+            "absence": bool(final.get("absence")),
         }
     return final
 
@@ -247,9 +251,10 @@ def audit(video, gt_path, *, fps=None, models=None, save_masks=None, verify="man
         if snap["corners"] is None or snap["confirmed"] is None:
             # lift_out tira a folha de cena de propósito: sem âncora
             # nessa fase é ausência geometricamente impossível de
-            # pontuar, não falha — o canvas persistido não é julgado
-            # por um frame em que a folha nem aparece.
-            absent = phase["kind"] == "lift_out"
+            # pontuar, não falha — MAS só quando o canvas persistiu:
+            # confirmed=None significa que o laço perdeu a tinta,
+            # e perder tinta durante a ausência é falha de verdade.
+            absent = phase["kind"] == "lift_out" and snap["confirmed"] is not None
             entry["status"] = (
                 "ausência (folha fora de cena)" if absent else "sem âncora/canvas"
             )

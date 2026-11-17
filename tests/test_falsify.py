@@ -153,3 +153,27 @@ def test_audit_models_default_aceito():
 
     sig = inspect.signature(eval_scenario.audit)
     assert sig.parameters["models"].default is None
+
+
+def test_final_checkpoint_propaga_absence():
+    # O dict reconstruido sem iou dropava a flag: verdict["absence"]
+    # saia sempre False e o score_report cobrava a ausencia.
+    from lab.eval_scenario import _final_checkpoint
+
+    checkpoints = [
+        {"frame": 10, "iou": 0.9},
+        {
+            "frame": 20,
+            "phase": "lift_out",
+            "status": "ausência (folha fora de cena)",
+            "absence": True,
+            "confirmed_px": 500,
+        },
+    ]
+    events = [{"end": 11}, {"kind": "lift_out", "end": 21}]
+    final = _final_checkpoint(checkpoints, events)
+    assert final["absence"] is True
+    assert final["confirmed_px"] == 500
+    score, comp = score_report({"verdict": final, "checkpoints": checkpoints})
+    assert comp["no_canvas"] == 0.0
+    assert comp["iou_loss"] == 0.0
