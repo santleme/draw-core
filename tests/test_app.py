@@ -383,20 +383,33 @@ def test_gui_backend_compiled_secao_irma_nao_conta(monkeypatch):
     assert app_module._gui_backend_compiled() is False
 
 
-class _StalledFeed:
-    """Fonte que serve N quadros e trava o read() em seguida (stall TCP).
+class _PacedStallFeed:
+    """Fonte ritmada: so entrega o quadro k+1 depois do k consumido.
 
-    release() destrava o read pendurado: o join do LatestFrameCapture
-    nao paga o teto de 2 s.
+    LatestFrameCapture guarda so o pacote mais novo: sem ritmo a bomba
+    publica tudo antes do laco acordar e quadros do meio nunca sao
+    processados — o teste de limpeza passaria sem nunca ter cacheado
+    uma folha. O consumo e medido pelas chamadas de waitKey: cada
+    iteracao do laco chama waitKey uma vez. Esgotados os quadros, o
+    read() trava como um stall TCP; release() destrava para o join da
+    bomba nao pagar o teto de 2 s.
     """
 
     def __init__(self, frames):
         self._frames = list(frames)
+        self._served = 0
+        self.consumed = 0
         self._released = False
 
     def read(self):
-        if self._frames:
-            return True, self._frames.pop(0)
+        while self._served and self.consumed < self._served:
+            if self._released:
+                return False, None
+            time.sleep(0.002)
+        if self._served < len(self._frames):
+            frame = self._frames[self._served]
+            self._served += 1
+            return True, frame
         while not self._released:
             time.sleep(0.01)
         return False, None
@@ -408,10 +421,10 @@ class _StalledFeed:
 def _patch_marker_run(monkeypatch, feed, keys):
     """Sobe run() headless em --markers: janela e teclas por script.
 
-    A ordem das chamadas de waitKey e deterministica: a bomba entrega
-    os quadros na hora (um waitKey por quadro processado) e, com a
-    fonte travada, o laco cai no ramo de stall a cada _FRAME_WAIT_SECONDS
-    consumindo uma tecla por iteracao.
+    A ordem das chamadas de waitKey e deterministica: a bomba so publica
+    o quadro seguinte depois do anterior consumido (um waitKey por
+    quadro) e, com a fonte travada, o laco cai no ramo de stall a cada
+    _FRAME_WAIT_SECONDS consumindo uma tecla por iteracao.
     """
 
     def fake_warp(frame):
@@ -422,13 +435,17 @@ def _patch_marker_run(monkeypatch, feed, keys):
             return warped, {i: (5, 5) for i in config.MARKER_IDS}
         return None, {}
 
+    def wait_key(_ms):
+        feed.consumed += 1
+        return next(key_iter, ord("q"))
+
     monkeypatch.setattr(app_module, "_require_gui_backend", lambda: None)
     monkeypatch.setattr(app_module, "open_capture", lambda *a, **k: feed)
     monkeypatch.setattr(paper_module, "warp_paper", fake_warp)
     monkeypatch.setattr(app_module.cv2, "imshow", lambda *a, **k: None)
     monkeypatch.setattr(app_module.cv2, "destroyAllWindows", lambda: None)
     key_iter = iter(keys)
-    monkeypatch.setattr(app_module.cv2, "waitKey", lambda _ms: next(key_iter, ord("q")))
+    monkeypatch.setattr(app_module.cv2, "waitKey", wait_key)
 
 
 def test_markers_salva_folha_exibida_durante_stall(monkeypatch, tmp_path):
@@ -437,7 +454,7 @@ def test_markers_salva_folha_exibida_durante_stall(monkeypatch, tmp_path):
     Sem o cache, o ramo de espera reportava "nada a salvar" enquanto
     a folha seguia visivel na janela.
     """
-    feed = _StalledFeed([_frame(), _frame()])
+    feed = _PacedStallFeed([_frame(), _frame()])
     _patch_marker_run(monkeypatch, feed, [-1, -1, ord("s"), ord("q")])
 
     app_module.run(source=0, save_dir=str(tmp_path), markers_mode=True)
@@ -456,7 +473,7 @@ def test_markers_stall_apos_quadro_sem_folha_nao_salva(monkeypatch, tmp_path, ca
     gravaria uma imagem que a janela ja nao mostra.
     """
     no_sheet = np.full((120, 160, 3), 255, np.uint8)
-    feed = _StalledFeed([_frame(), _frame(), no_sheet])
+    feed = _PacedStallFeed([_frame(), _frame(), no_sheet])
     _patch_marker_run(monkeypatch, feed, [-1, -1, -1, ord("s"), ord("q")])
 
     app_module.run(source=0, save_dir=str(tmp_path), markers_mode=True)
