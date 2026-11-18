@@ -6,8 +6,10 @@ de modelos do --check e a validacao de argumentos do main().
 """
 
 import sys
+import time
 from pathlib import Path
 
+import cv2
 import numpy as np
 import pytest
 
@@ -379,3 +381,85 @@ def test_gui_backend_compiled_secao_irma_nao_conta(monkeypatch):
     )
     monkeypatch.setattr(app_module.cv2, "getBuildInformation", lambda: info)
     assert app_module._gui_backend_compiled() is False
+
+
+class _StalledFeed:
+    """Fonte que serve N quadros e trava o read() em seguida (stall TCP).
+
+    release() destrava o read pendurado: o join do LatestFrameCapture
+    nao paga o teto de 2 s.
+    """
+
+    def __init__(self, frames):
+        self._frames = list(frames)
+        self._released = False
+
+    def read(self):
+        if self._frames:
+            return True, self._frames.pop(0)
+        while not self._released:
+            time.sleep(0.01)
+        return False, None
+
+    def release(self):
+        self._released = True
+
+
+def _patch_marker_run(monkeypatch, feed, keys):
+    """Sobe run() headless em --markers: janela e teclas por script.
+
+    A ordem das chamadas de waitKey e deterministica: a bomba entrega
+    os quadros na hora (um waitKey por quadro processado) e, com a
+    fonte travada, o laco cai no ramo de stall a cada _FRAME_WAIT_SECONDS
+    consumindo uma tecla por iteracao.
+    """
+
+    def fake_warp(frame):
+        # Quadro com o primeiro pixel preto = folha; qualquer outro
+        # = ausencia (warp falha, como numa mesa sem marcadores).
+        if frame[0, 0, 0] == 0:
+            warped = np.full((60, 40, 3), 200, np.uint8)
+            return warped, {i: (5, 5) for i in config.MARKER_IDS}
+        return None, {}
+
+    monkeypatch.setattr(app_module, "_require_gui_backend", lambda: None)
+    monkeypatch.setattr(app_module, "open_capture", lambda *a, **k: feed)
+    monkeypatch.setattr(paper_module, "warp_paper", fake_warp)
+    monkeypatch.setattr(app_module.cv2, "imshow", lambda *a, **k: None)
+    monkeypatch.setattr(app_module.cv2, "destroyAllWindows", lambda: None)
+    key_iter = iter(keys)
+    monkeypatch.setattr(app_module.cv2, "waitKey", lambda _ms: next(key_iter, ord("q")))
+
+
+def test_markers_salva_folha_exibida_durante_stall(monkeypatch, tmp_path):
+    """'s' no stall com folha em cena salva a ultima folha retificada.
+
+    Sem o cache, o ramo de espera reportava "nada a salvar" enquanto
+    a folha seguia visivel na janela.
+    """
+    feed = _StalledFeed([_frame(), _frame()])
+    _patch_marker_run(monkeypatch, feed, [-1, -1, ord("s"), ord("q")])
+
+    app_module.run(source=0, save_dir=str(tmp_path), markers_mode=True)
+
+    saved = list(tmp_path.glob("canvas_*.png"))
+    assert len(saved) == 1
+    out = cv2.imread(str(saved[0]))
+    assert out is not None and out.shape == (60, 40, 3)
+    assert int(out[0, 0, 0]) == 200
+
+
+def test_markers_stall_apos_quadro_sem_folha_nao_salva(monkeypatch, tmp_path, capsys):
+    """Quadro processado sem folha limpa o cache: 's' no stall nao salva.
+
+    O cache nao pode devolver uma folha que saiu de cena — senao o 's'
+    gravaria uma imagem que a janela ja nao mostra.
+    """
+    no_sheet = np.full((120, 160, 3), 255, np.uint8)
+    feed = _StalledFeed([_frame(), _frame(), no_sheet])
+    _patch_marker_run(monkeypatch, feed, [-1, -1, -1, ord("s"), ord("q")])
+
+    app_module.run(source=0, save_dir=str(tmp_path), markers_mode=True)
+
+    assert list(tmp_path.glob("canvas_*.png")) == []
+    assert "Nada a salvar" in capsys.readouterr().out
