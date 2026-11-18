@@ -7,6 +7,7 @@ parse_tcp_endpoint e a fiação de open_capture/run().
 
 import socket
 import threading
+import time
 
 import cv2
 import numpy as np
@@ -389,3 +390,233 @@ def _reader_of(data):
         return chunk
 
     return read
+
+
+def test_iter_records_tolera_stall_transitorio():
+    """socket.timeout entre bytes: o registro chega mesmo assim."""
+    from draw.protocol import HEADER, MAGIC, VERSION, _iter_records
+
+    payload = _jpeg()
+    data = HEADER.pack(MAGIC, VERSION, 0, 7, 1000, len(payload)) + payload
+    base = _reader_of(data)
+    calls = {"n": 0}
+
+    def read(n):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise socket.timeout("stall")
+        return base(n)
+
+    records = list(_iter_records(read, stall_retries=1))
+    assert [r[0] for r in records] == [7]
+
+
+def test_iter_records_esgota_janelas_de_stall():
+    from draw.protocol import ProtocolError, _iter_records
+
+    def read(n):
+        raise socket.timeout("stall")
+
+    with pytest.raises(ProtocolError, match="emissor parado"):
+        list(_iter_records(read, stall_retries=2))
+
+
+def test_helper_capture_tcp_stall_nao_mata_iterador():
+    """Stall breve entre dois frames: a segunda leitura ainda entrega."""
+    payload = _jpeg()
+    server = socket.socket()
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+
+    def run():
+        conn, _addr = server.accept()
+        with conn:
+            if server_handshake(conn, TOKEN, timeout=2):
+                conn.sendall(pack_record(0, 42_000, payload))
+                time.sleep(0.35)  # stall ~2 janelas de timeout do cliente
+                conn.sendall(pack_record(1, 84_000, payload))
+        server.close()
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    capture = HelperCapture(
+        f"tcp://127.0.0.1:{server.getsockname()[1]}", timeout=0.15, token=TOKEN
+    )
+    try:
+        ok1, _ = capture.read()
+        ok2, frame = capture.read()
+    finally:
+        capture.release()
+        thread.join(5)
+    assert ok1 and ok2 and frame.shape == (48, 64, 3)
+    assert capture.last_frame_id == 1
+
+
+def test_iter_records_sem_stall_budget_propaga_timeout():
+    """stall_retries=0: o tipo original sobe — TimeoutError, nao ProtocolError."""
+    from draw.protocol import _iter_records
+
+    def read(n):
+        raise socket.timeout("stall")
+
+    with pytest.raises(TimeoutError):
+        list(_iter_records(read))
+
+
+def test_helper_capture_stall_windows_zero_falha_no_deadline():
+    """Diagnostico: sem stall retries, quadro alem do timeout nao passa."""
+    payload = _jpeg()
+    server = socket.socket()
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+
+    def run():
+        conn, _addr = server.accept()
+        with conn:
+            if server_handshake(conn, TOKEN, timeout=2):
+                time.sleep(0.35)
+                conn.sendall(pack_record(0, 42_000, payload))
+        server.close()
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    capture = HelperCapture(
+        f"tcp://127.0.0.1:{server.getsockname()[1]}",
+        timeout=0.15,
+        token=TOKEN,
+        stall_windows=0,
+    )
+    started = time.monotonic()
+    ok, _ = capture.read()
+    elapsed = time.monotonic() - started
+    capture.release()
+    thread.join(5)
+    assert not ok and elapsed < 0.5
+
+
+def test_check_helper_source_respeita_deadline(monkeypatch, tmp_path, capsys):
+    """`draw --check` recusa o helper cujo primeiro quadro atrasa.
+
+    Com token de verdade: sem ele o check falhava na autenticacao
+    antes de conectar e o deadline nunca era exercitado. E o timeout
+    so e encurtado por subclasse — functools.partial(timeout=...)
+    seria sobreposto pelo timeout=5.0 explicito do check.
+    """
+    from draw import app as app_module
+
+    class _ShortTimeout(HelperCapture):
+        def __init__(self, source, **kwargs):
+            kwargs["timeout"] = 0.15
+            super().__init__(source, **kwargs)
+
+    payload = _jpeg()
+    server = socket.socket()
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+
+    def run():
+        conn, _addr = server.accept()
+        with conn:
+            if server_handshake(conn, TOKEN, timeout=2):
+                time.sleep(0.35)  # quadro chega alem do deadline do check
+                conn.sendall(pack_record(0, 42_000, payload))
+        server.close()
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    token_file = tmp_path / "helper.token"
+    token_file.write_text(TOKEN)
+    monkeypatch.setattr(app_module, "HelperCapture", _ShortTimeout)
+    started = time.monotonic()
+    rc = app_module._check_helper_source(
+        f"tcp://127.0.0.1:{server.getsockname()[1]}", token_file=str(token_file)
+    )
+    elapsed = time.monotonic() - started
+    thread.join(5)
+    assert rc == 0 and elapsed < 0.5
+
+
+def test_iter_records_preserva_bytes_no_stall_mid_payload():
+    """Timeout no meio do payload: os bytes ja lidos nao se perdem."""
+    from draw.protocol import HEADER, HEADER_SIZE, MAGIC, VERSION, _iter_records
+
+    payload = _jpeg()
+    data = HEADER.pack(MAGIC, VERSION, 0, 9, 2000, len(payload)) + payload
+    base = _reader_of(data)
+    calls = {"n": 0}
+
+    def read(n):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return base(HEADER_SIZE)  # cabecalho inteiro
+        if calls["n"] == 2:
+            return base(len(payload) // 3)  # pedaco do payload
+        if calls["n"] == 3:
+            raise socket.timeout("stall")  # stall dentro do registro
+        return base(n)  # o restante chega no retry
+
+    records = list(_iter_records(read, stall_retries=1))
+    assert len(records) == 1
+    frame_id, _ts, got, _raw = records[0]
+    assert frame_id == 9 and got == payload
+
+
+def test_iter_records_respeita_prazo_do_registro():
+    """Frame pingando byte a byte: o prazo total corta a montagem."""
+    from draw.protocol import ProtocolError, _iter_records
+
+    clock = [0.0]
+
+    def read(n):
+        clock[0] += 1.0
+        return b"x"  # um byte por segundo, para sempre
+
+    with pytest.raises(ProtocolError, match="prazo"):
+        list(_iter_records(read, record_timeout_s=5.0, clock=lambda: clock[0]))
+
+
+def test_iter_records_sem_prazo_nao_limita():
+    """record_timeout_s=None (padrao streaming): so stall/tamanho limitam."""
+    from draw.protocol import HEADER, MAGIC, VERSION, _iter_records
+
+    payload = _jpeg()
+    data = HEADER.pack(MAGIC, VERSION, 0, 1, 100, len(payload)) + payload
+    slow = _reader_of(data)
+
+    def read(n):
+        return slow(min(n, 3))  # dribla 3 bytes por chamada
+
+    records = list(_iter_records(read))
+    assert records[0][2] == payload
+
+
+def test_iter_records_clampa_recv_ao_orcamento_do_prazo():
+    """recv_timeout recebe o orcamento restante — decresce a cada recv.
+
+    A leitura simulada honra o timeout configurado (espera seen[-1]
+    ou menos), entao os valores sao exatos: um orcamento constante
+    ou a janela cheia falhariam a asserção.
+    """
+    from draw.protocol import ProtocolError, _iter_records
+
+    clock = [0.0]
+    seen = []
+
+    def read(n):
+        clock[0] += min(seen[-1], 0.1)  # responde dentro do orcamento
+        return b"x"
+
+    with pytest.raises(ProtocolError, match="prazo"):
+        list(
+            _iter_records(
+                read,
+                stall_retries=10,
+                record_timeout_s=0.4,
+                clock=lambda: clock[0],
+                recv_timeout=seen.append,
+            )
+        )
+    assert seen == pytest.approx([0.4, 0.3, 0.2, 0.1])

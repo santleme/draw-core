@@ -53,6 +53,12 @@ TOKEN_MIN_LEN = 16
 TOKEN_MAX_LEN = 256
 HANDSHAKE_TIMEOUT_S = 5.0
 
+# Janelas de socket vazias (timeout de recv sem nenhum byte) que uma
+# leitura do HelperCapture tolera antes de desistir do registro. Um
+# stall breve não mata o iterador; um emissor morto ainda é
+# declarado morto depois de ~4 janelas de silêncio.
+_STALL_WINDOWS = 3
+
 
 class ProtocolError(RuntimeError):
     """O fluxo violou bridge/PROTOCOL.md (magic, versão ou truncamento)."""
@@ -151,35 +157,103 @@ def pack_record(frame_id, capture_ts_us, payload):
     )
 
 
-def _read_exact(read, size):
+def _read_exact(
+    read,
+    size,
+    stall_retries=0,
+    deadline=None,
+    clock=time.monotonic,
+    recv_timeout=None,
+):
     """Lê exatamente size bytes via read(n) -> bytes.
 
     Retorna None se a fonte acabar limpa antes do primeiro byte.
-    Levanta ProtocolError se acabar no meio.
+    Levanta ProtocolError se acabar no meio — ou depois de
+    `stall_retries` janelas de socket consecutivas sem nenhum byte,
+    ou ao estourar `deadline` (relogio absoluto) com bytes parciais.
+
+    Um socket.timeout não dessincroniza nada: os bytes já consumidos
+    ficaram em `chunks` e o restante continua chegando no próximo
+    recv. O timeout vale como detector de stall, não como fim de
+    fluxo — por isso a tolerância é contada aqui, dentro da leitura,
+    onde o fluxo ainda está íntegro (depois que a exceção sobe, o
+    iterador morre e qualquer retry externo lê lixo).
+
+    `deadline` e o prazo ABSOLUTO do registro: o timeout do socket e
+    por recv, entao um frame que chega pingando byte a byte passava
+    por qualquer janela — so um prazo total limita a montagem. Com
+    `recv_timeout` (ex.: sock.settimeout) o bloqueio do recv e
+    clampeado ao orcamento restante: um frame nunca completa depois
+    do prazo.
     """
     chunks = []
     remaining = size
+    stalls = 0
     while remaining > 0:
-        chunk = read(remaining)
+        if deadline is not None:
+            budget = deadline - clock()
+            if budget <= 0:
+                raise ProtocolError(
+                    f"registro estourou o prazo com {len(chunks)} "
+                    f"chunks lidos (faltaram {remaining} de {size} bytes)"
+                )
+            if recv_timeout is not None:
+                recv_timeout(budget)
+        try:
+            chunk = read(remaining)
+        except (TimeoutError, socket.timeout) as error:
+            stalls += 1
+            if stalls <= stall_retries:
+                continue
+            # Sem orcamento de stall o timeout sobe intacto — quem
+            # pega TimeoutError/OSError (frames_from_socket, record)
+            # continua funcionando. Com orcamento esgotado o desfecho
+            # e de protocolo: o emissor esta parado.
+            if not stall_retries:
+                raise
+            raise ProtocolError(
+                f"emissor parado: {stalls} janelas de socket vazias "
+                f"seguidas (faltaram {remaining} de {size} bytes)"
+            ) from error
         if not chunk:
             if not chunks:
                 return None
             raise ProtocolError(f"fluxo truncado: faltaram {remaining} de {size} bytes")
+        stalls = 0
         chunks.append(chunk)
         remaining -= len(chunk)
     return b"".join(chunks)
 
 
-def _iter_records(read, max_payload=MAX_PAYLOAD_LEN):
+def _iter_records(
+    read,
+    max_payload=MAX_PAYLOAD_LEN,
+    stall_retries=0,
+    record_timeout_s=None,
+    clock=time.monotonic,
+    recv_timeout=None,
+):
     """Itera registros sobre uma função read(n) -> bytes.
 
     Produz (frame_id, capture_ts_us, payload, bruto), onde bruto é o
     registro byte a byte como chegou (o que o gravador escreve).
     payload_len fora de 1..max_payload é erro de protocolo antes de
-    qualquer leitura do payload.
+    qualquer leitura do payload. record_timeout_s, quando dado, e o
+    prazo total para montar UM registro (cabecalho + payload) — o
+    timeout do socket so limita cada recv isolado.
     """
     while True:
-        header = _read_exact(read, HEADER_SIZE)
+        deadline = None
+        if record_timeout_s is not None:
+            deadline = clock() + record_timeout_s
+        header = _read_exact(
+            read,
+            HEADER_SIZE,
+            stall_retries=stall_retries,
+            deadline=deadline,
+            clock=clock,
+            recv_timeout=recv_timeout,
+        )
         if header is None:
             return
         magic, version, _reserved, frame_id, capture_ts_us, payload_len = HEADER.unpack(
@@ -202,7 +276,14 @@ def _iter_records(read, max_payload=MAX_PAYLOAD_LEN):
                 f"payload_len {payload_len} fora de 1..{max_payload} "
                 f"(frame_id {frame_id}); fluxo corrompido ou hostil"
             )
-        payload = _read_exact(read, payload_len)
+        payload = _read_exact(
+            read,
+            payload_len,
+            stall_retries=stall_retries,
+            deadline=deadline,
+            clock=clock,
+            recv_timeout=recv_timeout,
+        )
         if payload is None:
             raise ProtocolError(
                 "fluxo truncado: cabecalho sem payload "
@@ -320,7 +401,16 @@ class HelperCapture:
     acumulador com o relógio real de captura do emissor.
     """
 
-    def __init__(self, source, timeout=5.0, token=None, token_file=None, pace=True):
+    def __init__(
+        self,
+        source,
+        timeout=5.0,
+        token=None,
+        token_file=None,
+        pace=True,
+        stall_windows=_STALL_WINDOWS,
+        record_timeout_s=None,
+    ):
         self.source = str(source).strip()
         self._handle = None
         self._sock = None
@@ -336,6 +426,15 @@ class HelperCapture:
         # não se soma ao intervalo gravado.
         self._pace_origin_us = None
         self._pace_clock_s = None
+        # Janelas de socket vazias toleradas por leitura. O padrao
+        # serve o streaming; o diagnostico (`draw --check`) passa 0
+        # para honrar o deadline do proprio timeout.
+        self._stall_windows = stall_windows
+        # Prazo total de UM registro (cabecalho+payload). O timeout
+        # do socket e por recv: sem isto, um frame pingando byte a
+        # byte passava de qualquer deadline — o diagnostico usa o
+        # mesmo valor do timeout como prazo de quadro.
+        self._record_timeout_s = record_timeout_s
         self.last_frame_id = None
         self.last_capture_ts_ms = None
         # Descarte na fonte: salto de frame_id sobre TODOS os registros
@@ -361,7 +460,19 @@ class HelperCapture:
             except OSError:
                 self.release()
                 return
-            self._iter = _iter_records(self._sock.recv)
+            # recv clampeado ao orcamento do prazo do registro: sem
+            # isto, o recv podia bloquear a janela inteira do socket e
+            # um frame cruzava o deadline sendo aceito. O min() com o
+            # timeout configurado impede afrouxar o detector de stall.
+            base_timeout = self._sock.gettimeout()
+            self._iter = _iter_records(
+                self._sock.recv,
+                stall_retries=self._stall_windows,
+                record_timeout_s=self._record_timeout_s,
+                recv_timeout=lambda s: self._sock.settimeout(
+                    min(base_timeout, s) if base_timeout is not None else s
+                ),
+            )
             self._opened = True
             return
         path = Path(self.source)

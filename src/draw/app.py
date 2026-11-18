@@ -81,6 +81,10 @@ from .tracker import SheetDetectionWorker, _corners_json
 # Sem ele, a morte da fonte e um congelamento silencioso. O waitKey
 # devolve antes se qualquer tecla for apertada.
 _DEAD_NOTICE_MS = 3000
+# Janela curta de espera por quadro novo: longa demais e uma fonte
+# em stall TCP (HelperCapture com stall_windows) congela as teclas
+# de saida dentro de um unico read().
+_FRAME_WAIT_SECONDS = 0.25
 
 # Teto do pool paralelo do OpenCV. Sem teto, o pool abre com as
 # CPUs logicas do host (16 no Ryzen) e vira o terceiro disputante
@@ -349,7 +353,16 @@ def _check_helper_source(source, token_file=None):
     """Abre uma fonte do ajudante (.drawcap/tcp://) e confere um quadro."""
     print(f"PASS: fonte do ajudante informada: {source}.")
     try:
-        capture = HelperCapture(source, timeout=5.0, token_file=token_file)
+        # stall_windows=0 + prazo de registro: o check mede UM quadro
+        # dentro de um deadline total — retentar esticaria a janela,
+        # e so o timeout por recv deixaria um frame pingando passar.
+        capture = HelperCapture(
+            source,
+            timeout=5.0,
+            token_file=token_file,
+            stall_windows=0,
+            record_timeout_s=5.0,
+        )
     except (ProtocolError, OSError) as error:
         print(f"FAIL: {error}")
         return 0
@@ -857,9 +870,41 @@ def run(
 
         last_seq = 0
         last_view = None
+        frame = None
+        # Cache da ultima folha retificada do modo marcadores: sem
+        # pipeline de tinta nao ha mascara confirmada, entao o 's'
+        # durante um stall so tem o que salvar com este fallback.
+        last_marker_warped = None
 
         while True:
-            packet = frame_source.wait_next(last_seq)
+            packet = frame_source.wait_next(last_seq, timeout=_FRAME_WAIT_SECONDS)
+            if packet is None and not frame_source.dead:
+                # Fonte viva sem quadro novo na janela: a leitura pode
+                # estar dentro de um stall TCP prolongado. Garante a
+                # janela (antes do primeiro quadro ela nem existia),
+                # atende as teclas sem realimentar o quadro velho no
+                # pipeline — a ultima vista segue de fundo.
+                cv2.imshow(
+                    "Draw",
+                    view_module.message_view(
+                        last_view,
+                        "Aguardando quadros da fonte",
+                        [
+                            "A leitura esta lenta ou parada.",
+                            "q ou ESC sai; s salva o canvas retido.",
+                        ],
+                    ),
+                )
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord("s"):
+                    # Marcadores nao tem mascara confirmada: o salvavel
+                    # visivel na tela de espera e a folha retificada.
+                    save_canvas_snapshot(last_marker_warped if markers_mode else None)
+                if frame is not None:
+                    handle_capture_key(key, frame)
+                if key in (ord("q"), 27):
+                    break
+                continue
             if packet is None:
                 # A thread de captura declarou a fonte morta (falhas
                 # seguidas de leitura ou excecao no read) e wait_next
@@ -952,6 +997,7 @@ def run(
                     cv2.circle(status, (int(x), int(y)), 8, (0, 255, 0), -1)
             if not sheet_present:
                 if markers_mode:
+                    last_marker_warped = None  # quadro processado sem folha
                     status_text = f"Mostre a folha-modelo ({len(markers)}/4 marcadores)"
                 else:
                     status_text = "Mostre uma folha para a camera"
@@ -999,8 +1045,10 @@ def run(
                 if markers_mode:
                     # A heuristica de tinta do legado nao migrou: no
                     # modo de marcadores o painel mostra a folha
-                    # retificada como esta.
+                    # retificada como esta — e e ela que o 's' salva,
+                    # inclusive num stall (cache retido do ultimo warp).
                     canvas = warped
+                    last_marker_warped = warped
                 elif pipeline.accumulated_canvas is not None:
                     canvas = pipeline.accumulated_canvas
                 else:
