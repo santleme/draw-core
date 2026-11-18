@@ -28,9 +28,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 import cv2
 import numpy as np
@@ -46,6 +48,15 @@ from lab.eval_capture import run_pipeline  # noqa: E402
 _LIVE_READ_RETRIES = 15
 
 
+class LiveSourceExhausted(RuntimeError):
+    """Fonte ao vivo esgotou o orcamento de releituras.
+
+    Distinta de RuntimeError para a finalizacao da corrida gravar a
+    evidencia parcial (session.json + canvas_final) ANTES do erro
+    subir — a CLI ainda sai 2, mas a tinta confirmada nao se perde.
+    """
+
+
 def _write_png(path, image):
     """imwrite checado: False silencioso vira OSError nomeando o destino."""
     if not cv2.imwrite(str(path), image):
@@ -54,10 +65,14 @@ def _write_png(path, image):
 
 def _live_retries(source):
     """Fontes ao vivo toleram leituras falhas transitorias; arquivo
-    (.drawcap, video) termina de verdade no primeiro False."""
+    (.drawcap, video) termina de verdade no primeiro False. `file://`
+    e so outra grafia de caminho local — EOF igualmente real."""
     if isinstance(source, int):
         return _LIVE_READ_RETRIES
-    return 0 if Path(str(source)).is_file() else _LIVE_READ_RETRIES
+    text = str(source)
+    if text.lower().startswith("file://"):
+        text = unquote(urlparse(text).path)
+    return 0 if Path(text).is_file() else _LIVE_READ_RETRIES
 
 
 class _TappedCapture:
@@ -80,7 +95,11 @@ class _TappedCapture:
         self._now = now
         self.last_frame = None
         self.frames_read = 0
-        self._io_seconds = 0.0
+        self._first_return = None
+        self._last_return = None
+        self._src_first_ts = None
+        self._src_last_ts = None
+        self._src_frames = 0
 
     def isOpened(self):
         return self._capture.isOpened()
@@ -92,12 +111,6 @@ class _TappedCapture:
         get = getattr(self._capture, "get", None)
         return get(prop) if get is not None else 0.0
 
-    def _read_once(self):
-        started = self._now()
-        ok, frame = self._capture.read()
-        self._io_seconds += self._now() - started
-        return ok, frame
-
     def read(self):
         if self._max_frames is not None and self.frames_read >= self._max_frames:
             return False, None
@@ -108,25 +121,61 @@ class _TappedCapture:
             failures += 0 if ok else 1
         if not ok:
             if self._live_retries:
-                raise RuntimeError(
+                raise LiveSourceExhausted(
                     f"fonte ao vivo parou de entregar: {failures} leituras "
                     f"falhas seguidas apos {self.frames_read} quadros"
                 )
             return False, None
         self.frames_read += 1
         self.last_frame = frame
+        stamp = self._now()
+        if self._first_return is None:
+            self._first_return = stamp
+        self._last_return = stamp
+        src_ts = getattr(self._capture, "last_capture_ts_ms", None)
+        if src_ts is not None:
+            if self._src_first_ts is None:
+                self._src_first_ts = src_ts
+            self._src_last_ts = src_ts
+            self._src_frames += 1
         return True, frame
 
-    def real_fps(self):
-        """Quadros entregues por segundo de read() — a taxa da fonte.
+    def _read_once(self):
+        ok, frame = self._capture.read()
+        return ok, frame
 
-        O tempo do pipeline entre leituras (inferencia, imwrite) fica
-        fora do denominador; o que se mede e so o que a fonte demora
-        para entregar.
+    def real_fps(self):
+        """Cadencia observada na torneira: quadros/espacamento entre retornos.
+
+        Mede o ritmo com que os quadros cruzam o read(), nao o tempo
+        dentro dele — uma leitura instantanea de backend com buffer
+        nao infla o numero. Quando o pipeline e o gargalo, o numero
+        mostra a cadencia efetiva que a corrida sustentou.
         """
-        if not self.frames_read or self._io_seconds <= 0:
+        if (
+            self._first_return is None
+            or self._last_return is None
+            or self._last_return <= self._first_return
+        ):
             return 0.0
-        return self.frames_read / self._io_seconds
+        return (self.frames_read - 1) / (self._last_return - self._first_return)
+
+    def src_fps(self):
+        """Cadencia do emissor (hvcam, ajudante), quando a fonte a expõe.
+
+        Os carimbos last_capture_ts_ms sao do lado que captura —
+        imunes ao ritmo do pipeline e a buffers. None quando a fonte
+        nao publica o carimbo (VideoCapture comum).
+        """
+        if (
+            self._src_first_ts is None
+            or self._src_last_ts is None
+            or self._src_last_ts <= self._src_first_ts
+        ):
+            return None
+        return (
+            (self._src_frames - 1) * 1000.0 / (self._src_last_ts - self._src_first_ts)
+        )
 
     def release(self):
         return self._capture.release()
@@ -140,9 +189,10 @@ class _DumpEvery:
     A linha de metricas traz presenca de ancora, tinta confirmada,
     passadas, sequencia do detector, miss do rastreador, ultimo
     evento, epoca do acumulador e o fps real medido na entrada.
-    `last_mask` retem a mascara mais recente a CADA quadro — o dump
-    e periodico, mas o Ctrl+C pode cair entre dois e a tinta
-    confirmada depois do ultimo nao pode se perder.
+    `loop` fica retido: a mascara que a finalizacao grava e a VIVA
+    do pipeline (a que estiver publicada na hora do Ctrl+C), nao o
+    retrato do ultimo quadro processado — uma sessao reaberta pode
+    te-la zerado depois do ultimo dump.
     """
 
     def __init__(self, out_dir, tap, every=15, log=print, now=time.monotonic):
@@ -154,10 +204,10 @@ class _DumpEvery:
         self.log = log
         self.now = now
         self.t0 = now()
-        self.last_mask = None
+        self.loop = None
 
     def __call__(self, loop, worker, frame_index):
-        self.last_mask = loop.clean_mask
+        self.loop = loop
         if frame_index % self.every:
             return
         stamp = f"{frame_index:05d}"
@@ -176,6 +226,8 @@ class _DumpEvery:
                 self.out_dir / f"canvas_{stamp}.png",
                 confirmed.astype(np.uint8) * 255,
             )
+        src = self.tap.src_fps()
+        src_text = f" src={src:.1f}" if src is not None else ""
         self.log(
             f"f{frame_index:5d} t={self.now() - self.t0:5.1f}s "
             f"anchor={'sim' if corners is not None else 'NAO'} "
@@ -183,7 +235,7 @@ class _DumpEvery:
             f"det={getattr(loop.detection_worker, 'sequence', None)} "
             f"miss={getattr(loop.tracker, '_frames_since_seen', None)} "
             f"evt={loop.last_tracker_event} "
-            f"epoch={worker.canvas_epoch} fps={self.tap.real_fps():.1f}"
+            f"epoch={worker.canvas_epoch} fps={self.tap.real_fps():.1f}{src_text}"
         )
 
 
@@ -221,6 +273,7 @@ def run(
     log(f"saida em {out_dir}")
     result = None
     interrupted = False
+    failure = None
     try:
         result = run_pipeline(
             tap,
@@ -233,9 +286,18 @@ def run(
         )
     except KeyboardInterrupt:
         interrupted = True
+    except LiveSourceExhausted as error:
+        failure = error
     if result is None:
-        summary = {"status": "interrupted", "frames": tap.frames_read}
-        final_mask = dump.last_mask
+        summary = {
+            "status": "interrupted" if interrupted else "source_failed",
+            "frames": tap.frames_read,
+        }
+        if failure is not None:
+            summary["error"] = str(failure)
+        # A mascara VIVA do pipeline — publicada ou limpa depois do
+        # ultimo quadro fechado — e a verdade do canvas final.
+        final_mask = dump.loop.clean_mask if dump.loop is not None else None
     else:
         summary = {
             key: value
@@ -267,15 +329,22 @@ def run(
     summary["interrupted"] = interrupted
     serialized = json.dumps(summary, ensure_ascii=False, indent=2) + "\n"
     (out_dir / "session.json").write_text(serialized, encoding="utf-8")
+    if failure is not None:
+        raise failure
     return result
+
+
+# Os dumps do desk usam sufixo estritamente numerico (>=5 digitos):
+# scene_settled_42.png do falsify e de outra ferramenta e nao colide.
+_DESK_DUMP_RE = re.compile(r"(scene|canvas)_\d{5,}\.png")
 
 
 def _desk_artifacts(out_dir):
     """Algum arquivo que uma corrida anterior do desk_capture deixou."""
-    return (out_dir / "session.json").exists() or any(
-        path
-        for pattern in ("scene_*.png", "canvas_*.png")
-        for path in out_dir.glob(pattern)
+    return (
+        (out_dir / "session.json").exists()
+        or (out_dir / "canvas_final.png").exists()
+        or any(_DESK_DUMP_RE.fullmatch(path.name) for path in out_dir.iterdir())
     )
 
 

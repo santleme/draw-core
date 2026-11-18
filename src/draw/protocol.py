@@ -53,6 +53,12 @@ TOKEN_MIN_LEN = 16
 TOKEN_MAX_LEN = 256
 HANDSHAKE_TIMEOUT_S = 5.0
 
+# Janelas de socket vazias (timeout de recv sem nenhum byte) que uma
+# leitura do HelperCapture tolera antes de desistir do registro. Um
+# stall breve não mata o iterador; um emissor morto ainda é
+# declarado morto depois de ~4 janelas de silêncio.
+_STALL_WINDOWS = 3
+
 
 class ProtocolError(RuntimeError):
     """O fluxo violou bridge/PROTOCOL.md (magic, versão ou truncamento)."""
@@ -151,26 +157,45 @@ def pack_record(frame_id, capture_ts_us, payload):
     )
 
 
-def _read_exact(read, size):
+def _read_exact(read, size, stall_retries=0):
     """Lê exatamente size bytes via read(n) -> bytes.
 
     Retorna None se a fonte acabar limpa antes do primeiro byte.
-    Levanta ProtocolError se acabar no meio.
+    Levanta ProtocolError se acabar no meio — ou depois de
+    `stall_retries` janelas de socket consecutivas sem nenhum byte.
+
+    Um socket.timeout não dessincroniza nada: os bytes já consumidos
+    ficaram em `chunks` e o restante continua chegando no próximo
+    recv. O timeout vale como detector de stall, não como fim de
+    fluxo — por isso a tolerância é contada aqui, dentro da leitura,
+    onde o fluxo ainda está íntegro (depois que a exceção sobe, o
+    iterador morre e qualquer retry externo lê lixo).
     """
     chunks = []
     remaining = size
+    stalls = 0
     while remaining > 0:
-        chunk = read(remaining)
+        try:
+            chunk = read(remaining)
+        except (TimeoutError, socket.timeout) as error:
+            stalls += 1
+            if stalls > stall_retries:
+                raise ProtocolError(
+                    f"emissor parado: {stalls} janelas de socket vazias "
+                    f"seguidas (faltaram {remaining} de {size} bytes)"
+                ) from error
+            continue
         if not chunk:
             if not chunks:
                 return None
             raise ProtocolError(f"fluxo truncado: faltaram {remaining} de {size} bytes")
+        stalls = 0
         chunks.append(chunk)
         remaining -= len(chunk)
     return b"".join(chunks)
 
 
-def _iter_records(read, max_payload=MAX_PAYLOAD_LEN):
+def _iter_records(read, max_payload=MAX_PAYLOAD_LEN, stall_retries=0):
     """Itera registros sobre uma função read(n) -> bytes.
 
     Produz (frame_id, capture_ts_us, payload, bruto), onde bruto é o
@@ -179,7 +204,7 @@ def _iter_records(read, max_payload=MAX_PAYLOAD_LEN):
     qualquer leitura do payload.
     """
     while True:
-        header = _read_exact(read, HEADER_SIZE)
+        header = _read_exact(read, HEADER_SIZE, stall_retries=stall_retries)
         if header is None:
             return
         magic, version, _reserved, frame_id, capture_ts_us, payload_len = HEADER.unpack(
@@ -202,7 +227,7 @@ def _iter_records(read, max_payload=MAX_PAYLOAD_LEN):
                 f"payload_len {payload_len} fora de 1..{max_payload} "
                 f"(frame_id {frame_id}); fluxo corrompido ou hostil"
             )
-        payload = _read_exact(read, payload_len)
+        payload = _read_exact(read, payload_len, stall_retries=stall_retries)
         if payload is None:
             raise ProtocolError(
                 "fluxo truncado: cabecalho sem payload "
@@ -361,7 +386,7 @@ class HelperCapture:
             except OSError:
                 self.release()
                 return
-            self._iter = _iter_records(self._sock.recv)
+            self._iter = _iter_records(self._sock.recv, stall_retries=_STALL_WINDOWS)
             self._opened = True
             return
         path = Path(self.source)

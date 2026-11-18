@@ -7,6 +7,7 @@ parse_tcp_endpoint e a fiação de open_capture/run().
 
 import socket
 import threading
+import time
 
 import cv2
 import numpy as np
@@ -389,3 +390,64 @@ def _reader_of(data):
         return chunk
 
     return read
+
+
+def test_iter_records_tolera_stall_transitorio():
+    """socket.timeout entre bytes: o registro chega mesmo assim."""
+    from draw.protocol import HEADER, MAGIC, VERSION, _iter_records
+
+    payload = _jpeg()
+    data = HEADER.pack(MAGIC, VERSION, 0, 7, 1000, len(payload)) + payload
+    base = _reader_of(data)
+    calls = {"n": 0}
+
+    def read(n):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise socket.timeout("stall")
+        return base(n)
+
+    records = list(_iter_records(read, stall_retries=1))
+    assert [r[0] for r in records] == [7]
+
+
+def test_iter_records_esgota_janelas_de_stall():
+    from draw.protocol import ProtocolError, _iter_records
+
+    def read(n):
+        raise socket.timeout("stall")
+
+    with pytest.raises(ProtocolError, match="emissor parado"):
+        list(_iter_records(read, stall_retries=2))
+
+
+def test_helper_capture_tcp_stall_nao_mata_iterador():
+    """Stall breve entre dois frames: a segunda leitura ainda entrega."""
+    payload = _jpeg()
+    server = socket.socket()
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+
+    def run():
+        conn, _addr = server.accept()
+        with conn:
+            if server_handshake(conn, TOKEN, timeout=2):
+                conn.sendall(pack_record(0, 42_000, payload))
+                time.sleep(0.35)  # stall ~2 janelas de timeout do cliente
+                conn.sendall(pack_record(1, 84_000, payload))
+        server.close()
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    capture = HelperCapture(
+        f"tcp://127.0.0.1:{server.getsockname()[1]}", timeout=0.15, token=TOKEN
+    )
+    try:
+        ok1, _ = capture.read()
+        ok2, frame = capture.read()
+    finally:
+        capture.release()
+        thread.join(5)
+    assert ok1 and ok2 and frame.shape == (48, 64, 3)
+    assert capture.last_frame_id == 1

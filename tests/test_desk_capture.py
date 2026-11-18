@@ -108,9 +108,9 @@ def test_tap_recupera_falha_transitoria_em_fonte_viva():
         ok, frame = tap.read()
         assert ok and frame is f  # False interno -> retentado -> quadro
     assert tap.frames_read == 3
-    # Roteiro esgotado = fonte morta: esgota o orcamento e sobe erro,
-    # nunca um fim de fluxo "ok".
-    with pytest.raises(RuntimeError, match="fonte ao vivo"):
+    # Roteiro esgotado = fonte morta: esgota o orcamento e sobe erro
+    # distinto — nunca um fim de fluxo "ok".
+    with pytest.raises(dc.LiveSourceExhausted, match="fonte ao vivo"):
         tap.read()
 
 
@@ -125,26 +125,62 @@ def test_tap_arquivo_nao_retenta_eof():
     assert cap.reads == 2
 
 
-def test_real_fps_medio_so_tempo_da_fonte():
-    """O denominador e so o tempo dentro de read() — pipeline nao conta."""
+def test_real_fps_medio_cadencia_entre_chegadas():
+    """fps = quadros/espacamento entre retornos — a cadencia observada."""
     clock = [100.0]
 
-    class _SlowRead:
+    class _BufferedRead:
+        """Read instantaneo (backend bufferizado): tempo de read ~0."""
+
         def isOpened(self):
             return True
 
         def read(self):
-            clock[0] += 0.05  # 20 fps de entrega
             return True, np.zeros((4, 4, 3), np.uint8)
 
         def release(self):
             pass
 
-    tap = dc._TappedCapture(_SlowRead(), now=lambda: clock[0])
+    tap = dc._TappedCapture(_BufferedRead(), now=lambda: clock[0])
     for _ in range(4):
         tap.read()
-        clock[0] += 1.0  # trabalho do pipeline entre as leituras
-    assert tap.real_fps() == pytest.approx(20.0)
+        clock[0] += 0.5  # pipeline lenta entre as chegadas
+    # Retornos em 100.0/100.5/101.0/101.5: 3 gaps em 1.5 s = 2 fps —
+    # a cadencia efetiva, nao um "read instantaneo" inflado.
+    assert tap.real_fps() == pytest.approx(2.0)
+
+
+def test_src_fps_usa_carimbos_do_emissor():
+    """hvcam/ajudante: a cadencia vem de last_capture_ts_ms, nao do relogio."""
+    clock = [100.0]
+
+    class _Stamped:
+        def __init__(self):
+            self.last_capture_ts_ms = None
+            self._ts = 0
+
+        def isOpened(self):
+            return True
+
+        def read(self):
+            self._ts += 33  # emissor a ~30 fps
+            self.last_capture_ts_ms = self._ts
+            return True, np.zeros((4, 4, 3), np.uint8)
+
+        def release(self):
+            pass
+
+    tap = dc._TappedCapture(_Stamped(), now=lambda: clock[0])
+    for _ in range(4):
+        tap.read()
+        clock[0] += 1.0  # pipeline lenta nao afeta a cadencia do emissor
+    assert tap.src_fps() == pytest.approx(30.3, rel=0.01)
+
+
+def test_src_fps_none_sem_carimbo():
+    tap = dc._TappedCapture(_Frames(frames=2))
+    tap.read()
+    assert tap.src_fps() is None
 
 
 class _FakeLoop:
@@ -228,15 +264,14 @@ def test_dump_falha_de_imwrite_vira_oserror(tmp_path, monkeypatch):
         dump(loop, worker, 0)
 
 
-def test_dump_retem_mascara_mais_recente(tmp_path):
-    """last_mask acompanha cada quadro, inclusive transicao para None."""
+def test_dump_retem_loop_vivo_para_finalizacao(tmp_path):
+    """dump.loop expoe a mascara VIVA: reset depois do dump e honrado."""
     mask = np.ones((8, 8), np.uint8)
     dump, loop, worker, _ = _dump_setup(tmp_path, mask, None, every=99)
-    dump(loop, worker, 1)  # quadro fora do ciclo: mascara ainda assim retida
-    assert dump.last_mask is mask
-    loop.clean_mask = None
-    dump(loop, worker, 2)
-    assert dump.last_mask is None
+    dump(loop, worker, 1)
+    assert dump.loop is loop
+    loop.clean_mask = None  # pipeline limpou depois do dump
+    assert dump.loop.clean_mask is None
 
 
 def test_run_recusa_diretorio_com_artefatos(tmp_path):
@@ -255,6 +290,28 @@ def test_run_recusa_diretorio_com_artefatos(tmp_path):
             log=lambda *_a: None,
         )
     assert (out / "scene_00000.png").exists()  # evidencia intocada
+
+
+def test_artefatos_ignoram_imagens_de_outras_ferramentas(tmp_path):
+    """Checkpoints do falsify (scene_<fase>_<n>.png) nao sao dumps do desk."""
+    out = tmp_path / "desk"
+    out.mkdir()
+    (out / "scene_settled_42.png").write_bytes(b"")
+    (out / "canvas_phase1.png").write_bytes(b"")
+    assert not dc._desk_artifacts(out)
+    (out / "scene_00042.png").write_bytes(b"")
+    assert dc._desk_artifacts(out)
+
+
+def test_live_retries_file_url_e_arquivo(tmp_path):
+    """file:// e so outra grafia de caminho: EOF real, sem retry."""
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"x")
+    assert dc._live_retries(str(video)) == 0
+    assert dc._live_retries(f"file://{video}") == 0
+    assert dc._live_retries("tcp://10.0.0.1") == dc._LIVE_READ_RETRIES
+    assert dc._live_retries("hvcam://") == dc._LIVE_READ_RETRIES
+    assert dc._live_retries(0) == dc._LIVE_READ_RETRIES
 
 
 class _SheetCapture(_Frames):
@@ -365,8 +422,36 @@ def test_run_interrompida_grava_sessao_parcial(tmp_path, monkeypatch):
     assert not (tmp_path / "desk" / "canvas_final.png").exists()
 
 
-def test_run_interrompida_salva_canvas_mais_recente(tmp_path, monkeypatch):
-    """Ctrl+C depois de tinta confirmada entre dumps: canvas_final sai."""
+class _InterruptAfter:
+    """Fonte que interrompe no quadro N; traco B entra apos change_at."""
+
+    def __init__(self, frames, change_at=None):
+        self._frames = frames
+        self._change_at = change_at
+        self._index = 0
+
+    def isOpened(self):
+        return True
+
+    def get(self, prop):
+        return 10.0
+
+    def read(self):
+        if self._index >= self._frames:
+            raise KeyboardInterrupt
+        self._index += 1
+        frame = np.zeros((240, 320, 3), np.uint8)
+        frame[10:150, 20:200] = 220
+        frame[60:80, 60:160] = 20  # traco A
+        if self._change_at is not None and self._index > self._change_at:
+            frame[100:120, 100:180] = 20  # traco B, depois do ultimo dump
+        return True, frame
+
+    def release(self):
+        pass
+
+
+def _stub_detector(monkeypatch, tmp_path):
     onnx_path = onnx_fixtures.page_clean_model(
         tmp_path / "pc.onnx", patch=256, dynamic_batch=True
     )
@@ -379,34 +464,14 @@ def test_run_interrompida_salva_canvas_mais_recente(tmp_path, monkeypatch):
         "detect_sheet_with_confidence",
         lambda frame: (corners.copy(), "paper"),
     )
+    return onnx_path
 
-    class _InterruptAfter:
-        def __init__(self, frames):
-            self._frames = frames
-            self._index = 0
 
-        def isOpened(self):
-            return True
-
-        def get(self, prop):
-            return 10.0
-
-        def read(self):
-            if self._index >= self._frames:
-                raise KeyboardInterrupt
-            self._index += 1
-            frame = np.zeros((240, 320, 3), np.uint8)
-            frame[10:150, 20:200] = 220
-            frame[60:80, 60:160] = 20
-            return True, frame
-
-        def release(self):
-            pass
-
-    # 40 quadros a 10 fps com a ultima varredura em 30: a tinta
-    # confirmada depois do ultimo dump so sobrevive via last_mask.
+def test_run_interrompida_salva_canvas_mais_recente(tmp_path, monkeypatch):
+    """Ctrl+C com tinta confirmada depois do ultimo dump: entra no final."""
+    onnx_path = _stub_detector(monkeypatch, tmp_path)
     result = dc.run(
-        _InterruptAfter(40),
+        _InterruptAfter(45, change_at=31),
         out_dir=tmp_path / "desk",
         every=15,
         fps=10,
@@ -416,14 +481,71 @@ def test_run_interrompida_salva_canvas_mais_recente(tmp_path, monkeypatch):
         log=lambda *_a: None,
     )
     assert result is None
-    canvas = cv2.imread(
-        str(tmp_path / "desk" / "canvas_final.png"), cv2.IMREAD_GRAYSCALE
-    )
+    out = tmp_path / "desk"
+    canvas = cv2.imread(str(out / "canvas_final.png"), cv2.IMREAD_GRAYSCALE)
     assert canvas is not None and (canvas == 255).any()
-    session = json.loads(
-        (tmp_path / "desk" / "session.json").read_text(encoding="utf-8")
-    )
+    session = json.loads((out / "session.json").read_text(encoding="utf-8"))
     assert session["interrupted"] is True and session["canvas_final"] is True
+
+
+def test_run_fonte_morta_grava_evidencia_e_sobe_erro(tmp_path, monkeypatch):
+    """Retries esgotados: session.json + canvas_final saem antes do erro."""
+    onnx_path = _stub_detector(monkeypatch, tmp_path)
+    frame = np.zeros((240, 320, 3), np.uint8)
+    frame[10:150, 20:200] = 220
+    frame[60:80, 60:160] = 20
+    tap_script = [(True, frame)] * 45  # depois: (False, None) para sempre
+    out = tmp_path / "desk"
+    with pytest.raises(dc.LiveSourceExhausted):
+        dc.run(
+            _Scripted(tap_script),
+            out_dir=out,
+            every=15,
+            fps=10,
+            live_retries=3,
+            page_clean_model=str(onnx_path),
+            hand_model="__none__",
+            verify=None,
+            log=lambda *_a: None,
+        )
+    session = json.loads((out / "session.json").read_text(encoding="utf-8"))
+    assert session["status"] == "source_failed"
+    assert session["interrupted"] is False and "fonte ao vivo" in session["error"]
+    assert session["frames"] == 45
+    canvas = cv2.imread(str(out / "canvas_final.png"), cv2.IMREAD_GRAYSCALE)
+    assert canvas is not None and (canvas == 255).any()
+
+
+def test_finalizacao_usa_mascara_viva_do_loop(tmp_path, monkeypatch):
+    """Ctrl+C depois de publicacao nova ou reset: o loop vivo decide."""
+
+    def fake_pipeline(mask_after):
+        def _run(_tap, *, on_frame, **_kw):
+            loop = _FakeLoop(np.zeros((8, 8), np.uint8))
+            worker = _FakeWorker(None)
+            for i in range(3):
+                _tap.read()
+                on_frame(loop, worker, i)
+            loop.clean_mask = mask_after  # publica/reseta apos o ultimo on_frame
+            raise KeyboardInterrupt
+
+        return _run
+
+    mask_b = np.zeros((8, 8), np.uint8)
+    mask_b[5:] = 1
+    monkeypatch.setattr(dc, "run_pipeline", fake_pipeline(mask_b))
+    out = tmp_path / "pub"
+    assert dc.run(_Frames(3), out_dir=out, verify=None, log=lambda *_a: None) is None
+    canvas = cv2.imread(str(out / "canvas_final.png"), cv2.IMREAD_GRAYSCALE)
+    assert canvas is not None
+    assert np.count_nonzero(canvas == 255) == 24  # mask_b, nao a vazia
+
+    monkeypatch.setattr(dc, "run_pipeline", fake_pipeline(None))
+    out2 = tmp_path / "reset"
+    assert dc.run(_Frames(3), out_dir=out2, verify=None, log=lambda *_a: None) is None
+    assert not (out2 / "canvas_final.png").exists()  # reset honrado
+    session = json.loads((out2 / "session.json").read_text(encoding="utf-8"))
+    assert session["canvas_final"] is False
 
 
 def test_main_every_invalido_sai_2():
