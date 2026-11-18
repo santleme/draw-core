@@ -101,7 +101,7 @@ and doc-lint tests stay in legacy.
 | File | Decision | Why |
 |---|---|---|
 | `diag_live*.py` (8) | archive in legacy | one-off scripts with hardcoded `~/draw` paths; superseded by replay lab |
-| `diag_live_desk.py` | keep idea, port later to `lab/desk_capture.py` | headless real-desk driver with flag support; needs path cleanup |
+| `diag_live_desk.py` | ported to `lab/desk_capture.py` | headless real-desk driver; `--source`/`--out`/`--fps` flags replace the hardcoded paths |
 | `diag_quickdraw_*` | archive in legacy | depends on external `~/draw-lab/ink-data/quickdraw` corpus |
 | `perf_sampler.py`, `summarize_perf.py` | migrate to `lab/perf/` (late) | per-thread CPU profiling is required before any C++ decision |
 | `install-v6-swap.py`, `prove-v6-on-desk.py` | archive | one-time swap with hardcoded paths; result is recorded in the manifest |
