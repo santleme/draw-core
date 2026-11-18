@@ -451,3 +451,78 @@ def test_helper_capture_tcp_stall_nao_mata_iterador():
         thread.join(5)
     assert ok1 and ok2 and frame.shape == (48, 64, 3)
     assert capture.last_frame_id == 1
+
+
+def test_iter_records_sem_stall_budget_propaga_timeout():
+    """stall_retries=0: o tipo original sobe — TimeoutError, nao ProtocolError."""
+    from draw.protocol import _iter_records
+
+    def read(n):
+        raise socket.timeout("stall")
+
+    with pytest.raises(TimeoutError):
+        list(_iter_records(read))
+
+
+def test_helper_capture_stall_windows_zero_falha_no_deadline():
+    """Diagnostico: sem stall retries, quadro alem do timeout nao passa."""
+    payload = _jpeg()
+    server = socket.socket()
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+
+    def run():
+        conn, _addr = server.accept()
+        with conn:
+            if server_handshake(conn, TOKEN, timeout=2):
+                time.sleep(0.35)
+                conn.sendall(pack_record(0, 42_000, payload))
+        server.close()
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    capture = HelperCapture(
+        f"tcp://127.0.0.1:{server.getsockname()[1]}",
+        timeout=0.15,
+        token=TOKEN,
+        stall_windows=0,
+    )
+    started = time.monotonic()
+    ok, _ = capture.read()
+    elapsed = time.monotonic() - started
+    capture.release()
+    thread.join(5)
+    assert not ok and elapsed < 0.5
+
+
+def test_check_helper_source_respeita_deadline(monkeypatch, capsys):
+    """`draw --check` recusa o helper cujo primeiro quadro atrasa."""
+    import functools
+
+    from draw import app as app_module
+
+    payload = _jpeg()
+    server = socket.socket()
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+
+    def run():
+        conn, _addr = server.accept()
+        with conn:
+            if server_handshake(conn, TOKEN, timeout=2):
+                time.sleep(0.35)
+                conn.sendall(pack_record(0, 42_000, payload))
+        server.close()
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    monkeypatch.setattr(
+        app_module, "HelperCapture", functools.partial(HelperCapture, timeout=0.15)
+    )
+    started = time.monotonic()
+    rc = app_module._check_helper_source(f"tcp://127.0.0.1:{server.getsockname()[1]}")
+    elapsed = time.monotonic() - started
+    thread.join(5)
+    assert rc == 0 and elapsed < 0.5

@@ -179,12 +179,18 @@ def _read_exact(read, size, stall_retries=0):
             chunk = read(remaining)
         except (TimeoutError, socket.timeout) as error:
             stalls += 1
-            if stalls > stall_retries:
-                raise ProtocolError(
-                    f"emissor parado: {stalls} janelas de socket vazias "
-                    f"seguidas (faltaram {remaining} de {size} bytes)"
-                ) from error
-            continue
+            if stalls <= stall_retries:
+                continue
+            # Sem orcamento de stall o timeout sobe intacto — quem
+            # pega TimeoutError/OSError (frames_from_socket, record)
+            # continua funcionando. Com orcamento esgotado o desfecho
+            # e de protocolo: o emissor esta parado.
+            if not stall_retries:
+                raise
+            raise ProtocolError(
+                f"emissor parado: {stalls} janelas de socket vazias "
+                f"seguidas (faltaram {remaining} de {size} bytes)"
+            ) from error
         if not chunk:
             if not chunks:
                 return None
@@ -345,7 +351,15 @@ class HelperCapture:
     acumulador com o relógio real de captura do emissor.
     """
 
-    def __init__(self, source, timeout=5.0, token=None, token_file=None, pace=True):
+    def __init__(
+        self,
+        source,
+        timeout=5.0,
+        token=None,
+        token_file=None,
+        pace=True,
+        stall_windows=_STALL_WINDOWS,
+    ):
         self.source = str(source).strip()
         self._handle = None
         self._sock = None
@@ -361,6 +375,10 @@ class HelperCapture:
         # não se soma ao intervalo gravado.
         self._pace_origin_us = None
         self._pace_clock_s = None
+        # Janelas de socket vazias toleradas por leitura. O padrao
+        # serve o streaming; o diagnostico (`draw --check`) passa 0
+        # para honrar o deadline do proprio timeout.
+        self._stall_windows = stall_windows
         self.last_frame_id = None
         self.last_capture_ts_ms = None
         # Descarte na fonte: salto de frame_id sobre TODOS os registros
@@ -386,7 +404,9 @@ class HelperCapture:
             except OSError:
                 self.release()
                 return
-            self._iter = _iter_records(self._sock.recv, stall_retries=_STALL_WINDOWS)
+            self._iter = _iter_records(
+                self._sock.recv, stall_retries=self._stall_windows
+            )
             self._opened = True
             return
         path = Path(self.source)

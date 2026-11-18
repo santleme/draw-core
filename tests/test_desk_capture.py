@@ -177,6 +177,37 @@ def test_src_fps_usa_carimbos_do_emissor():
     assert tap.src_fps() == pytest.approx(30.3, rel=0.01)
 
 
+def test_src_fps_conta_quadros_descartados():
+    """Salto de seq do emissor nao derruba a taxa: emitidos = lidos + drop."""
+
+    class _StampedDropped:
+        def __init__(self):
+            self.last_capture_ts_ms = None
+            self.source_dropped = 0
+            self._ts = 0
+            self._n = 0
+
+        def isOpened(self):
+            return True
+
+        def read(self):
+            self._n += 1
+            if self._n == 3:
+                self.source_dropped += 2  # dois frames se perderam no caminho
+            self._ts += 33
+            self.last_capture_ts_ms = self._ts
+            return True, np.zeros((4, 4, 3), np.uint8)
+
+        def release(self):
+            pass
+
+    tap = dc._TappedCapture(_StampedDropped())
+    for _ in range(4):
+        tap.read()
+    # Emitidos 6 em 99 ms ~= 50.5 fps — nao os 30.3 dos entregues.
+    assert tap.src_fps() == pytest.approx(50.5, rel=0.01)
+
+
 def test_src_fps_none_sem_carimbo():
     tap = dc._TappedCapture(_Frames(frames=2))
     tap.read()
@@ -300,6 +331,14 @@ def test_artefatos_ignoram_imagens_de_outras_ferramentas(tmp_path):
     (out / "canvas_phase1.png").write_bytes(b"")
     assert not dc._desk_artifacts(out)
     (out / "scene_00042.png").write_bytes(b"")
+    assert dc._desk_artifacts(out)
+
+
+def test_artefatos_detectam_symlink_pendurado(tmp_path):
+    """Link pendurado tem exists()==False — a guarda confere o NOME."""
+    out = tmp_path / "desk"
+    out.mkdir()
+    (out / "canvas_final.png").symlink_to(tmp_path / "fora.png")
     assert dc._desk_artifacts(out)
 
 
@@ -546,6 +585,87 @@ def test_finalizacao_usa_mascara_viva_do_loop(tmp_path, monkeypatch):
     assert not (out2 / "canvas_final.png").exists()  # reset honrado
     session = json.loads((out2 / "session.json").read_text(encoding="utf-8"))
     assert session["canvas_final"] is False
+
+
+class _SheetMove:
+    """Folha some por `absent` quadros e volta em outro lugar (reset)."""
+
+    def __init__(self, frames, absent):
+        self._frames = frames
+        self._absent = absent
+        self._index = 0
+
+    def isOpened(self):
+        return True
+
+    def get(self, prop):
+        return 10.0
+
+    def read(self):
+        if self._index >= self._frames:
+            raise KeyboardInterrupt
+        self._index += 1
+        frame = np.zeros((240, 320, 3), np.uint8)
+        if not (self._absent[0] <= self._index <= self._absent[1]):
+            if self._index > self._absent[1]:
+                frame[60:200, 110:300] = 220  # folha B, deslocada
+            else:
+                frame[10:150, 20:200] = 220  # folha A
+                frame[60:80, 60:160] = 20
+        return True, frame
+
+    def release(self):
+        pass
+
+
+def _sheet_bbox_detector(frame):
+    """Detecta a folha pelo bbox dos pixels claros do proprio frame."""
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    ys, xs = np.where(gray > 150)
+    if len(ys) < 500:
+        return None, None
+    y0, y1, x0, x1 = ys.min(), ys.max(), xs.min(), xs.max()
+    corners = np.array([[x0, y0], [x1, y0], [x1, y1], [x0, y1]], np.float32)
+    return corners, "paper"
+
+
+def test_run_interrompida_reflete_mascara_viva(tmp_path, monkeypatch):
+    """Canvas final sai da mascara VIVA do loop, nao de retrato do dump.
+
+    A mascara satura na pagina (o fixture confirma quase tudo), entao
+    pixel-a-pixel nao separa "tinta tardia" — a prova de frescor e o
+    teste com loop stubado abaixo. Aqui o e2e cobre o caminho real:
+    drop + reabertura com identidade preservada restauram a mascara,
+    e a finalizacao grava exatamente a mascara viva do loop.
+    """
+    onnx_path = onnx_fixtures.page_clean_model(
+        tmp_path / "pc.onnx", patch=256, dynamic_batch=True
+    )
+    monkeypatch.setattr(ec, "_DEFAULT_SHEET_MODEL", tmp_path / "missing.onnx")
+    from draw import paper as paper_module
+
+    monkeypatch.setattr(
+        paper_module, "detect_sheet_with_confidence", _sheet_bbox_detector
+    )
+    out = tmp_path / "desk"
+    result = dc.run(
+        _SheetMove(58, absent=(31, 50)),
+        out_dir=out,
+        every=15,
+        fps=10,
+        page_clean_model=str(onnx_path),
+        hand_model="__none__",
+        verify=None,
+        log=lambda *_a: None,
+    )
+    assert result is None
+    # Reabertura com identidade preservada: o final sai da mascara
+    # viva do loop (o estado real do pipeline na hora do Ctrl+C,
+    # seja ela restaurada ou zerada pela geracao nova).
+    canvas = cv2.imread(str(out / "canvas_final.png"), cv2.IMREAD_GRAYSCALE)
+    assert canvas is not None
+    session = json.loads((out / "session.json").read_text(encoding="utf-8"))
+    assert session["interrupted"] is True and session["canvas_final"] is True
 
 
 def test_main_every_invalido_sai_2():

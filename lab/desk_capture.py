@@ -100,6 +100,7 @@ class _TappedCapture:
         self._src_first_ts = None
         self._src_last_ts = None
         self._src_frames = 0
+        self._src_dropped = 0
 
     def isOpened(self):
         return self._capture.isOpened()
@@ -138,6 +139,10 @@ class _TappedCapture:
                 self._src_first_ts = src_ts
             self._src_last_ts = src_ts
             self._src_frames += 1
+            # Quadros emitidos = entregues + saltos de seq que a fonte
+            # contabilizou — sem isto, frames perdidos no caminho
+            # derrubam a taxa medida mesmo com a camera a pleno.
+            self._src_dropped = getattr(self._capture, "source_dropped", 0)
         return True, frame
 
     def _read_once(self):
@@ -174,7 +179,9 @@ class _TappedCapture:
         ):
             return None
         return (
-            (self._src_frames - 1) * 1000.0 / (self._src_last_ts - self._src_first_ts)
+            (self._src_frames + self._src_dropped - 1)
+            * 1000.0
+            / (self._src_last_ts - self._src_first_ts)
         )
 
     def release(self):
@@ -340,11 +347,17 @@ _DESK_DUMP_RE = re.compile(r"(scene|canvas)_\d{5,}\.png")
 
 
 def _desk_artifacts(out_dir):
-    """Algum arquivo que uma corrida anterior do desk_capture deixou."""
+    """Algum arquivo que uma corrida anterior do desk_capture deixou.
+
+    Confere NOMES via iterdir, nao exists(): um symlink pendurado
+    chamado canvas_final.png tem exists()==False e, sem a guarda,
+    redirecionaria a escrita do canvas final para fora do --out.
+    """
+    names = {path.name for path in out_dir.iterdir()}
     return (
-        (out_dir / "session.json").exists()
-        or (out_dir / "canvas_final.png").exists()
-        or any(_DESK_DUMP_RE.fullmatch(path.name) for path in out_dir.iterdir())
+        "session.json" in names
+        or "canvas_final.png" in names
+        or any(_DESK_DUMP_RE.fullmatch(name) for name in names)
     )
 
 
