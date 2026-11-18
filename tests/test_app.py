@@ -399,6 +399,7 @@ class _PacedStallFeed:
         self._frames = list(frames)
         self._served = 0
         self.consumed = 0
+        self.stalled = False
         self._released = False
 
     def read(self):
@@ -410,6 +411,10 @@ class _PacedStallFeed:
             frame = self._frames[self._served]
             self._served += 1
             return True, frame
+        # O while de ritmo garante: aqui todos os quadros ja foram
+        # servidos E consumidos — todo waitKey dali em diante e do
+        # ramo de stall.
+        self.stalled = True
         while not self._released:
             time.sleep(0.01)
         return False, None
@@ -437,6 +442,12 @@ def _patch_marker_run(monkeypatch, feed, keys):
 
     def wait_key(_ms):
         feed.consumed += 1
+        if not feed.stalled:
+            # Quadro ainda por servir/consumir: nunca gasta tecla do
+            # script — 's' e 'q' so caem no ramo de stall, senao um
+            # timeout esporio antes do ultimo quadro deslocava o 's'
+            # para o save normal e o teste passava sem cobrir o stall.
+            return -1
         return next(key_iter, ord("q"))
 
     monkeypatch.setattr(app_module, "_require_gui_backend", lambda: None)
@@ -455,7 +466,7 @@ def test_markers_salva_folha_exibida_durante_stall(monkeypatch, tmp_path):
     a folha seguia visivel na janela.
     """
     feed = _PacedStallFeed([_frame(), _frame()])
-    _patch_marker_run(monkeypatch, feed, [-1, -1, ord("s"), ord("q")])
+    _patch_marker_run(monkeypatch, feed, [ord("s"), ord("q")])
 
     app_module.run(source=0, save_dir=str(tmp_path), markers_mode=True)
 
@@ -474,7 +485,7 @@ def test_markers_stall_apos_quadro_sem_folha_nao_salva(monkeypatch, tmp_path, ca
     """
     no_sheet = np.full((120, 160, 3), 255, np.uint8)
     feed = _PacedStallFeed([_frame(), _frame(), no_sheet])
-    _patch_marker_run(monkeypatch, feed, [-1, -1, -1, ord("s"), ord("q")])
+    _patch_marker_run(monkeypatch, feed, [ord("s"), ord("q")])
 
     app_module.run(source=0, save_dir=str(tmp_path), markers_mode=True)
 
