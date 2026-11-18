@@ -16,7 +16,17 @@
       "approved_by": "ciclo selflearn round-v1 (kernel Kaggle guzzbr/draw-selflearn-round-1, GPU, 2026-11-18, autorizada pelo autor): UniMatch U-Net 256px treinada no corpus round-v1 (school_notebooks train+val warps GT papel, mascaras de traco humanas, 1380 rotuladas + 314 nao-rotuladas). Julgada no holdout externo selado (school_notebooks test, 6 sessoes x 6 paginas, label_source=human_from_scratch): IoU medio 0,8558 e pior sessao 0,8441 contra 0,6580/0,6371 do incumbente v6 - PROMOTE nos dois criterios do judge_gate. Instalada no slot padrao por decisao do autor em 2026-11-18 (swap v6 -> round-v1-gpu). A v6 (613e250f) esta preservada em page_clean_unet.onnx.v6-613e250f.bak e o MANIFEST anterior em MANIFEST.json.pre-round-v1.bak; reversao = restaurar os dois arquivos.",
       "bytes": 1955856,
       "date": "2026-11-18",
-      "sha256": "3c9962849289ab5e0abc11e97488200eb8792106b0473a4f5a22bb373ea707c0"
+      "sha256": "3c9962849289ab5e0abc11e97488200eb8792106b0473a4f5a22bb373ea707c0",
+      "runtime_threshold": 0.79,
+      "calibration": {
+        "date": "2026-11-18",
+        "iou": 0.8724,
+        "thin_stroke_recall": 0.9125,
+        "empty_desk_fp_rate": 0.019164,
+        "n_pages": 30,
+        "n_empty_desk_frames": 15,
+        "chosen": "manual_pick_iou_peak — gate 5e-4 inatingivel em paginas em branco (min fp 1.3% em t=0.85)"
+      }
     }
   },
   "notes": "Integrity (sha256 and byte size) is verified at load. Model binaries are not stored in git; they are distributed via GitHub Release.",

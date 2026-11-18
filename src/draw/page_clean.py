@@ -55,6 +55,10 @@ _PATCH = 256
 DEFAULT_MODEL_PATH = (
     Path(__file__).resolve().parents[2] / "models" / "page_clean_unet.onnx"
 )
+# Fallback do limiar de tinta: vale quando o manifesto do modelo nao
+# traz ``runtime_threshold`` (calibracao ainda nao gravada, verify=None
+# ou manifesto antigo). O limiar vigente mora no manifesto, vinculado
+# ao sha256 do binario — ver _resolve_threshold.
 DEFAULT_THRESHOLD = 0.7
 # Teto combinado de pools (medido na mesa do Lucas, 2026-11-02):
 # com tinta 8 + detector 4 + OpenCV 16, a CPU desenhando media
@@ -84,6 +88,12 @@ def _page_clean_threads(explicit=None):
 
 
 def _load_session(model_path, threads=None, *, verify):
+    """Abre a sessão ONNX. Devolve (sessão, entrada_do_manifesto).
+
+    A entrada é o dict que `verify` devolve (verify_model retorna a
+    entrada conferida); com verify=None — opt-out explícito — a
+    entrada é None e nada muda.
+    """
     try:
         import onnxruntime as ort
     except ImportError as error:
@@ -99,14 +109,37 @@ def _load_session(model_path, threads=None, *, verify):
     # Integridade obrigatoria como argumento: o pipeline injeta
     # draw.infra.manifest.verify_model como `verify`; verify=None é o
     # opt-out explicito do chamador, nada muda.
-    if verify is not None:
-        verify(path)
+    entry = verify(path) if verify is not None else None
     options = ort.SessionOptions()
     options.intra_op_num_threads = _page_clean_threads(threads)
     _disable_spin(options)
-    return ort.InferenceSession(
+    session = ort.InferenceSession(
         str(path), sess_options=options, providers=["CPUExecutionProvider"]
     )
+    return session, entry
+
+
+def _resolve_threshold(entry):
+    """Limiar de runtime da entrada do manifesto (fallback 0.7).
+
+    O campo ``runtime_threshold`` é gravado pela calibração
+    (tools/simlab/calibrate.py do draw-training) e vale só para o
+    binário cujo sha256 a entrada cobre. Sem campo — manifesto
+    antigo, opt-out de verify — vale DEFAULT_THRESHOLD. Valor fora
+    de (0, 1) é manifesto corrompido: erro explícito, nunca limiar
+    inventado em silêncio.
+    """
+    if not isinstance(entry, dict):
+        return DEFAULT_THRESHOLD
+    raw = entry.get("runtime_threshold")
+    if raw is None:
+        return DEFAULT_THRESHOLD
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not 0 < raw < 1:
+        raise RuntimeError(
+            f"runtime_threshold invalido no manifesto: {raw!r} — "
+            "precisa ser numero em (0, 1)"
+        )
+    return float(raw)
 
 
 def _disable_spin(options):
@@ -192,19 +225,24 @@ class PageCleanInk:
     def __init__(
         self,
         model_path=None,
-        threshold=DEFAULT_THRESHOLD,
+        threshold=None,
         threads=None,
         batch_size=None,
         *,
         verify,
     ):
         """model_path explícito ou DEFAULT_MODEL_PATH; verify é um
-        callable Callable[[Path | str], None] | None obrigatório,
+        callable Callable[[Path | str], dict | None] | None obrigatório,
         chamado sobre o arquivo antes de abrir a sessão (o pipeline
         injeta draw.infra.manifest.verify_model; verify=None é o
-        opt-out explícito)."""
+        opt-out explícito). threshold explícito vence sempre; sem ele,
+        o limiar vem do campo runtime_threshold do manifesto no
+        load() — e de DEFAULT_THRESHOLD quando o campo não existe."""
         self.model_path = str(model_path or DEFAULT_MODEL_PATH)
-        self.threshold = float(threshold)
+        self._threshold_arg = threshold
+        self.threshold = (
+            float(threshold) if threshold is not None else DEFAULT_THRESHOLD
+        )
         self.threads = _page_clean_threads(threads)
         self.batch_size = batch_size
         self._verify = verify
@@ -214,9 +252,11 @@ class PageCleanInk:
 
     def load(self):
         """Carrega a sessão ONNX. Retorna True; erro sobe explícito."""
-        self._session = _load_session(
+        self._session, entry = _load_session(
             self.model_path, self.threads, verify=self._verify
         )
+        if self._threshold_arg is None:
+            self.threshold = _resolve_threshold(entry)
         self._input_name = self._session.get_inputs()[0].name
         self._dynamic_batch = _output_patch_size(self._session)[1]
         return True
