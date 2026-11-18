@@ -13,10 +13,10 @@
       "sha256": "fbc2a30080c3c557093b5ddfc334698132eb341044ccee322ccf8bcf3607cde1"
     },
     "page_clean_unet.onnx": {
-      "approved_by": "bancada de material real da campanha de tinta (frente 48, laboratorio): recall@0,5 71,9% (w8: 12,0% no GT temporal), FP@0,7 187.061 px, fracao P4 >0,5 32,0%, estabilidade fotometrica x1,15 1,025; terceira vitoria seguida da linhagem (v4, v5, v6) contra o w8; instalada no slot padrao por decisao do autor em 2026-11-11 (swap w8 -> v6). O w8 (a470bd28) esta preservado em page_clean_unet.onnx.w8-a470bd28.bak e o MANIFEST anterior em MANIFEST.json.w8.bak; reversao = restaurar os dois arquivos.",
-      "bytes": 494586,
-      "date": "2026-11-11",
-      "sha256": "613e250f5f7e15e9681cb1af1317aea30b4a4bdcbad7c7bfd7350a497ae6a4b1"
+      "approved_by": "ciclo selflearn round-v1 (kernel Kaggle guzzbr/draw-selflearn-round-1, GPU, 2026-11-18, autorizada pelo autor): UniMatch U-Net 256px treinada no corpus round-v1 (school_notebooks train+val warps GT papel, mascaras de traco humanas, 1380 rotuladas + 314 nao-rotuladas). Julgada no holdout externo selado (school_notebooks test, 6 sessoes x 6 paginas, label_source=human_from_scratch): IoU medio 0,8558 e pior sessao 0,8441 contra 0,6580/0,6371 do incumbente v6 - PROMOTE nos dois criterios do judge_gate. Instalada no slot padrao por decisao do autor em 2026-11-18 (swap v6 -> round-v1-gpu). A v6 (613e250f) esta preservada em page_clean_unet.onnx.v6-613e250f.bak e o MANIFEST anterior em MANIFEST.json.pre-round-v1.bak; reversao = restaurar os dois arquivos.",
+      "bytes": 1955856,
+      "date": "2026-11-18",
+      "sha256": "3c9962849289ab5e0abc11e97488200eb8792106b0473a4f5a22bb373ea707c0"
     }
   },
   "notes": "Integrity (sha256 and byte size) is verified at load. Model binaries are not stored in git; they are distributed via GitHub Release.",
