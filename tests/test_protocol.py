@@ -594,17 +594,22 @@ def test_iter_records_sem_prazo_nao_limita():
 
 
 def test_iter_records_clampa_recv_ao_orcamento_do_prazo():
-    """recv_timeout recebe o orcamento restante, nunca a janela cheia."""
+    """recv_timeout recebe o orcamento restante — decresce a cada recv.
+
+    A leitura simulada honra o timeout configurado (espera seen[-1]
+    ou menos), entao os valores sao exatos: um orcamento constante
+    ou a janela cheia falhariam a asserção.
+    """
     from draw.protocol import ProtocolError, _iter_records
 
     clock = [0.0]
     seen = []
 
     def read(n):
-        clock[0] += 0.15
-        raise socket.timeout("stall")
+        clock[0] += min(seen[-1], 0.1)  # responde dentro do orcamento
+        return b"x"
 
-    with pytest.raises(ProtocolError):
+    with pytest.raises(ProtocolError, match="prazo"):
         list(
             _iter_records(
                 read,
@@ -614,6 +619,4 @@ def test_iter_records_clampa_recv_ao_orcamento_do_prazo():
                 recv_timeout=seen.append,
             )
         )
-    # Orcamentos decrescentes, todos dentro do prazo do registro.
-    assert seen and all(0 < s <= 0.4 for s in seen)
-    assert seen == sorted(seen, reverse=True)
+    assert seen == pytest.approx([0.4, 0.3, 0.2, 0.1])

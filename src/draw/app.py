@@ -871,6 +871,10 @@ def run(
         last_seq = 0
         last_view = None
         frame = None
+        # Cache da ultima folha retificada do modo marcadores: sem
+        # pipeline de tinta nao ha mascara confirmada, entao o 's'
+        # durante um stall so tem o que salvar com este fallback.
+        last_marker_warped = None
 
         while True:
             packet = frame_source.wait_next(last_seq, timeout=_FRAME_WAIT_SECONDS)
@@ -893,7 +897,9 @@ def run(
                 )
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord("s"):
-                    save_canvas_snapshot()
+                    # Marcadores nao tem mascara confirmada: o salvavel
+                    # visivel na tela de espera e a folha retificada.
+                    save_canvas_snapshot(last_marker_warped if markers_mode else None)
                 if frame is not None:
                     handle_capture_key(key, frame)
                 if key in (ord("q"), 27):
@@ -991,6 +997,7 @@ def run(
                     cv2.circle(status, (int(x), int(y)), 8, (0, 255, 0), -1)
             if not sheet_present:
                 if markers_mode:
+                    last_marker_warped = None  # quadro processado sem folha
                     status_text = f"Mostre a folha-modelo ({len(markers)}/4 marcadores)"
                 else:
                     status_text = "Mostre uma folha para a camera"
@@ -1038,8 +1045,10 @@ def run(
                 if markers_mode:
                     # A heuristica de tinta do legado nao migrou: no
                     # modo de marcadores o painel mostra a folha
-                    # retificada como esta.
+                    # retificada como esta — e e ela que o 's' salva,
+                    # inclusive num stall (cache retido do ultimo warp).
                     canvas = warped
+                    last_marker_warped = warped
                 elif pipeline.accumulated_canvas is not None:
                     canvas = pipeline.accumulated_canvas
                 else:
