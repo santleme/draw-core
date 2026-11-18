@@ -13,19 +13,19 @@
       "sha256": "fbc2a30080c3c557093b5ddfc334698132eb341044ccee322ccf8bcf3607cde1"
     },
     "page_clean_unet.onnx": {
-      "approved_by": "ciclo selflearn round-v1 (kernel Kaggle guzzbr/draw-selflearn-round-1, GPU, 2026-11-18, autorizada pelo autor): UniMatch U-Net 256px treinada no corpus round-v1 (school_notebooks train+val warps GT papel, mascaras de traco humanas, 1380 rotuladas + 314 nao-rotuladas). Julgada no holdout externo selado (school_notebooks test, 6 sessoes x 6 paginas, label_source=human_from_scratch): IoU medio 0,8558 e pior sessao 0,8441 contra 0,6580/0,6371 do incumbente v6 - PROMOTE nos dois criterios do judge_gate. Instalada no slot padrao por decisao do autor em 2026-11-18 (swap v6 -> round-v1-gpu). A v6 (613e250f) esta preservada em page_clean_unet.onnx.v6-613e250f.bak e o MANIFEST anterior em MANIFEST.json.pre-round-v1.bak; reversao = restaurar os dois arquivos.",
+      "approved_by": "ciclo selflearn round-v2 (kernel Kaggle guzzbr/draw-selflearn-round-2, 2xT4, 2026-11-18): warm start do round-v1 (3c996284), 600 steps UniMatch sobre 1692 rotuladas (312 CGHD com polaridade corrigida no load) + 2444 nao-rotuladas. Regua selada pós-treino (eval ONNX local, verify=None): holdout-v1 notebook macro IoU 0,8700 vs 0,8476 do incumbente no seu ponto operacional (+0,022, sem regressao; thin-recall 0,8654 vs 0,8230); holdout-v2 CGHD macro IoU 0,3838 vs 0,3380 (+0,046, precision 0,8175 vs 0,7061). Gate FP 5e-4 satisfeito em t=0,97 (fp 0,0425%). ONNX validado vs checkpoint torch (max_abs_diff 2,1e-6). PROMOTE nos criterios da regua. Incumbente (3c996284) preservado em page_clean_unet.onnx.round-v1-3c996284.bak e MANIFEST anterior em MANIFEST.json.pre-round-v2.bak; reversao = restaurar os dois arquivos.",
       "bytes": 1955856,
       "date": "2026-11-18",
-      "sha256": "3c9962849289ab5e0abc11e97488200eb8792106b0473a4f5a22bb373ea707c0",
-      "runtime_threshold": 0.85,
+      "sha256": "22a883f53419e162a8e1a25b76db61b1c736fbb1d0c182cbeb28002d8ec40e7c",
+      "runtime_threshold": 0.97,
       "calibration": {
         "date": "2026-11-18",
-        "iou": 0.8712,
-        "thin_stroke_recall": 0.8955,
-        "empty_desk_fp_rate": 0.000465,
+        "iou": 0.8835,
+        "thin_stroke_recall": 0.9159,
+        "empty_desk_fp_rate": 0.000425,
         "n_pages": 30,
         "n_empty_desk_frames": 11,
-        "chosen": "gate 5e-4 enforced — corpus verificado: 11 paginas em branco reais (sem frames pretos); t=0.85 e a selecao da regra, travada como default tipado do runtime por decisao do autor"
+        "chosen": "t=0.97 e o menor limiar que satisfaz o gate FP <= 5e-4 no corpus de calibracao + 11 paginas em branco (o melhor-IoU t=0.96 dava fp 0.0535% > limite); a U-Net round-v2 tem calibracao de probabilidade mais alta que a v1, cujo ponto era 0.85"
       }
     }
   },

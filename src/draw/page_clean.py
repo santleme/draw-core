@@ -55,15 +55,15 @@ _PATCH = 256
 DEFAULT_MODEL_PATH = (
     Path(__file__).resolve().parents[2] / "models" / "page_clean_unet.onnx"
 )
-# Default tipado do limiar de tinta (0.85): calibrado no page_clean
-# round-v2 e travado como default do runtime por decisao do autor —
-# a tinta acumula ao longo dos frames, entao o padrao conservador
-# alto protege a exportacao vetorial de tinta fantasma. Vale quando
-# o manifesto nao traz ``runtime_threshold`` (verify=None, manifesto
+# Default tipado do limiar de tinta (0.97): ponto operacional do
+# modelo round-v2 — a U-Net v2 tem calibracao de probabilidade mais
+# alta, e 0.97 e o menor threshold que satisfaz o gate FP <= 5e-4
+# no corpus de calibracao + 11 paginas em branco. Vale quando o
+# manifesto nao traz ``runtime_threshold`` (verify=None, manifesto
 # antigo); o limiar vigente por binario mora no manifesto — ver
 # resolve_threshold. Ele governa a mascara de um quadro (ink_mask);
 # o voto ao vivo do acumulador usa InkConfig.seen_threshold.
-DEFAULT_THRESHOLD = 0.85
+DEFAULT_THRESHOLD = 0.97
 # Teto combinado de pools (medido na mesa do Lucas, 2026-11-02):
 # com tinta 8 + detector 4 + OpenCV 16, a CPU desenhando media
 # 550,8%; com tinta 4 + detector 2, 289,8% — passada igual
