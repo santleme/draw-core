@@ -212,14 +212,30 @@ def test_src_fps_conta_quadros_descartados():
 
 
 def test_src_fps_ignora_drops_anteriores_ao_inicio():
-    """Drops antes do 1o quadro utilizavel ficam fora da janela da taxa."""
-    src = _StampedDropped(drop_at=3)
-    src.source_dropped = 5  # JPEGs indecodificaveis ja na conexao
+    """Drops antes do 1o quadro utilizavel ficam fora da janela da taxa.
+
+    A falha e exercida de verdade: read() falha duas vezes (JPEG
+    indecodificavel, como HelperCapture faz) acumulando 4 drops —
+    que entram no baseline. Um drop DENTRO da janela continua
+    contando.
+    """
+
+    class _FlakyStart(_StampedDropped):
+        def read(self):
+            if self._n < 2:
+                self._n += 1
+                self.source_dropped += 2  # dois registros mortos cada
+                return False, None
+            return super().read()
+
+    src = _FlakyStart(drop_at=5)  # drop dentro da janela, no 3o quadro
     tap = dc._TappedCapture(src)
+    assert tap.read() == (False, None)
+    assert tap.read() == (False, None)
     for _ in range(4):
-        tap.read()
-    # Janela: 4 entregues + 2 drops = 6 emitidos em 99 ms; os 5 drops
-    # de startup ficam fora — senao a taxa inflava para ~70 fps.
+        assert tap.read()[0]
+    # Janela: 4 entregues + 2 drops = 6 emitidos em 99 ms; os 4 drops
+    # de startup ficam fora — senao a taxa inflava para ~90 fps.
     assert tap.src_fps() == pytest.approx(50.5, rel=0.01)
 
 
