@@ -177,34 +177,49 @@ def test_src_fps_usa_carimbos_do_emissor():
     assert tap.src_fps() == pytest.approx(30.3, rel=0.01)
 
 
+class _StampedDropped:
+    """Fonte carimbada: ~30 fps com saltos de seq contabilizados."""
+
+    def __init__(self, drop_at=None):
+        self.last_capture_ts_ms = None
+        self.source_dropped = 0
+        self._ts = 0
+        self._n = 0
+        self._drop_at = drop_at
+
+    def isOpened(self):
+        return True
+
+    def read(self):
+        self._n += 1
+        if self._n == self._drop_at:
+            self.source_dropped += 2  # dois frames se perderam no caminho
+        self._ts += 33
+        self.last_capture_ts_ms = self._ts
+        return True, np.zeros((4, 4, 3), np.uint8)
+
+    def release(self):
+        pass
+
+
 def test_src_fps_conta_quadros_descartados():
     """Salto de seq do emissor nao derruba a taxa: emitidos = lidos + drop."""
-
-    class _StampedDropped:
-        def __init__(self):
-            self.last_capture_ts_ms = None
-            self.source_dropped = 0
-            self._ts = 0
-            self._n = 0
-
-        def isOpened(self):
-            return True
-
-        def read(self):
-            self._n += 1
-            if self._n == 3:
-                self.source_dropped += 2  # dois frames se perderam no caminho
-            self._ts += 33
-            self.last_capture_ts_ms = self._ts
-            return True, np.zeros((4, 4, 3), np.uint8)
-
-        def release(self):
-            pass
-
-    tap = dc._TappedCapture(_StampedDropped())
+    tap = dc._TappedCapture(_StampedDropped(drop_at=3))
     for _ in range(4):
         tap.read()
     # Emitidos 6 em 99 ms ~= 50.5 fps — nao os 30.3 dos entregues.
+    assert tap.src_fps() == pytest.approx(50.5, rel=0.01)
+
+
+def test_src_fps_ignora_drops_anteriores_ao_inicio():
+    """Drops antes do 1o quadro utilizavel ficam fora da janela da taxa."""
+    src = _StampedDropped(drop_at=3)
+    src.source_dropped = 5  # JPEGs indecodificaveis ja na conexao
+    tap = dc._TappedCapture(src)
+    for _ in range(4):
+        tap.read()
+    # Janela: 4 entregues + 2 drops = 6 emitidos em 99 ms; os 5 drops
+    # de startup ficam fora — senao a taxa inflava para ~70 fps.
     assert tap.src_fps() == pytest.approx(50.5, rel=0.01)
 
 

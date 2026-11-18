@@ -349,11 +349,7 @@ def _check_helper_source(source, token_file=None):
     """Abre uma fonte do ajudante (.drawcap/tcp://) e confere um quadro."""
     print(f"PASS: fonte do ajudante informada: {source}.")
     try:
-        # stall_windows=0: o check mede UM quadro dentro de um deadline
-        # — retentar esticaria a janela e um frame tardio passaria.
-        capture = HelperCapture(
-            source, timeout=5.0, token_file=token_file, stall_windows=0
-        )
+        capture = HelperCapture(source, timeout=5.0, token_file=token_file)
     except (ProtocolError, OSError) as error:
         print(f"FAIL: {error}")
         return 0

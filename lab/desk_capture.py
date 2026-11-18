@@ -101,6 +101,7 @@ class _TappedCapture:
         self._src_last_ts = None
         self._src_frames = 0
         self._src_dropped = 0
+        self._src_drop_base = 0
 
     def isOpened(self):
         return self._capture.isOpened()
@@ -137,12 +138,18 @@ class _TappedCapture:
         if src_ts is not None:
             if self._src_first_ts is None:
                 self._src_first_ts = src_ts
+                # Baseline: saltos anteriores ao primeiro quadro
+                # utilizavel (JPEGs indecodificaveis na conexao)
+                # ficam FORA da janela da taxa.
+                self._src_drop_base = getattr(self._capture, "source_dropped", 0)
             self._src_last_ts = src_ts
             self._src_frames += 1
             # Quadros emitidos = entregues + saltos de seq que a fonte
             # contabilizou — sem isto, frames perdidos no caminho
             # derrubam a taxa medida mesmo com a camera a pleno.
-            self._src_dropped = getattr(self._capture, "source_dropped", 0)
+            self._src_dropped = (
+                getattr(self._capture, "source_dropped", 0) - self._src_drop_base
+            )
         return True, frame
 
     def _read_once(self):
