@@ -55,11 +55,14 @@ _PATCH = 256
 DEFAULT_MODEL_PATH = (
     Path(__file__).resolve().parents[2] / "models" / "page_clean_unet.onnx"
 )
-# Fallback do limiar de tinta: vale quando o manifesto do modelo nao
-# traz ``runtime_threshold`` (calibracao ainda nao gravada, verify=None
-# ou manifesto antigo). O limiar vigente mora no manifesto, vinculado
-# ao sha256 do binario — ver _resolve_threshold.
-DEFAULT_THRESHOLD = 0.7
+# Default tipado do limiar de tinta (0.85): calibrado no page_clean
+# round-v2 e travado como default do runtime por decisao do autor —
+# a tinta acumula ao longo dos frames, entao o padrao conservador
+# alto protege a exportacao vetorial de tinta fantasma. Vale quando
+# o manifesto nao traz ``runtime_threshold`` (verify=None, manifesto
+# antigo); o limiar vigente por binario mora no manifesto — ver
+# _resolve_threshold.
+DEFAULT_THRESHOLD = 0.85
 # Teto combinado de pools (medido na mesa do Lucas, 2026-11-02):
 # com tinta 8 + detector 4 + OpenCV 16, a CPU desenhando media
 # 550,8%; com tinta 4 + detector 2, 289,8% — passada igual

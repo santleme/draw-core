@@ -17,15 +17,15 @@
       "bytes": 1955856,
       "date": "2026-11-18",
       "sha256": "3c9962849289ab5e0abc11e97488200eb8792106b0473a4f5a22bb373ea707c0",
-      "runtime_threshold": 0.79,
+      "runtime_threshold": 0.85,
       "calibration": {
         "date": "2026-11-18",
-        "iou": 0.8724,
-        "thin_stroke_recall": 0.9125,
-        "empty_desk_fp_rate": 0.019164,
+        "iou": 0.8712,
+        "thin_stroke_recall": 0.8955,
+        "empty_desk_fp_rate": 0.000465,
         "n_pages": 30,
-        "n_empty_desk_frames": 15,
-        "chosen": "manual_pick_iou_peak — gate 5e-4 inatingivel em paginas em branco (min fp 1.3% em t=0.85)"
+        "n_empty_desk_frames": 11,
+        "chosen": "gate 5e-4 enforced — corpus verificado: 11 paginas em branco reais (sem frames pretos); t=0.85 e a selecao da regra, travada como default tipado do runtime por decisao do autor"
       }
     }
   },
