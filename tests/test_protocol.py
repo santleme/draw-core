@@ -537,3 +537,57 @@ def test_check_helper_source_respeita_deadline(monkeypatch, tmp_path, capsys):
     elapsed = time.monotonic() - started
     thread.join(5)
     assert rc == 0 and elapsed < 0.5
+
+
+def test_iter_records_preserva_bytes_no_stall_mid_payload():
+    """Timeout no meio do payload: os bytes ja lidos nao se perdem."""
+    from draw.protocol import HEADER, HEADER_SIZE, MAGIC, VERSION, _iter_records
+
+    payload = _jpeg()
+    data = HEADER.pack(MAGIC, VERSION, 0, 9, 2000, len(payload)) + payload
+    base = _reader_of(data)
+    calls = {"n": 0}
+
+    def read(n):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return base(HEADER_SIZE)  # cabecalho inteiro
+        if calls["n"] == 2:
+            return base(len(payload) // 3)  # pedaco do payload
+        if calls["n"] == 3:
+            raise socket.timeout("stall")  # stall dentro do registro
+        return base(n)  # o restante chega no retry
+
+    records = list(_iter_records(read, stall_retries=1))
+    assert len(records) == 1
+    frame_id, _ts, got, _raw = records[0]
+    assert frame_id == 9 and got == payload
+
+
+def test_iter_records_respeita_prazo_do_registro():
+    """Frame pingando byte a byte: o prazo total corta a montagem."""
+    from draw.protocol import ProtocolError, _iter_records
+
+    clock = [0.0]
+
+    def read(n):
+        clock[0] += 1.0
+        return b"x"  # um byte por segundo, para sempre
+
+    with pytest.raises(ProtocolError, match="prazo"):
+        list(_iter_records(read, record_timeout_s=5.0, clock=lambda: clock[0]))
+
+
+def test_iter_records_sem_prazo_nao_limita():
+    """record_timeout_s=None (padrao streaming): so stall/tamanho limitam."""
+    from draw.protocol import HEADER, MAGIC, VERSION, _iter_records
+
+    payload = _jpeg()
+    data = HEADER.pack(MAGIC, VERSION, 0, 1, 100, len(payload)) + payload
+    slow = _reader_of(data)
+
+    def read(n):
+        return slow(min(n, 3))  # dribla 3 bytes por chamada
+
+    records = list(_iter_records(read))
+    assert records[0][2] == payload

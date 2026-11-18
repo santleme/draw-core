@@ -81,6 +81,10 @@ from .tracker import SheetDetectionWorker, _corners_json
 # Sem ele, a morte da fonte e um congelamento silencioso. O waitKey
 # devolve antes se qualquer tecla for apertada.
 _DEAD_NOTICE_MS = 3000
+# Janela curta de espera por quadro novo: longa demais e uma fonte
+# em stall TCP (HelperCapture com stall_windows) congela as teclas
+# de saida dentro de um unico read().
+_FRAME_WAIT_SECONDS = 0.25
 
 # Teto do pool paralelo do OpenCV. Sem teto, o pool abre com as
 # CPUs logicas do host (16 no Ryzen) e vira o terceiro disputante
@@ -349,10 +353,15 @@ def _check_helper_source(source, token_file=None):
     """Abre uma fonte do ajudante (.drawcap/tcp://) e confere um quadro."""
     print(f"PASS: fonte do ajudante informada: {source}.")
     try:
-        # stall_windows=0: o check mede UM quadro dentro de um deadline
-        # — retentar esticaria a janela e um frame tardio passaria.
+        # stall_windows=0 + prazo de registro: o check mede UM quadro
+        # dentro de um deadline total — retentar esticaria a janela,
+        # e so o timeout por recv deixaria um frame pingando passar.
         capture = HelperCapture(
-            source, timeout=5.0, token_file=token_file, stall_windows=0
+            source,
+            timeout=5.0,
+            token_file=token_file,
+            stall_windows=0,
+            record_timeout_s=5.0,
         )
     except (ProtocolError, OSError) as error:
         print(f"FAIL: {error}")
@@ -861,9 +870,21 @@ def run(
 
         last_seq = 0
         last_view = None
+        frame = None
 
         while True:
-            packet = frame_source.wait_next(last_seq)
+            packet = frame_source.wait_next(last_seq, timeout=_FRAME_WAIT_SECONDS)
+            if packet is None and not frame_source.dead:
+                # Fonte viva sem quadro novo na janela: a leitura pode
+                # estar dentro de um stall TCP prolongado. Atende as
+                # teclas sem realimentar o quadro velho no pipeline —
+                # a ultima vista segue na janela.
+                key = cv2.waitKey(1) & 0xFF
+                if frame is not None:
+                    handle_capture_key(key, frame)
+                if key in (ord("q"), 27):
+                    break
+                continue
             if packet is None:
                 # A thread de captura declarou a fonte morta (falhas
                 # seguidas de leitura ou excecao no read) e wait_next
