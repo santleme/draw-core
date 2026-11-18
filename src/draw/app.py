@@ -876,10 +876,24 @@ def run(
             packet = frame_source.wait_next(last_seq, timeout=_FRAME_WAIT_SECONDS)
             if packet is None and not frame_source.dead:
                 # Fonte viva sem quadro novo na janela: a leitura pode
-                # estar dentro de um stall TCP prolongado. Atende as
-                # teclas sem realimentar o quadro velho no pipeline —
-                # a ultima vista segue na janela.
+                # estar dentro de um stall TCP prolongado. Garante a
+                # janela (antes do primeiro quadro ela nem existia),
+                # atende as teclas sem realimentar o quadro velho no
+                # pipeline — a ultima vista segue de fundo.
+                cv2.imshow(
+                    "Draw",
+                    view_module.message_view(
+                        last_view,
+                        "Aguardando quadros da fonte",
+                        [
+                            "A leitura esta lenta ou parada.",
+                            "q ou ESC sai; s salva o canvas retido.",
+                        ],
+                    ),
+                )
                 key = cv2.waitKey(1) & 0xFF
+                if key == ord("s"):
+                    save_canvas_snapshot()
                 if frame is not None:
                     handle_capture_key(key, frame)
                 if key in (ord("q"), 27):

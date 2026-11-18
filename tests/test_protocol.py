@@ -591,3 +591,29 @@ def test_iter_records_sem_prazo_nao_limita():
 
     records = list(_iter_records(read))
     assert records[0][2] == payload
+
+
+def test_iter_records_clampa_recv_ao_orcamento_do_prazo():
+    """recv_timeout recebe o orcamento restante, nunca a janela cheia."""
+    from draw.protocol import ProtocolError, _iter_records
+
+    clock = [0.0]
+    seen = []
+
+    def read(n):
+        clock[0] += 0.15
+        raise socket.timeout("stall")
+
+    with pytest.raises(ProtocolError):
+        list(
+            _iter_records(
+                read,
+                stall_retries=10,
+                record_timeout_s=0.4,
+                clock=lambda: clock[0],
+                recv_timeout=seen.append,
+            )
+        )
+    # Orcamentos decrescentes, todos dentro do prazo do registro.
+    assert seen and all(0 < s <= 0.4 for s in seen)
+    assert seen == sorted(seen, reverse=True)

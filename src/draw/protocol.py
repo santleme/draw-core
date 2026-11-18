@@ -157,7 +157,14 @@ def pack_record(frame_id, capture_ts_us, payload):
     )
 
 
-def _read_exact(read, size, stall_retries=0, deadline=None, clock=time.monotonic):
+def _read_exact(
+    read,
+    size,
+    stall_retries=0,
+    deadline=None,
+    clock=time.monotonic,
+    recv_timeout=None,
+):
     """Lê exatamente size bytes via read(n) -> bytes.
 
     Retorna None se a fonte acabar limpa antes do primeiro byte.
@@ -174,17 +181,24 @@ def _read_exact(read, size, stall_retries=0, deadline=None, clock=time.monotonic
 
     `deadline` e o prazo ABSOLUTO do registro: o timeout do socket e
     por recv, entao um frame que chega pingando byte a byte passava
-    por qualquer janela — so um prazo total limita a montagem.
+    por qualquer janela — so um prazo total limita a montagem. Com
+    `recv_timeout` (ex.: sock.settimeout) o bloqueio do recv e
+    clampeado ao orcamento restante: um frame nunca completa depois
+    do prazo.
     """
     chunks = []
     remaining = size
     stalls = 0
     while remaining > 0:
-        if deadline is not None and clock() >= deadline:
-            raise ProtocolError(
-                f"registro estourou o prazo com {len(chunks)} "
-                f"chunks lidos (faltaram {remaining} de {size} bytes)"
-            )
+        if deadline is not None:
+            budget = deadline - clock()
+            if budget <= 0:
+                raise ProtocolError(
+                    f"registro estourou o prazo com {len(chunks)} "
+                    f"chunks lidos (faltaram {remaining} de {size} bytes)"
+                )
+            if recv_timeout is not None:
+                recv_timeout(budget)
         try:
             chunk = read(remaining)
         except (TimeoutError, socket.timeout) as error:
@@ -217,6 +231,7 @@ def _iter_records(
     stall_retries=0,
     record_timeout_s=None,
     clock=time.monotonic,
+    recv_timeout=None,
 ):
     """Itera registros sobre uma função read(n) -> bytes.
 
@@ -237,6 +252,7 @@ def _iter_records(
             stall_retries=stall_retries,
             deadline=deadline,
             clock=clock,
+            recv_timeout=recv_timeout,
         )
         if header is None:
             return
@@ -266,6 +282,7 @@ def _iter_records(
             stall_retries=stall_retries,
             deadline=deadline,
             clock=clock,
+            recv_timeout=recv_timeout,
         )
         if payload is None:
             raise ProtocolError(
@@ -443,10 +460,18 @@ class HelperCapture:
             except OSError:
                 self.release()
                 return
+            # recv clampeado ao orcamento do prazo do registro: sem
+            # isto, o recv podia bloquear a janela inteira do socket e
+            # um frame cruzava o deadline sendo aceito. O min() com o
+            # timeout configurado impede afrouxar o detector de stall.
+            base_timeout = self._sock.gettimeout()
             self._iter = _iter_records(
                 self._sock.recv,
                 stall_retries=self._stall_windows,
                 record_timeout_s=self._record_timeout_s,
+                recv_timeout=lambda s: self._sock.settimeout(
+                    min(base_timeout, s) if base_timeout is not None else s
+                ),
             )
             self._opened = True
             return
