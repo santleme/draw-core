@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import cv2
 import numpy as np
 import pytest
 
@@ -53,6 +54,29 @@ class _NoGet(_Frames):
     get = None
 
 
+class _Scripted:
+    """Fonte com roteiro de leituras; esgotado o roteiro, falha sempre."""
+
+    def __init__(self, script):
+        self._script = list(script)
+        self._index = 0
+        self.reads = 0
+
+    def isOpened(self):
+        return True
+
+    def read(self):
+        self.reads += 1
+        if self._index < len(self._script):
+            item = self._script[self._index]
+            self._index += 1
+            return item
+        return False, None
+
+    def release(self):
+        pass
+
+
 def test_tap_memoriza_ultimo_quadro_e_limita():
     tap = dc._TappedCapture(_Frames(frames=3), max_frames=2)
     ok, first = tap.read()
@@ -71,6 +95,56 @@ def test_tap_sem_get_devolve_zero():
     assert tap.get(5) == 0.0
     ok, _frame = tap.read()
     assert ok and tap.frames_read == 1
+
+
+def test_tap_recupera_falha_transitoria_em_fonte_viva():
+    """hvcam/camera: um read falho entre dois bons nao encerra a corrida."""
+    f = np.zeros((4, 4, 3), np.uint8)
+    tap = dc._TappedCapture(
+        _Scripted([(True, f), (False, None), (True, f), (True, f)]),
+        live_retries=3,
+    )
+    for _ in range(3):
+        ok, frame = tap.read()
+        assert ok and frame is f  # False interno -> retentado -> quadro
+    assert tap.frames_read == 3
+    # Roteiro esgotado = fonte morta: esgota o orcamento e sobe erro,
+    # nunca um fim de fluxo "ok".
+    with pytest.raises(RuntimeError, match="fonte ao vivo"):
+        tap.read()
+
+
+def test_tap_arquivo_nao_retenta_eof():
+    """Fonte de arquivo (live_retries=0): primeiro False ja e fim."""
+    f = np.zeros((4, 4, 3), np.uint8)
+    cap = _Scripted([(True, f)])
+    tap = dc._TappedCapture(cap, live_retries=0)
+    ok, frame = tap.read()
+    assert ok and frame is f
+    assert tap.read() == (False, None)
+    assert cap.reads == 2
+
+
+def test_real_fps_medio_so_tempo_da_fonte():
+    """O denominador e so o tempo dentro de read() — pipeline nao conta."""
+    clock = [100.0]
+
+    class _SlowRead:
+        def isOpened(self):
+            return True
+
+        def read(self):
+            clock[0] += 0.05  # 20 fps de entrega
+            return True, np.zeros((4, 4, 3), np.uint8)
+
+        def release(self):
+            pass
+
+    tap = dc._TappedCapture(_SlowRead(), now=lambda: clock[0])
+    for _ in range(4):
+        tap.read()
+        clock[0] += 1.0  # trabalho do pipeline entre as leituras
+    assert tap.real_fps() == pytest.approx(20.0)
 
 
 class _FakeLoop:
@@ -142,6 +216,45 @@ def test_dump_every_invalido(tmp_path):
     tap = dc._TappedCapture(_Frames(1))
     with pytest.raises(ValueError, match="every"):
         dc._DumpEvery(tmp_path, tap, every=0)
+
+
+def test_dump_falha_de_imwrite_vira_oserror(tmp_path, monkeypatch):
+    """cv2.imwrite devolvendo False nao passa batido: sobe OSError."""
+    import cv2
+
+    monkeypatch.setattr(cv2, "imwrite", lambda *a, **k: False)
+    dump, loop, worker, _lines = _dump_setup(tmp_path, np.ones((8, 8), np.uint8), None)
+    with pytest.raises(OSError, match="scene_00000"):
+        dump(loop, worker, 0)
+
+
+def test_dump_retem_mascara_mais_recente(tmp_path):
+    """last_mask acompanha cada quadro, inclusive transicao para None."""
+    mask = np.ones((8, 8), np.uint8)
+    dump, loop, worker, _ = _dump_setup(tmp_path, mask, None, every=99)
+    dump(loop, worker, 1)  # quadro fora do ciclo: mascara ainda assim retida
+    assert dump.last_mask is mask
+    loop.clean_mask = None
+    dump(loop, worker, 2)
+    assert dump.last_mask is None
+
+
+def test_run_recusa_diretorio_com_artefatos(tmp_path):
+    """--out reutilizado nao mistura sessoes: recusa, nao apaga."""
+    out = tmp_path / "desk"
+    out.mkdir()
+    (out / "scene_00000.png").write_bytes(b"")
+    (out / "session.json").write_text("{}")
+    with pytest.raises(ValueError, match="artefatos"):
+        dc.run(
+            _Frames(frames=1),
+            out_dir=out,
+            page_clean_model="x.onnx",
+            hand_model="__none__",
+            verify=None,
+            log=lambda *_a: None,
+        )
+    assert (out / "scene_00000.png").exists()  # evidencia intocada
 
 
 class _SheetCapture(_Frames):
@@ -248,6 +361,69 @@ def test_run_interrompida_grava_sessao_parcial(tmp_path, monkeypatch):
         (tmp_path / "desk" / "session.json").read_text(encoding="utf-8")
     )
     assert session["interrupted"] is True and session["status"] == "interrupted"
+    assert session["canvas_final"] is False
+    assert not (tmp_path / "desk" / "canvas_final.png").exists()
+
+
+def test_run_interrompida_salva_canvas_mais_recente(tmp_path, monkeypatch):
+    """Ctrl+C depois de tinta confirmada entre dumps: canvas_final sai."""
+    onnx_path = onnx_fixtures.page_clean_model(
+        tmp_path / "pc.onnx", patch=256, dynamic_batch=True
+    )
+    monkeypatch.setattr(ec, "_DEFAULT_SHEET_MODEL", tmp_path / "missing.onnx")
+    from draw import paper as paper_module
+
+    corners = np.array([[20, 10], [200, 10], [200, 150], [20, 150]], np.float32)
+    monkeypatch.setattr(
+        paper_module,
+        "detect_sheet_with_confidence",
+        lambda frame: (corners.copy(), "paper"),
+    )
+
+    class _InterruptAfter:
+        def __init__(self, frames):
+            self._frames = frames
+            self._index = 0
+
+        def isOpened(self):
+            return True
+
+        def get(self, prop):
+            return 10.0
+
+        def read(self):
+            if self._index >= self._frames:
+                raise KeyboardInterrupt
+            self._index += 1
+            frame = np.zeros((240, 320, 3), np.uint8)
+            frame[10:150, 20:200] = 220
+            frame[60:80, 60:160] = 20
+            return True, frame
+
+        def release(self):
+            pass
+
+    # 40 quadros a 10 fps com a ultima varredura em 30: a tinta
+    # confirmada depois do ultimo dump so sobrevive via last_mask.
+    result = dc.run(
+        _InterruptAfter(40),
+        out_dir=tmp_path / "desk",
+        every=15,
+        fps=10,
+        page_clean_model=str(onnx_path),
+        hand_model="__none__",
+        verify=None,
+        log=lambda *_a: None,
+    )
+    assert result is None
+    canvas = cv2.imread(
+        str(tmp_path / "desk" / "canvas_final.png"), cv2.IMREAD_GRAYSCALE
+    )
+    assert canvas is not None and (canvas == 255).any()
+    session = json.loads(
+        (tmp_path / "desk" / "session.json").read_text(encoding="utf-8")
+    )
+    assert session["interrupted"] is True and session["canvas_final"] is True
 
 
 def test_main_every_invalido_sai_2():

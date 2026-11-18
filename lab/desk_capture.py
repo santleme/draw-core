@@ -7,10 +7,16 @@ sem threads e com relogio de video. A cada --every quadros grava
 scene_NNNNN.png (quadro + ancora detectada) e canvas_NNNNN.png
 (mascara confirmada, 255 = tinta) no diretorio de saida, com uma
 linha de metricas por dump no stdout. Ao sair grava session.json
-com o resumo da corrida e, com mascara, canvas_final.png.
+com o resumo da corrida e, com mascara, canvas_final.png — inclusive
+na saida por Ctrl+C, usando a ultima mascara publicada.
 
 Saida padrao: captures/desk-<AAAAMMDD-HHMMSS>/ (captures/ esta no
-.gitignore). Encerra com Ctrl+C ou --max-frames.
+.gitignore). Um --out que ja contem artefatos de outra corrida e
+recusado — sessoes nao se misturam e evidencia anterior nao e
+apagada. Fonte ao vivo tolera ate _LIVE_READ_RETRIES leituras falhas
+seguidas (mesmo orcamento do app); esgotado, o desfecho e erro —
+timeout de grab nunca encerra a corrida como "ok". Encerra com
+Ctrl+C ou --max-frames.
 
 Uso:
   python -m lab.desk_capture                              # webcam local (indice 0)
@@ -35,22 +41,46 @@ if __package__ in (None, ""):
 
 from lab.eval_capture import run_pipeline  # noqa: E402
 
+# Mesmo orcamento do app antes de declarar a fonte morta
+# (_CAPTURE_MAX_FAILURES em draw.camera).
+_LIVE_READ_RETRIES = 15
+
+
+def _write_png(path, image):
+    """imwrite checado: False silencioso vira OSError nomeando o destino."""
+    if not cv2.imwrite(str(path), image):
+        raise OSError(f"falha ao gravar {path}")
+
+
+def _live_retries(source):
+    """Fontes ao vivo toleram leituras falhas transitorias; arquivo
+    (.drawcap, video) termina de verdade no primeiro False."""
+    if isinstance(source, int):
+        return _LIVE_READ_RETRIES
+    return 0 if Path(str(source)).is_file() else _LIVE_READ_RETRIES
+
 
 class _TappedCapture:
     """Envelope que memoriza o ultimo quadro lido e limita a corrida.
 
     run_pipeline nao entrega o quadro ao on_frame — o driver precisa
-    dele para o scene_*.png. Alem disso conta os quadros lidos e mede
-    o fps real de chegada: numa fonte ao vivo isso expoe camera
-    travada ou hvcam aquem do negociado, que o fps nominal esconde.
+    dele para o scene_*.png. Conta os quadros lidos e mede a taxa de
+    ENTREGA da fonte (tempo dentro de read(), sem o trabalho do
+    pipeline): uma queda ali e fonte travada ou hvcam aquem do
+    negociado, nao processamento. Em fonte viva, uma leitura falha e
+    transitória — o grab seguinte pode vir —, entao read() retenta
+    ate `live_retries` falhas seguidas e so entao desiste, com erro,
+    nunca fingindo fim de fluxo.
     """
 
-    def __init__(self, capture, max_frames=None):
+    def __init__(self, capture, max_frames=None, live_retries=0, now=time.monotonic):
         self._capture = capture
         self._max_frames = max_frames
+        self._live_retries = live_retries
+        self._now = now
         self.last_frame = None
         self.frames_read = 0
-        self._t0 = None
+        self._io_seconds = 0.0
 
     def isOpened(self):
         return self._capture.isOpened()
@@ -62,24 +92,41 @@ class _TappedCapture:
         get = getattr(self._capture, "get", None)
         return get(prop) if get is not None else 0.0
 
+    def _read_once(self):
+        started = self._now()
+        ok, frame = self._capture.read()
+        self._io_seconds += self._now() - started
+        return ok, frame
+
     def read(self):
         if self._max_frames is not None and self.frames_read >= self._max_frames:
             return False, None
-        ok, frame = self._capture.read()
+        ok, frame = self._read_once()
+        failures = 0 if ok else 1
+        while not ok and failures < self._live_retries:
+            ok, frame = self._read_once()
+            failures += 0 if ok else 1
         if not ok:
+            if self._live_retries:
+                raise RuntimeError(
+                    f"fonte ao vivo parou de entregar: {failures} leituras "
+                    f"falhas seguidas apos {self.frames_read} quadros"
+                )
             return False, None
-        if self._t0 is None:
-            self._t0 = time.monotonic()
         self.frames_read += 1
         self.last_frame = frame
         return True, frame
 
     def real_fps(self):
-        """Quadros lidos por segundo desde o primeiro — medido, nao nominal."""
-        if not self.frames_read or self._t0 is None:
+        """Quadros entregues por segundo de read() — a taxa da fonte.
+
+        O tempo do pipeline entre leituras (inferencia, imwrite) fica
+        fora do denominador; o que se mede e so o que a fonte demora
+        para entregar.
+        """
+        if not self.frames_read or self._io_seconds <= 0:
             return 0.0
-        elapsed = time.monotonic() - self._t0
-        return self.frames_read / elapsed if elapsed > 0 else 0.0
+        return self.frames_read / self._io_seconds
 
     def release(self):
         return self._capture.release()
@@ -93,6 +140,9 @@ class _DumpEvery:
     A linha de metricas traz presenca de ancora, tinta confirmada,
     passadas, sequencia do detector, miss do rastreador, ultimo
     evento, epoca do acumulador e o fps real medido na entrada.
+    `last_mask` retem a mascara mais recente a CADA quadro — o dump
+    e periodico, mas o Ctrl+C pode cair entre dois e a tinta
+    confirmada depois do ultimo nao pode se perder.
     """
 
     def __init__(self, out_dir, tap, every=15, log=print, now=time.monotonic):
@@ -104,8 +154,10 @@ class _DumpEvery:
         self.log = log
         self.now = now
         self.t0 = now()
+        self.last_mask = None
 
     def __call__(self, loop, worker, frame_index):
+        self.last_mask = loop.clean_mask
         if frame_index % self.every:
             return
         stamp = f"{frame_index:05d}"
@@ -114,14 +166,14 @@ class _DumpEvery:
         if corners is not None:
             quad = np.asarray(corners, np.int32).reshape(-1, 1, 2)
             cv2.polylines(vis, [quad], True, (0, 255, 0), 2)
-        cv2.imwrite(str(self.out_dir / f"scene_{stamp}.png"), vis)
+        _write_png(self.out_dir / f"scene_{stamp}.png", vis)
         mask = loop.clean_mask
         conf = 0
         if mask is not None:
             confirmed = np.asarray(mask) > 0
             conf = int(confirmed.sum())
-            cv2.imwrite(
-                str(self.out_dir / f"canvas_{stamp}.png"),
+            _write_png(
+                self.out_dir / f"canvas_{stamp}.png",
                 confirmed.astype(np.uint8) * 255,
             )
         self.log(
@@ -142,6 +194,7 @@ def run(
     every=15,
     fps=None,
     max_frames=None,
+    live_retries=0,
     neural_model=None,
     page_clean_model=None,
     hand_model=None,
@@ -154,10 +207,16 @@ def run(
     Devolve o resumo de run_pipeline, ou None quando interrompido;
     em ambos os casos session.json fica no out_dir — os campos
     volumosos (mask, anchors, registrations) saem como contagens.
+    Recusa um out_dir que ja tenha artefatos de outra corrida.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    tap = _TappedCapture(capture, max_frames=max_frames)
+    if _desk_artifacts(out_dir):
+        raise ValueError(
+            f"{out_dir} ja contem artefatos de captura de mesa; escolha "
+            "outro --out (a evidencia anterior nao e apagada)"
+        )
+    tap = _TappedCapture(capture, max_frames=max_frames, live_retries=live_retries)
     dump = _DumpEvery(out_dir, tap, every=every, log=log)
     log(f"saida em {out_dir}")
     result = None
@@ -176,6 +235,7 @@ def run(
         interrupted = True
     if result is None:
         summary = {"status": "interrupted", "frames": tap.frames_read}
+        final_mask = dump.last_mask
     else:
         summary = {
             key: value
@@ -197,15 +257,26 @@ def run(
             if result["corners"] is None
             else np.asarray(result["corners"]).tolist()
         )
-        if result["mask"] is not None:
-            cv2.imwrite(
-                str(out_dir / "canvas_final.png"),
-                (np.asarray(result["mask"]) > 0).astype(np.uint8) * 255,
-            )
+        final_mask = result["mask"]
+    if final_mask is not None:
+        _write_png(
+            out_dir / "canvas_final.png",
+            (np.asarray(final_mask) > 0).astype(np.uint8) * 255,
+        )
+    summary["canvas_final"] = final_mask is not None
     summary["interrupted"] = interrupted
     serialized = json.dumps(summary, ensure_ascii=False, indent=2) + "\n"
     (out_dir / "session.json").write_text(serialized, encoding="utf-8")
     return result
+
+
+def _desk_artifacts(out_dir):
+    """Algum arquivo que uma corrida anterior do desk_capture deixou."""
+    return (out_dir / "session.json").exists() or any(
+        path
+        for pattern in ("scene_*.png", "canvas_*.png")
+        for path in out_dir.glob(pattern)
+    )
 
 
 def _default_out_dir():
@@ -264,6 +335,7 @@ def main(argv=None):
                 every=args.every,
                 fps=args.fps,
                 max_frames=args.max_frames,
+                live_retries=_live_retries(source),
                 neural_model=args.neural_model,
                 page_clean_model=args.page_clean_model,
                 hand_model=args.hand_model,
