@@ -71,7 +71,7 @@ from .infra import telemetry as telemetry_module
 from .infra.safe_io import ensure_private_dir
 from .ink import render as ink_render
 from .ink.worker import PageCleanWorker
-from .page_clean import PageCleanInk
+from .page_clean import PageCleanInk, resolve_threshold
 from .perception import NeuralSheetDetector
 from .pipeline import INK_WORKER_FAILED, Pipeline
 from .protocol import HelperCapture, ProtocolError, is_helper_source
@@ -471,6 +471,14 @@ def _check_models():
             continue
         if entry is None:
             print(f"AVISO: {name} nao tem entrada no manifesto.")
+            continue
+        try:
+            # Calibração inválida derruba o load() da tinta; o
+            # preflight tem de dizer isso antes, não um PASS.
+            resolve_threshold(entry)
+        except RuntimeError as error:
+            print(f"FAIL: {name}: {error}")
+            ok = False
             continue
         print(
             f"PASS: {name} confere com o manifesto "

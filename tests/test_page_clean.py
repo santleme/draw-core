@@ -197,9 +197,36 @@ def test_verify_none_keeps_default_threshold(tmp_path):
     assert ink.threshold == page_clean.DEFAULT_THRESHOLD
 
 
-@pytest.mark.parametrize("bad", [1.5, 0.0, -0.2, "alto", True])
+@pytest.mark.parametrize("bad", [1.5, 0.0, -0.2, "alto", True, None])
 def test_invalid_manifest_threshold_is_refused(tmp_path, bad):
     path = onnx_fixtures.page_clean_model(tmp_path / "pc.onnx", patch=256)
     ink = page_clean.PageCleanInk(path, verify=lambda _p: {"runtime_threshold": bad})
     with pytest.raises(RuntimeError, match="runtime_threshold"):
         ink.load()
+
+
+def test_resolve_threshold_absent_field_falls_back_but_null_is_refused():
+    """Ausência = manifesto antigo (fallback); null = calibração quebrada."""
+    assert page_clean.resolve_threshold({}) == page_clean.DEFAULT_THRESHOLD
+    assert page_clean.resolve_threshold(None) == page_clean.DEFAULT_THRESHOLD
+    with pytest.raises(RuntimeError, match="runtime_threshold"):
+        page_clean.resolve_threshold({"runtime_threshold": None})
+
+
+def test_live_vote_threshold_is_decoupled_from_mask_threshold():
+    """O limiar calibrado da máscara não muda o voto ao vivo.
+
+    Identidade de página, âncora da fronteira e camada provisória
+    seguem InkConfig.seen_threshold (0,7 legado) mesmo com a máscara
+    em 0,85 — review do PR #43.
+    """
+    from draw.ink import worker as worker_mod
+    from draw.ink.config import InkConfig
+
+    class _Ink:
+        threshold = 0.85
+
+    worker = worker_mod.PageCleanWorker(_Ink())
+    assert worker._accumulator.threshold == InkConfig().seen_threshold == 0.7
+    tuned = worker_mod.PageCleanWorker(_Ink(), config=InkConfig(seen_threshold=0.6))
+    assert tuned._accumulator.threshold == 0.6

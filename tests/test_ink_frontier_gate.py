@@ -69,3 +69,21 @@ def test_edge_seen_as_ink_once_confirms_next_to_confirmed():
     acc.add(_prob([(EDGE_ADJ, 0.6)]))
     result = acc.add(_prob([(EDGE_ADJ, 0.6)]))
     assert _px(result["confirmed"], EDGE_ADJ) == 10
+
+
+def test_new_stroke_between_old_and_new_cutoff_does_not_thicken():
+    """Traço novo com núcleo 0,82 e halo estável 0,60 (review do PR #43).
+
+    No limiar de voto padrão (InkConfig.seen_threshold) o núcleo
+    ancora a fronteira e o halo não confirma junto; é esse o
+    comportamento que o runtime_threshold 0,85 da máscara não pode
+    alterar.
+    """
+    from draw.ink.config import InkConfig
+
+    acc = accumulator_mod.LayeredInkAccumulator(InkConfig().seen_threshold)
+    result = None
+    for _ in range(3):
+        result = acc.add(_prob([(CORE, 0.82), (HALO_ADJ, 0.60)]))
+    assert _px(result["confirmed"], CORE) == 100
+    assert _px(result["confirmed"], HALO_ADJ) == 0

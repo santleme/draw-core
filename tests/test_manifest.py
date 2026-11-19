@@ -249,3 +249,28 @@ def test_unregistered_model_files_defaults_to_repo_models_dir(tmp_path, monkeypa
         p.name for p in manifest.unregistered_model_files(manifest_path=manifest_path)
     ]
     assert names == ["solto.onnx"]
+
+
+def test_matching_entry_keeps_calibration(tmp_path, default_policy):
+    model = _model(tmp_path)
+    path = _write_manifest(
+        tmp_path, {"m.onnx": _entry(model, runtime_threshold=0.79, calibration={})}
+    )
+    entry = manifest.verify_model(model, path)
+    assert entry["runtime_threshold"] == 0.79
+    assert "calibration" in entry
+
+
+def test_relaxed_mismatch_drops_calibration(tmp_path, capsys):
+    """Binário trocado com --allow-unverified não herda o limiar do aprovado."""
+    approved = _model(tmp_path, "m.onnx", b"pesos aprovados")
+    entry = _entry(approved, runtime_threshold=0.79, calibration={"iou": 0.9})
+    path = _write_manifest(tmp_path, {"m.onnx": entry})
+    approved.write_bytes(b"outros pesos!!!")
+    got = manifest.verify_model(approved, path, strict=False)
+    assert "DIVERGENTE" in capsys.readouterr().out
+    assert got["sha256"] == entry["sha256"]
+    for key in manifest.CALIBRATION_KEYS:
+        assert key not in got
+    # A entrada do manifesto em si não é mutada.
+    assert manifest.load_manifest(path)[1]["m.onnx"]["runtime_threshold"] == 0.79

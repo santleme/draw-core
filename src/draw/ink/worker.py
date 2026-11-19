@@ -233,7 +233,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         # geometrica do follow e do portao de remocao).
         self._previous_corners = None
         self._accumulator = accumulator.LayeredInkAccumulator(
-            threshold=getattr(page_clean, "threshold", 0.7), config=self._config
+            threshold=self._config.seen_threshold, config=self._config
         )
         self._last_pass_start = None
         self._passes_total = 0

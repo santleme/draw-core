@@ -61,7 +61,8 @@ DEFAULT_MODEL_PATH = (
 # alto protege a exportacao vetorial de tinta fantasma. Vale quando
 # o manifesto nao traz ``runtime_threshold`` (verify=None, manifesto
 # antigo); o limiar vigente por binario mora no manifesto — ver
-# _resolve_threshold.
+# resolve_threshold. Ele governa a mascara de um quadro (ink_mask);
+# o voto ao vivo do acumulador usa InkConfig.seen_threshold.
 DEFAULT_THRESHOLD = 0.85
 # Teto combinado de pools (medido na mesa do Lucas, 2026-11-02):
 # com tinta 8 + detector 4 + OpenCV 16, a CPU desenhando media
@@ -122,21 +123,22 @@ def _load_session(model_path, threads=None, *, verify):
     return session, entry
 
 
-def _resolve_threshold(entry):
-    """Limiar de runtime da entrada do manifesto (fallback 0.7).
+def resolve_threshold(entry):
+    """Limiar de runtime da entrada do manifesto (fallback DEFAULT_THRESHOLD).
 
     O campo ``runtime_threshold`` é gravado pela calibração
     (tools/simlab/calibrate.py do draw-training) e vale só para o
-    binário cujo sha256 a entrada cobre. Sem campo — manifesto
-    antigo, opt-out de verify — vale DEFAULT_THRESHOLD. Valor fora
-    de (0, 1) é manifesto corrompido: erro explícito, nunca limiar
-    inventado em silêncio.
+    binário cujo sha256 a entrada cobre — por isso verify_model o
+    retira da entrada quando o arquivo diverge (modo relaxado). Sem
+    campo — manifesto antigo, opt-out de verify — vale
+    DEFAULT_THRESHOLD. Campo presente com valor fora de (0, 1),
+    inclusive ``null``, é manifesto corrompido: erro explícito,
+    nunca limiar inventado em silêncio. O preflight (--check) usa
+    esta mesma função.
     """
-    if not isinstance(entry, dict):
+    if not isinstance(entry, dict) or "runtime_threshold" not in entry:
         return DEFAULT_THRESHOLD
-    raw = entry.get("runtime_threshold")
-    if raw is None:
-        return DEFAULT_THRESHOLD
+    raw = entry["runtime_threshold"]
     if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not 0 < raw < 1:
         raise RuntimeError(
             f"runtime_threshold invalido no manifesto: {raw!r} — "
@@ -259,7 +261,7 @@ class PageCleanInk:
             self.model_path, self.threads, verify=self._verify
         )
         if self._threshold_arg is None:
-            self.threshold = _resolve_threshold(entry)
+            self.threshold = resolve_threshold(entry)
         self._input_name = self._session.get_inputs()[0].name
         self._dynamic_batch = _output_patch_size(self._session)[1]
         return True

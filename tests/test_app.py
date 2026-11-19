@@ -148,6 +148,23 @@ def test_check_models_avisa_modelo_ausente(monkeypatch, tmp_path, capsys):
     assert "Release" in out
 
 
+def test_check_models_falha_em_limiar_invalido(monkeypatch, tmp_path, capsys):
+    """Binário confere mas runtime_threshold quebrado: FAIL, não PASS."""
+    model = tmp_path / "page_clean_unet.onnx"
+    model.write_bytes(b"binario")
+    entry = {"sha256": "f" * 64, "bytes": 7, "runtime_threshold": 1.5}
+    fake = {"page_clean_unet.onnx": entry}
+    monkeypatch.setattr(
+        manifest_module, "load_manifest", lambda path=None: (Path("m.json"), fake)
+    )
+    monkeypatch.setattr(manifest_module, "DEFAULT_MODELS_DIR", tmp_path)
+    monkeypatch.setattr(manifest_module, "verify_model", lambda path, **kw: entry)
+    assert app_module._check_models() is False
+    out = capsys.readouterr().out
+    assert "FAIL" in out and "runtime_threshold" in out
+    assert "PASS" not in out
+
+
 def test_check_models_falha_em_divergencia(monkeypatch, tmp_path, capsys):
     model = tmp_path / "modelo.onnx"
     model.write_bytes(b"binario")

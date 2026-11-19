@@ -188,6 +188,13 @@ def unregistered_model_files(models_dir=None, manifest_path=None):
     )
 
 
+# Campos da entrada que descrevem o comportamento de UM binário (o do
+# sha256): só valem quando o arquivo confere. Divergência relaxada
+# devolve a entrada sem eles — o binário trocado não herda a
+# calibração do aprovado.
+CALIBRATION_KEYS = ("runtime_threshold", "calibration")
+
+
 def verify_model(model_path, manifest_path=None, strict=None):
     """Confere o modelo contra o manifesto. Devolve a entrada ou None.
 
@@ -195,7 +202,8 @@ def verify_model(model_path, manifest_path=None, strict=None):
     Entrada conferindo devolve a entrada. Divergência ou arquivo sem
     entrada levantam RuntimeError no modo estrito (o padrão); com
     DRAW_MODEL_STRICT=0 (ou strict=False) imprimem o aviso e devolvem
-    a entrada (divergência) ou None (não registrado).
+    a entrada sem os CALIBRATION_KEYS (divergência) ou None (não
+    registrado).
     """
     if strict is None:
         strict = strict_enabled()
@@ -238,4 +246,4 @@ def verify_model(model_path, manifest_path=None, strict=None):
         + ". O arquivo em disco não é o modelo que a régua aprovou."
     )
     _refuse_or_warn(message, strict)
-    return entry
+    return {key: value for key, value in entry.items() if key not in CALIBRATION_KEYS}

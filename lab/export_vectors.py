@@ -4,8 +4,8 @@ Driver de linha de comando sobre draw.exporters.export_vectors (os
 primitivos: Otsu, microfragmentos, Zhang-Suen, traçado, Douglas-Peucker,
 escritores SVG/DXF e a prova de ida e volta). Entrada: PNG na grade da
 página (warp ou canvas de tinta acumulado). A máscara vem do modelo de
-produção (draw.page_clean.PageCleanInk, mosaico 256, limiar 0,7 — o
-mesmo caminho de inferência do app) ou de Otsu invertido.
+produção (draw.page_clean.PageCleanInk, mosaico 256, limiar do
+manifesto — o mesmo caminho de inferência do app) ou de Otsu invertido.
 
 Exemplo:
   python lab/export_vectors.py pagina.png --out-dir saida/
@@ -47,16 +47,18 @@ DEFAULT_ONNX = _REPO_ROOT / "models" / "page_clean_unet.onnx"
 
 
 def ink_mask_model(bgr, onnx_path, verify):
-    """Máscara de tinta do app: PageCleanInk (mosaico 256, limiar 0,7).
+    """Máscara de tinta do app: PageCleanInk (mosaico 256). -> (máscara, limiar)
 
     Usa draw.page_clean, o mesmo caminho de inferência do Draw —
-    inclusive a ordem de canais e o limiar de produção (0,7).
+    inclusive a ordem de canais e o limiar de produção, que vem do
+    runtime_threshold do manifesto (ou DEFAULT_THRESHOLD). O limiar
+    efetivo volta junto para a prova registrar o que foi usado.
     """
     from draw.page_clean import PageCleanInk
 
     cleaner = PageCleanInk(str(onnx_path), verify=verify)
     cleaner.load()
-    return cleaner.ink_mask(bgr) > 0
+    return cleaner.ink_mask(bgr) > 0, cleaner.threshold
 
 
 def export_vectors(
@@ -101,9 +103,9 @@ def export_vectors(
     if mask_source == "model":
         if onnx_path is None or not Path(onnx_path).exists():
             raise FileNotFoundError(f"modelo page-clean não encontrado: {onnx_path}")
-        ink = ink_mask_model(bgr, onnx_path, verify)
+        ink, mask_threshold = ink_mask_model(bgr, onnx_path, verify)
     else:
-        ink = ink_mask_otsu(bgr)
+        ink, mask_threshold = ink_mask_otsu(bgr), None
     ink = filter_microfragments(ink, min_area=min_area)
 
     skel = make_8_minimal(zhang_suen_thin(ink))
@@ -121,6 +123,7 @@ def export_vectors(
         "scale_mm_per_px": (sx, sy),
         "points_raw": int(sum(len(poly["points"]) for poly in raw)),
         "points_simplified": int(sum(len(poly["points"]) for poly in simplified)),
+        "mask_threshold": mask_threshold,
     }
 
 
@@ -241,7 +244,7 @@ def main(argv=None):
         "input": str(args.input),
         "mask_source": (
             f"draw.page_clean.PageCleanInk sobre {args.onnx} "
-            "(mosaico 256x256, limiar 0.7 — protocolo do app)"
+            f"(mosaico 256x256, limiar {result['mask_threshold']} — protocolo do app)"
             if args.mask == "model"
             else "otsu invertido (declarado)"
         ),

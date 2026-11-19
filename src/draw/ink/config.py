@@ -21,3 +21,12 @@ class InkConfig:
     follow_move: bool = True
     reg_deadband: bool = False
     reg_anchor_median: bool = False
+    # Limiar de "visto como tinta" do motor ao vivo: camada
+    # provisoria, ancora da porta de fronteira, julgamento de virada
+    # e identidade da pagina no reencontro. Fica no 0,7 legado de
+    # proposito, separado do runtime_threshold calibrado da mascara
+    # (PageCleanInk.threshold): aquela calibracao mede IoU de um
+    # quadro e nao cobre o voto entre passadas — subir este valor
+    # sem replay propria engrossa traco novo (a ancora some) e faz o
+    # reencontro perder a pagina (review do PR #43).
+    seen_threshold: float = 0.7
