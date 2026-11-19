@@ -73,6 +73,7 @@ from .infra import session_report as session_report_module
 from .infra import telemetry as telemetry_module
 from .infra.safe_io import ensure_private_dir
 from .ink import render as ink_render
+from .ink.config import InkConfig
 from .ink.worker import PageCleanWorker
 from .page_clean import PageCleanInk, resolve_threshold
 from .perception import NeuralSheetDetector
@@ -1779,6 +1780,18 @@ def main():
         ),
     )
     parser.add_argument(
+        "--ink-vote",
+        type=float,
+        default=None,
+        metavar="NIVEL",
+        help=(
+            "voto estrito da tinta ao vivo (InkConfig.strict_vote), 0,634-0,99: "
+            "derruba a pauta que o page_clean v2 deixa passar, ao custo de "
+            "afinar o traco (medido: 0,85 e o ponto equilibrado). So com a "
+            "imagem bem exposta: com papel escuro quebra as letras"
+        ),
+    )
+    parser.add_argument(
         "--allow-unverified",
         action="store_true",
         help="carrega modelos divergentes ou fora do manifesto com "
@@ -1808,6 +1821,19 @@ def main():
         config.apply_format(args.format or "a4", args.orientation)
     except ValueError as error:
         parser.error(str(error))
+    # Validado ANTES do --check: o mesmo nivel invalido impede a sessao ao
+    # vivo, entao o preflight nao pode sair com sucesso (review do PR #53).
+    ink_config = InkConfig()
+    if args.ink_vote is not None:
+        if args.markers:
+            parser.error(
+                "--ink-vote nao combina com --markers (sem tinta no modo marcadores)"
+            )
+        try:
+            ink_config = InkConfig.strict_vote(args.ink_vote)
+        except ValueError as error:
+            parser.error(str(error))
+    pipeline_config = PipelineConfig(ink=ink_config, ink_auto_gain=args.ink_gain)
     if args.check:
         parsed = parse_source(args.source)
         sys.exit(run_check(parsed, helper_token_file=args.helper_token_file))
@@ -1841,7 +1867,7 @@ def main():
             helper_token_file=args.helper_token_file,
             fullscreen=args.fullscreen,
             rotation=args.rotate,
-            pipeline_config=PipelineConfig(ink_auto_gain=args.ink_gain),
+            pipeline_config=pipeline_config,
         )
     except (RuntimeError, FileNotFoundError) as error:
         print(f"Erro: {error}")

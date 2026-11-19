@@ -2,6 +2,10 @@
 
 from dataclasses import dataclass
 
+# Nivel de voto que reproduz o legado: a media das 3 passadas que fecha a
+# soma strong de 1,9. strict_vote desloca os campos a partir dele.
+LEGACY_VOTE_LEVEL = 1.9 / 3
+
 
 @dataclass(frozen=True, slots=True)
 class InkConfig:
@@ -30,3 +34,58 @@ class InkConfig:
     # sem replay propria engrossa traco novo (a ancora some) e faz o
     # reencontro perder a pagina (review do PR #43).
     seen_threshold: float = 0.7
+    # Regra de confirmacao do voto entre passadas (janela de 3, ver
+    # draw.ink.votes): um pixel confirma quando a soma das 3 passadas
+    # chega a vote_score_strong (media >= ~0,63) ou quando aparece com
+    # prob >= vote_hit nas 3 passadas e a soma chega a vote_score. Os
+    # defaults sao os valores historicos de draw.ink.votes (o teste de
+    # paridade garante que nao divergem). Com o page_clean v2, que e
+    # mais confiante que o v1, a pauta cruza essa barra: veja
+    # strict_vote para o regime calibrado.
+    vote_hit: float = 0.5
+    vote_score: float = 1.4
+    vote_score_strong: float = 1.9
+
+    @classmethod
+    def strict_vote(cls, level, **overrides):
+        """Voto no regime do v2: confirma so o que a media das passadas
+        sustenta acima de `level`. LEGACY_VOTE_LEVEL (1,9 / 3, ~0,633)
+        reproduz o legado exatamente; o maximo e 0,99.
+
+        Desloca os tres campos do voto por `shift = level - LEGACY`:
+        vote_score_strong = 1,9 + 3 x shift, vote_score = 1,4 + 3 x
+        shift e vote_hit = 0,5 + shift. O seen_threshold NAO muda, de
+        proposito: ele governa a identidade da pagina no reencontro, a
+        testemunha da remocao e a ancora da porta de fronteira (decisao
+        do PR #43; subi-lo junto do voto faz a folha que volta perder
+        a tinta confirmada, a borracha parcial deixar tinta velha e o
+        halo do traco entrar — review do PR #53). Medido, mante-lo no
+        0,7 rende quase o mesmo que subi-lo.
+
+        Medidas e trade-offs (page_clean v2, 2026-11-19; uma sessao ao vivo de caderno pautado, 40 quadros, regioes
+        marcadas a mao; relativo ao legado SEM ganho = 100%):
+          legado com ganho:    escrita 149%, pauta 82%
+          0,85 com ganho:      escrita 121%, pauta 57%
+          0,92 com ganho:      escrita 109%, pauta 48%
+          0,85 SEM ganho:      escrita  77%, pauta 54% (o N perde a diagonal)
+        TRADE-OFFS: (1) so use com entrada bem exposta (ver ink_auto_gain):
+        sem isso o traco real tem confianca baixa e o voto estrito quebra
+        as letras. (2) Em sessao bem iluminada (s4, escrita) o ruido fora
+        da escrita cai ~90%, mas o traco afina: a faixa do texto perde 48%
+        dos pixels em 0,85 e 60% em 0,92 (segue legivel); no s2, 27% e 39%.
+        (3) Os tracinhos onde a pauta cruza o traco sobrevivem a qualquer
+        limiar — so um modelo que conheca a pauta (v4) os remove. Por isso
+        o default segue no legado.
+        """
+        if not LEGACY_VOTE_LEVEL <= level <= 0.99:
+            raise ValueError(
+                f"nivel de voto fora de [{LEGACY_VOTE_LEVEL:.3f}, 0,99]: {level!r}"
+            )
+        shift = level - LEGACY_VOTE_LEVEL
+        fields = {
+            "vote_hit": 0.5 + shift,
+            "vote_score": 1.4 + 3 * shift,
+            "vote_score_strong": 1.9 + 3 * shift,
+        }
+        fields.update(overrides)
+        return cls(**fields)

@@ -72,9 +72,10 @@ class LayeredInkAccumulator:
         for item in window[1:]:
             np.add(score, item, out=score)
         hits = self._hits_buf
-        hits[...] = window[0] >= votes._INK_VOTE_HIT
+        hit = self._config.vote_hit
+        hits[...] = window[0] >= hit
         for item in window[1:]:
-            np.add(hits, item >= votes._INK_VOTE_HIT, out=hits)
+            np.add(hits, item >= hit, out=hits)
         seen = self._seen_buf
         seen[...] = window[0] > self.threshold
         for item in window[1:]:
@@ -139,8 +140,8 @@ class LayeredInkAccumulator:
                     self._low_overlap_streak = 0
         self._window.append(evidence.copy())
         score, hits, seen_as_ink = self._window_stats()
-        confirmed_rule = (score >= votes._INK_VOTE_SCORE_STRONG) | (
-            (hits >= votes._INK_VOTE_MIN_HITS) & (score >= votes._INK_VOTE_SCORE)
+        confirmed_rule = (score >= self._config.vote_score_strong) | (
+            (hits >= votes._INK_VOTE_MIN_HITS) & (score >= self._config.vote_score)
         )
         if np.any(confirmed_rule):
             # Porta de fronteira (ver votes._INK_FRONTIER_RADIUS):
