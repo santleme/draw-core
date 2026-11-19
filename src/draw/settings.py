@@ -59,6 +59,11 @@ class PipelineConfig:
     - follow_move (era DRAW_INK_FOLLOW_MOVE): com a geometria de
       tinta congelada sem mão, um deslocamento sustentado da folha
       reparte o histórico de cantos na posição nova.
+    - ink_auto_gain: ganho digital no retificado antes do page_clean
+      (draw.exposure): leva o papel ao nível ~200 quando a câmera
+      entrega a página escura (teto físico de 1/30 s a 30 fps, driver
+      sem gain UVC). Nunca escurece; desligado por padrão até a régua
+      de replay confirmar que não regride cena bem iluminada.
     - ink: o preset do motor de tinta que a trabalhadora recebe na
       construção (quem monta a Pipeline cria a trabalhadora com ele).
     """
@@ -69,4 +74,5 @@ class PipelineConfig:
     seg_hand_occlusion: bool = True
     coverage_iou_floor: float = 0.2
     follow_move: bool = True
+    ink_auto_gain: bool = False
     ink: InkConfig = InkConfig()

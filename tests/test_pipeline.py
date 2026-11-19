@@ -349,6 +349,30 @@ def test_paisagem_submete_pagina_deitada_a_tinta():
         config_module.apply_format("a4")
 
 
+def test_ink_auto_gain_brightens_dark_page_before_ink():
+    """ink_auto_gain: página escura (teto de exposição a 30 fps) chega
+    clara à tinta; sem o campo, o warp cru segue intacto."""
+    frame = np.full((720, 1280, 3), 80, np.uint8)  # papel subexposto
+    frame[200:300, 200:400] = 25  # traço
+
+    loop, _det, ink_raw = _make_loop(lambda _i: (QUAD.copy(), "paper", None))
+    _drive(loop, 40, frame=frame)
+    raw = ink_raw.pages[-1].image
+    assert loop.last_ink_gain == 1.0
+    assert abs(float(np.percentile(raw, 90)) - 80) < 2
+
+    loop, _det, ink_gain = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", None),
+        config=PipelineConfig(ink_auto_gain=True),
+    )
+    _drive(loop, 40, frame=frame)
+    lit = ink_gain.pages[-1].image
+    assert loop.last_ink_gain == pytest.approx(2.5)
+    assert abs(float(np.percentile(lit, 90)) - 200) < 3
+    # Linear: o traço segue mais escuro que o papel.
+    assert float(lit.min()) < 0.5 * float(np.percentile(lit, 90))
+
+
 def _seen_then_lost():
     """Vê a folha nos 6 primeiros chamados, depois perde tudo."""
 

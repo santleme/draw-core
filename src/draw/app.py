@@ -78,6 +78,7 @@ from .page_clean import PageCleanInk, resolve_threshold
 from .perception import NeuralSheetDetector
 from .pipeline import INK_WORKER_FAILED, Pipeline
 from .protocol import HelperCapture, ProtocolError, is_helper_source
+from .settings import PipelineConfig
 from .tracker import SheetDetectionWorker, _corners_json
 
 # Tempo que o aviso de fonte morta fica na janela antes da saida.
@@ -1095,6 +1096,7 @@ def run(
     helper_token_file=None,
     fullscreen=False,
     rotation=0,
+    pipeline_config=None,
 ):
     _apply_opencv_thread_cap()
     _require_gui_backend()
@@ -1356,6 +1358,7 @@ def run(
                 ),
                 on_acquisition=emit_acquisition,
                 save_page_snapshot=save_page_snapshot,
+                config=pipeline_config,
             )
             tracker = pipeline.tracker
 
@@ -1763,6 +1766,15 @@ def main():
         ),
     )
     parser.add_argument(
+        "--ink-gain",
+        action="store_true",
+        help=(
+            "ganho digital na pagina retificada antes da tinta: clareia o "
+            "papel escuro quando a camera esta no teto de exposicao de 30 fps "
+            "(PipelineConfig.ink_auto_gain)"
+        ),
+    )
+    parser.add_argument(
         "--allow-unverified",
         action="store_true",
         help="carrega modelos divergentes ou fora do manifesto com "
@@ -1821,6 +1833,7 @@ def main():
             helper_token_file=args.helper_token_file,
             fullscreen=args.fullscreen,
             rotation=args.rotate,
+            pipeline_config=PipelineConfig(ink_auto_gain=args.ink_gain),
         )
     except (RuntimeError, FileNotFoundError) as error:
         print(f"Erro: {error}")

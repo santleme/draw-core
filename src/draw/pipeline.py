@@ -34,7 +34,7 @@ import cv2
 import numpy as np
 
 from . import config as config_module
-from . import contracts, paper, tracker
+from . import contracts, exposure, paper, tracker
 from .ink import render as ink_render
 from .settings import PipelineConfig
 from .tracker import _SHEET_LOST_MIN_FRAMES
@@ -197,6 +197,8 @@ class Pipeline:
         # Observabilidade (sem efeito no laco): ultimo evento do
         # rastreador e contagem das aberturas de geracao por causa.
         self.last_tracker_event = None
+        # Ganho digital do ultimo warp de tinta (ink_auto_gain); 1.0 sem ganho.
+        self.last_ink_gain = 1.0
         self.generation_events = {"drop": 0, "reopen": 0}
 
     def _sheet_coverage_page(self, warp_corners):
@@ -272,6 +274,10 @@ class Pipeline:
             # e mesa na trabalhadora de tinta.
             return
         ink_warped = self._warp_sheet(frame, warp_corners)
+        if self._config.ink_auto_gain:
+            # Página escura (exposição no teto de 30 fps): o ganho
+            # que o sensor não dá entra aqui, antes do page_clean.
+            ink_warped, self.last_ink_gain = exposure.apply_paper_gain(ink_warped)
         # Visibilidade na grade da pagina: onde a mao esta, a
         # passada nao ve a folha — a passada nao pode votar com
         # evidencia fabricada sob oclusao.
