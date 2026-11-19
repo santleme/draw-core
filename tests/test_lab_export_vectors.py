@@ -58,3 +58,20 @@ def test_main_end_to_end_otsu(tmp_path):
 def test_main_input_missing(tmp_path, capsys):
     assert main([str(tmp_path / "nada.png"), "--out-dir", str(tmp_path)]) == 1
     assert "não foi possível ler" in capsys.readouterr().err
+
+
+def test_main_model_proof_names_mask_threshold_not_live_vote(tmp_path):
+    """A prova registra o limiar efetivo da máscara e não o vende como o voto ao vivo."""
+    onnx_fixtures = pytest.importorskip("onnx_fixtures")
+    from draw.page_clean import DEFAULT_THRESHOLD
+
+    model = onnx_fixtures.page_clean_model(tmp_path / "pc.onnx", patch=256)
+    page = tmp_path / "pagina.png"
+    _page(page)
+    out = tmp_path / "out"
+    argv = [str(page), "--out-dir", str(out), "--mask", "model"]
+    argv += ["--onnx", str(model), "--allow-unverified"]
+    assert main(argv) == 0
+    source = json.loads((out / "pagina_proof.json").read_text())["mask_source"]
+    assert f"quadro unico {DEFAULT_THRESHOLD}" in source
+    assert "seen_threshold" in source

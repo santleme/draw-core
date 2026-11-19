@@ -4,8 +4,9 @@ Driver de linha de comando sobre draw.exporters.export_vectors (os
 primitivos: Otsu, microfragmentos, Zhang-Suen, traçado, Douglas-Peucker,
 escritores SVG/DXF e a prova de ida e volta). Entrada: PNG na grade da
 página (warp ou canvas de tinta acumulado). A máscara vem do modelo de
-produção (draw.page_clean.PageCleanInk, mosaico 256, limiar do
-manifesto — o mesmo caminho de inferência do app) ou de Otsu invertido.
+produção (draw.page_clean.PageCleanInk, mosaico 256, limiar de máscara
+do manifesto — a inferência do app num quadro só; o canvas ao vivo vota
+entre passadas com InkConfig.seen_threshold) ou de Otsu invertido.
 
 Exemplo:
   python lab/export_vectors.py pagina.png --out-dir saida/
@@ -244,7 +245,9 @@ def main(argv=None):
         "input": str(args.input),
         "mask_source": (
             f"draw.page_clean.PageCleanInk sobre {args.onnx} "
-            f"(mosaico 256x256, limiar {result['mask_threshold']} — protocolo do app)"
+            f"(mosaico 256x256, limiar da mascara de quadro unico "
+            f"{result['mask_threshold']}; o canvas ao vivo vota com "
+            "InkConfig.seen_threshold, nao com este limiar)"
             if args.mask == "model"
             else "otsu invertido (declarado)"
         ),
