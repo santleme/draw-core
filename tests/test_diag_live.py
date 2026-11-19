@@ -455,3 +455,74 @@ def test_summary_write_failure_is_a_clear_error_not_a_traceback(
     assert code == 1
     assert "summary.json" in captured.err and "No space left" in captured.err
     assert "1 quadros" in captured.out
+
+
+# --- quarta rodada do review do PR #51 + --orientation -----------------
+
+
+@pytest.mark.parametrize("bad", ["nan", "inf", "-1", "abc"])
+@pytest.mark.parametrize("flag", ["--warmup", "--spacing"])
+def test_non_finite_or_negative_seconds_are_a_usage_error(
+    monkeypatch, tmp_path, fake_models, bad, flag, capsys
+):
+    """--warmup nan nunca satisfazia o `>=` do aquecimento: a ferramenta
+    travava com a câmera funcionando (review #51). Recusa no parser, sem
+    abrir a câmera."""
+    opened = []
+    monkeypatch.setattr(
+        diag_live, "_frames_from_source", lambda *a, **k: opened.append(a)
+    )
+    with pytest.raises(SystemExit) as error:
+        diag_live.main(["--source", "0", flag, bad, "--out", str(tmp_path / "o")])
+    assert error.value.code == 2
+    assert opened == []
+    assert "finito" in capsys.readouterr().err or bad == "abc"
+
+
+@pytest.mark.parametrize(
+    "argv", [["--stall-timeout", "0"], ["--stall-timeout", "nan"], ["--frames", "0"]]
+)
+def test_other_numeric_options_are_validated(tmp_path, fake_models, argv):
+    with pytest.raises(SystemExit) as error:
+        diag_live.main(["--source", "0", *argv, "--out", str(tmp_path / "o")])
+    assert error.value.code == 2
+
+
+def test_partial_summary_hint_only_when_it_was_written(
+    monkeypatch, tmp_path, fake_models, capsys
+):
+    """Falhou o diagnóstico E a escrita do resumo: não apontar para um
+    "resumo parcial" que não existe (review #51)."""
+    real = Path.write_text
+
+    def full_disk(self, *args, **kwargs):
+        if self.name == "summary.json":
+            raise OSError(28, "No space left on device")
+        return real(self, *args, **kwargs)
+
+    def dying(*_a, **_k):
+        yield np.full((240, 320, 3), 150, np.uint8), 30.0
+        raise diag_live.SourceExhausted("fonte parou de entregar")
+
+    monkeypatch.setattr(Path, "write_text", full_disk)
+    monkeypatch.setattr(diag_live, "_frames_from_source", dying)
+    code = diag_live.main(["--source", "0", "--out", str(tmp_path / "out")])
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "resumo parcial em" not in err
+    assert "não pôde ser gravado" in err and "No space left" in err
+
+
+def test_orientation_flag_deita_a_grade_do_warp(tmp_path, fake_models):
+    src = _png_dir(tmp_path / "in", ["a.png"])
+    out = tmp_path / "out"
+    assert (
+        diag_live.main(
+            ["--input", str(src), "--out", str(out), "--orientation", "paisagem"]
+        )
+        == 0
+    )
+    summary = json.loads((out / "summary.json").read_text())
+    assert summary["orientation"] == "paisagem"
+    assert summary["frames"][0]["grids"]["warp"] == [1200, 850]
+    assert cv2.imread(str(out / "000_warp.png")).shape[:2] == (850, 1200)

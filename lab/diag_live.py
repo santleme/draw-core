@@ -274,6 +274,31 @@ def _frames_from_source(
         cap.release()
 
 
+def _seconds(value):
+    """Segundos finitos e >= 0: `nan` nunca satisfaz o `>=` do aquecimento
+    (a ferramenta travava com a câmera funcionando) e `inf` não termina."""
+    seconds = float(value)
+    if not np.isfinite(seconds) or seconds < 0:
+        raise argparse.ArgumentTypeError(
+            f"precisa ser um número finito >= 0 (recebi {value!r})"
+        )
+    return seconds
+
+
+def _positive_seconds(value):
+    seconds = _seconds(value)
+    if seconds <= 0:
+        raise argparse.ArgumentTypeError(f"precisa ser > 0 (recebi {value!r})")
+    return seconds
+
+
+def _positive_int(value):
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError(f"precisa ser >= 1 (recebi {value!r})")
+    return number
+
+
 def rotate_frame(frame, rotation):
     if rotation == 180:
         return cv2.rotate(frame, cv2.ROTATE_180)
@@ -308,12 +333,16 @@ def main(argv=None):
             "NNN_*.png (prefixo de 3 ou mais dígitos)"
         ),
     )
-    parser.add_argument("--frames", type=int, default=6)
-    parser.add_argument("--warmup", type=float, default=2.0, help="s de AE/AWB")
-    parser.add_argument("--spacing", type=float, default=0.5, help="s entre quadros")
+    parser.add_argument("--frames", type=_positive_int, default=6)
+    parser.add_argument(
+        "--warmup", type=_seconds, default=2.0, help="s de AE/AWB (finito, >= 0)"
+    )
+    parser.add_argument(
+        "--spacing", type=_seconds, default=0.5, help="s entre quadros (finito, >= 0)"
+    )
     parser.add_argument(
         "--stall-timeout",
-        type=float,
+        type=_positive_seconds,
         default=_STALL_TIMEOUT_S,
         help=(
             "s sem quadro que declaram a fonte ao vivo parada; checado entre "
@@ -327,6 +356,12 @@ def main(argv=None):
         choices=list(config.FORMATS),
         default="a4",
         help="formato da sessão (a grade do warp do app); padrão a4",
+    )
+    parser.add_argument(
+        "--orientation",
+        choices=config.ORIENTATIONS,
+        default="retrato",
+        help="orientação da grade do warp do app (paisagem p/ caderno aberto)",
     )
     parser.add_argument("--models", default=str(_REPO_ROOT / "models"))
     parser.add_argument(
@@ -361,7 +396,7 @@ def main(argv=None):
         return 2
     # Mesma grade que o app usa na sessão: o warp e a máscara do diagnóstico
     # têm de ter as dimensões do que o runtime enxerga.
-    config.apply_format(args.format)
+    config.apply_format(args.format, args.orientation)
 
     from draw.infra.manifest import verify_model
     from draw.page_clean import PageCleanInk
@@ -407,6 +442,7 @@ def main(argv=None):
         "label": args.label,
         "rotate": args.rotate,
         "format": args.format,
+        "orientation": args.orientation,
         "read_fps": read_fps,
         "mask_threshold": page_clean.threshold,
         "complete": error is None,
@@ -436,10 +472,13 @@ def main(argv=None):
     if summary_error is not None:
         print(f"erro: {summary_error}", file=sys.stderr)
     if error is not None:
-        print(
-            f"erro: {error} (resumo parcial em {summary_path})",
-            file=sys.stderr,
+        # Só aponta o resumo parcial se ele de fato foi gravado.
+        where = (
+            f"resumo parcial em {summary_path}"
+            if summary_error is None
+            else "e o resumo parcial não pôde ser gravado"
         )
+        print(f"erro: {error} ({where})", file=sys.stderr)
     return 1 if (error is not None or summary_error is not None) else 0
 
 
