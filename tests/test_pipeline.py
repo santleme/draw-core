@@ -233,6 +233,59 @@ def test_result_without_mask_clears_coverage():
     assert last[3] is None
 
 
+def _mask_block(y0, y1, x0, x1, shape=(720, 1280)):
+    mask = np.zeros(shape, dtype=np.uint8)
+    mask[y0:y1, x0:x1] = 255
+    return mask
+
+
+def test_coverage_iou_floor_vetoes_phantom_quad():
+    """Quad inflado sobre blob espúrio não sobe para a tinta.
+
+    Mesa vazia real: a seg marca um blob longe do quad que o fit
+    inflou (IoU quad×máscara ~0). Medido nas capturas: fantasmas
+    até 0,082, folha real a partir de 0,514.
+    """
+    mask = _mask_block(50, 400, 900, 1100)  # blob à direita, quad em x<500
+    loop, _det, ink = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", {"coverage_mask": mask})
+    )
+    _drive(loop, 40)
+    assert loop.tracker.corners is not None
+    assert ink.submitted == []
+
+
+def test_coverage_iou_floor_passes_aligned_sheet():
+    """Máscara alinhada ao quad (folha real) segue submetendo."""
+    mask = _mask_block(100, 400, 100, 500)  # coincide com o QUAD
+    loop, _det, ink = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", {"coverage_mask": mask})
+    )
+    _drive(loop, 40)
+    assert ink.submitted, "a folha real não pode ser vetada"
+
+
+def test_coverage_iou_floor_zero_disables():
+    """coverage_iou_floor=0 desliga o piso (comportamento antigo)."""
+    mask = _mask_block(50, 400, 900, 1100)
+    loop, _det, ink = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", {"coverage_mask": mask}),
+        config=PipelineConfig(coverage_iou_floor=0.0),
+    )
+    _drive(loop, 40)
+    assert ink.submitted, "piso zerado mantém a passada de antes"
+
+
+def test_coverage_iou_floor_inert_without_mask():
+    """Resultado sem máscara: piso inerte, submit segue normal."""
+    loop, _det, ink = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", None),
+        config=PipelineConfig(coverage_iou_floor=0.9),
+    )
+    _drive(loop, 40)
+    assert ink.submitted
+
+
 def _seen_then_lost():
     """Vê a folha nos 6 primeiros chamados, depois perde tudo."""
 
