@@ -154,7 +154,7 @@ def test_short_stroke_metric_covers_all_four_letters():
 def test_short_stroke_recall_drops_when_any_one_letter_is_lost(page):
     full = page.prob > 0.5
     for name in bench.SHORT_STROKE_GLYPHS:
-        pred = full & ~page.glyphs[name]
+        pred = full & ~page.arms[name]
         assert bench.short_stroke_recall(pred, page) < 0.9, name
 
 
@@ -277,15 +277,18 @@ def test_cli_synthetic_prints_the_table(capsys):
     out = capsys.readouterr().out
     assert "(a) pauta" in out and "sem filtro" in out and "sobre linha" in out
     assert "pagina torta" in out
+    assert "nan" not in out  # sem filtro não há tempo: imprime "-"
 
 
 def test_cli_writes_json(tmp_path):
     target = tmp_path / "r.json"
     assert bench.main(["--synthetic", "--json", str(target)]) == 0
     data = json.loads(target.read_text())
-    assert "sem filtro, pagina reta" in data["synthetic"]
-    assert "sem filtro, pagina torta (V 0,35)" in data["synthetic"]
-    assert "recalls" not in data["synthetic"]["sem filtro, pagina reta"]
+    # a chave da linha de base reta não mudou (scripts que a leem seguem valendo)
+    assert "sem filtro (identidade)" in data["synthetic"]
+    assert "sem filtro (identidade), pagina torta (V 0,35)" in data["synthetic"]
+    assert "recalls" not in data["synthetic"]["sem filtro (identidade)"]
+    assert "arm_recalls" not in data["synthetic"]["sem filtro (identidade)"]
 
 
 def test_cli_requires_a_mode_and_rejects_unknown_presets(tmp_path):
@@ -328,3 +331,208 @@ def test_crossing_strokes_exclude_the_on_line_glyphs(page):
     """E_on_line e pencil_on_line têm métrica própria."""
     assert not (page.crossing_strokes & page.glyphs["pencil_on_line"]).any()
     assert not (page.crossing_strokes & page.glyphs["E_on_line"]).any()
+
+
+# --------------------------------------------- braços (sem as hastes) — #54
+
+
+def test_stems_do_not_inflate_the_short_stroke_recall(page):
+    """Filtro que apaga os braços mas preserva as hastes: o recall de (c)
+    tem de despencar (a haste intacta não conta)."""
+    full = page.prob > 0.5
+    arms = np.zeros_like(full)
+    for name in bench.SHORT_STROKE_GLYPHS:
+        arms |= page.arms[name]
+    pred = full & ~arms
+    assert bench.short_stroke_recall(pred, page) < 0.15
+    # sem a máscara de braços, o recall do glifo inteiro seguiria alto
+    whole = bench.glyph_recall(pred, page)
+    assert whole["E"] > 0.3 and whole["H"] > 0.3
+
+
+def test_on_line_recall_only_counts_the_arm_on_the_ruling(page):
+    full = page.prob > 0.5
+    pred = full & ~page.arms["E_on_line"]
+    r = bench.score_filter(page, lambda prob: np.where(pred, prob, 0.0))
+    assert r["on_line_recall"] < 0.05  # E de pé, braço da linha apagado
+    assert r["recalls"]["E_on_line"] > 0.5  # o glifo inteiro mascararia isso
+    pred = full & ~page.arms["pencil_on_line"]
+    r = bench.score_filter(page, lambda prob: np.where(pred, prob, 0.0))
+    assert r["pencil_on_line_recall"] < 0.05
+
+
+@pytest.mark.parametrize("tilt", [0.0, 0.35])
+def test_on_line_arms_sit_on_the_ruling_even_on_the_tilted_page(tilt):
+    """Na página em V o braço começava na altura do ponto médio e perdia a
+    linha na ponta esquerda (review do PR #54): agora segue a polilinha."""
+    pg = bench.make_synthetic_page(seed=0, tilt=tilt)
+    for name in ("E_on_line", "pencil_on_line"):
+        arm = pg.arms[name]
+        cols = np.nonzero(arm.any(axis=0))[0]
+        assert cols.size > 40
+        # nas colunas do braço, a pauta mais próxima do braço está dentro dele
+        covered = 0
+        for x in cols:
+            ys = np.nonzero(arm[:, x])[0]
+            near = pg.ruling[ys.min() - 1 : ys.max() + 2, x]
+            covered += bool(near.any() and (arm[:, x] & pg.ruling[:, x]).any())
+        assert covered / cols.size > 0.98, (name, tilt)
+
+
+def test_arms_cover_the_letters_and_exclude_the_stems(page):
+    for name in bench.SHORT_STROKE_GLYPHS:
+        arm, glyph = page.arms[name], page.glyphs[name]
+        assert (arm <= glyph).all() and arm.sum() > 100, name
+    # E, T e H têm haste: o braço é estritamente menor que o glifo
+    for name in ("E", "T", "T2", "H"):
+        assert page.arms[name].sum() < 0.8 * page.glyphs[name].sum(), name
+    np.testing.assert_array_equal(page.arms["S"], page.glyphs["S"])
+
+
+# ------------------------------------------------- JSON, tempo, launch — #54
+
+
+def test_json_report_is_strict_even_with_empty_regions(tmp_path):
+    out = bench._json_safe(
+        {"a": float("nan"), "b": [float("inf"), 1.5], "c": np.float32("nan")}
+    )
+    assert out == {"a": None, "b": [None, 1.5], "c": None}
+    json.dumps(out, allow_nan=False)  # não levanta
+
+
+def test_cli_filter_reports_timings_in_table_and_json(tmp_path, capsys):
+    target = tmp_path / "r.json"
+    argv = ["--synthetic", "--filter", "lab.bench_ink:identity_filter"]
+    assert bench.main([*argv, "--json", str(target)]) == 0
+    out = capsys.readouterr().out
+    assert "lab.bench_ink:identity_filter" in out
+    data = json.loads(target.read_text())  # JSON estrito
+    row = data["synthetic"]["lab.bench_ink:identity_filter"]
+    assert (
+        row["timing"]["p50_ms"] >= 0
+        and row["timing"]["p90_ms"] >= row["timing"]["p50_ms"]
+    )
+    assert "timing" not in data["synthetic"]["sem filtro (identidade)"]
+
+
+def test_cli_rejects_a_bad_filter_spec():
+    for bad in ("sem_dois_pontos", "modulo.que.nao.existe:f", "lab.bench_ink:nada"):
+        with pytest.raises(SystemExit) as error:
+            bench.main(["--synthetic", "--filter", bad])
+        assert error.value.code == 2, bad
+
+
+def test_script_launch_from_another_cwd_can_import_the_lab(tmp_path):
+    """`python lab/bench_ink.py` põe só lab/ no path; run_clip precisa de
+    `lab.replay_lab` (review do PR #54: o pytest esconde isso)."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    script = Path(bench.__file__)
+    code = (
+        "import runpy, sys\n"
+        f"sys.path[:] = [{str(script.parent)!r}] + [p for p in sys.path if p]\n"
+        f"runpy.run_path({str(script)!r}, run_name='bench_as_script')\n"
+        "import lab.replay_lab\n"
+    )
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    done = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert done.returncode == 0, done.stderr
+
+
+# ----------------------------------------------- run_clip: medidas — #54
+
+
+def test_run_clip_final_provisional_comes_from_the_final_state(tmp_path, monkeypatch):
+    """A amostra por passo antecede a publicação do último quadro; o
+    `provisional_last_px` tem de ser o do estado final."""
+    clip = _fake_clip(tmp_path)
+    from draw.ink import worker as worker_mod
+
+    real = worker_mod.PageCleanWorker.stats
+    calls = {"n": 0}
+
+    def stats(self):
+        out = dict(real(self))
+        calls["n"] += 1
+        out["provisional_px"] = 7 if calls["n"] > 10 else 3  # só o final muda
+        return out
+
+    monkeypatch.setattr(worker_mod.PageCleanWorker, "stats", stats)
+    out = bench.run_clip(clip, [], detector=_Detector(), page_clean=_Ink())
+    assert out["provisional_last_px"] == 7
+
+
+def test_run_clip_sums_retractions_across_accumulator_resets(tmp_path, monkeypatch):
+    """Ao trocar de folha o acumulador zera o contador; o total do clipe
+    soma o que foi retratado antes do zero."""
+    clip = _fake_clip(tmp_path)
+    from draw.ink import worker as worker_mod
+
+    real = worker_mod.PageCleanWorker.stats
+    seq = iter([v for v in (0, 100, 250, 5, 40, 60) for _ in range(6)])
+    last = {"v": 0}
+
+    def stats(self):
+        out = dict(real(self))
+        last["v"] = next(seq, last["v"])
+        out["retracted_px_total"] = last["v"]
+        return out
+
+    monkeypatch.setattr(worker_mod.PageCleanWorker, "stats", stats)
+    out = bench.run_clip(clip, [], detector=_Detector(), page_clean=_Ink())
+    assert out["retracted_px_total"] == 250 + 60  # 250 antes do zero + 60 depois
+
+
+def test_main_builds_a_fresh_detector_for_every_clip_and_preset(tmp_path, monkeypatch):
+    """O detector guarda bordas/máscara entre detecções: reuso faria o
+    resultado depender da ordem de execução."""
+    import draw.perception as perception
+
+    built = []
+
+    class FakeDetector:
+        def __init__(self, *args, **kwargs):
+            built.append(self)
+
+        def load(self):
+            pass
+
+    seen = []
+    monkeypatch.setattr(perception, "NeuralSheetDetector", FakeDetector)
+    monkeypatch.setattr(
+        bench,
+        "run_clip",
+        lambda clip, flags, **kw: (
+            seen.append(kw["detector"])
+            or {
+                "clip": "x",
+                "canvas_px": 0,
+                "provisional_median_px": 0.0,
+                "retracted_over_canvas": float("nan"),
+                "cpu_s_per_scene_s": 0.0,
+                "_canvas": None,
+            }
+        ),
+    )
+    import draw.page_clean as page_clean_mod
+
+    class FakeInk:
+        def __init__(self, *a, **k):
+            pass
+
+        def load(self):
+            pass
+
+    monkeypatch.setattr(page_clean_mod, "PageCleanInk", FakeInk)
+    _fake_clip(tmp_path)
+    assert bench.main(["--clips", str(tmp_path), "--presets", "legado,ganho"]) == 0
+    assert len(seen) == 2 and seen[0] is not seen[1]

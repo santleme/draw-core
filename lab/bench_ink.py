@@ -39,7 +39,10 @@ import cv2
 import numpy as np
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(_REPO_ROOT / "src"))
+# `python lab/bench_ink.py` põe só lab/ no path: run_clip importa lab.replay_lab.
+for _p in (str(_REPO_ROOT / "src"), str(_REPO_ROOT)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 # Glifos do requisito (c): traços horizontais curtos de E, T, S e H.
 SHORT_STROKE_GLYPHS = ("E", "T", "T2", "S", "H")
@@ -71,6 +74,9 @@ class SyntheticPage:
     crossing_strokes: np.ndarray
     ticks_zone: np.ndarray
     glyphs: dict = field(default_factory=dict)
+    # Só os braços horizontais (sem as hastes): o que as métricas (c) e
+    # "sobre a linha" medem, para a haste intacta não inflar o recall.
+    arms: dict = field(default_factory=dict)
     period: float = 0.0
     h_pauta: int = 0
     pen: int = 0
@@ -150,6 +156,13 @@ def make_synthetic_page(
     def line_y(kk, x):
         return float(ruling_y(kk, x, **geo)) + period * 0.7
 
+    def on_line(kk, xa, xb):
+        """Pontos sobre a polilinha EXATA da linha kk entre xa e xb."""
+        grid = np.arange(0, w, 4)
+        gy = ruling_y(kk, grid, **geo) + period * 0.7
+        xsel = [xa, *[g for g in grid if xa < g < xb], xb]
+        return [(float(x), float(np.interp(x, grid, gy))) for x in xsel]
+
     gh = int(period * 2.4)  # altura de glifo: a haste cruza ~2 linhas
     gw = int(gh * 0.62)
     specs = []
@@ -166,7 +179,8 @@ def make_synthetic_page(
     specs.append(("diag", [[(260, 540), (330, 670)], [(360, 520), (420, 670)]]))
     # E com o braço de baixo exatamente sobre uma linha
     ex, kk = 160, 14
-    base = line_y(kk, ex + gw // 2)
+    bottom = on_line(kk, ex, ex + gw)  # o braço de baixo: sobre a linha
+    base = bottom[0][1]
     specs.append(
         (
             "E_on_line",
@@ -174,7 +188,7 @@ def make_synthetic_page(
                 [(ex, base - gh), (ex, base)],
                 [(ex, base - gh), (ex + gw, base - gh)],
                 [(ex, base - gh // 2), (ex + int(gw * 0.8), base - gh // 2)],
-                [(ex, base), (ex + gw, line_y(kk, ex + gw))],
+                bottom,
             ],
         )
     )
@@ -185,12 +199,24 @@ def make_synthetic_page(
     # caso ambíguo de qualquer filtro de pauta (só a probabilidade ou a
     # continuidade com a haste o separam). Reportado à parte, sem meta fixa.
     px, pk = 700, 14
-    pbase = line_y(pk, px + gw // 2)
-    pencil_pts = [
-        [(px, pbase - gh), (px, pbase)],
-        [(px, pbase), (px + gw, line_y(pk, px + gw))],
-    ]
+    pencil_arm = on_line(pk, px, px + gw)
+    pbase = pencil_arm[0][1]
+    pencil_pts = [[(px, pbase - gh), (px, pbase)], pencil_arm]
     glyphs.update(_glyph_masks(shape, [("pencil_on_line", pencil_pts)], h_pauta))
+    # Braços: polilinhas horizontais (|dy| <= |dx|/2) de cada glifo; o S (uma
+    # curva só) conta inteiro; nos "sobre a linha" é só o braço que está
+    # sobre a pauta.
+    arms = {}
+    for name, polylines in specs:
+        if name in ("E", "T", "T2", "S", "H"):
+            keep = (
+                polylines
+                if len(polylines) == 1
+                else [pl for pl in polylines if _is_horizontal(pl)]
+            )
+            arms[name] = _glyph_masks(shape, [(name, keep)], pen)[name]
+    arms["E_on_line"] = _glyph_masks(shape, [("a", [bottom])], pen)["a"]
+    arms["pencil_on_line"] = _glyph_masks(shape, [("a", [pencil_arm])], h_pauta)["a"]
     strokes = np.zeros(shape, bool)
     for mask in glyphs.values():
         strokes |= mask
@@ -226,10 +252,17 @@ def make_synthetic_page(
         crossing_strokes=crossing_strokes,
         ticks_zone=ticks_zone,
         glyphs=glyphs,
+        arms=arms,
         period=float(period),
         h_pauta=h_pauta,
         pen=pen,
     )
+
+
+def _is_horizontal(points):
+    pts = np.asarray(points, np.float64)
+    dx, dy = np.abs(np.diff(pts[:, 0])), np.abs(np.diff(pts[:, 1]))
+    return bool((dy <= 0.5 * dx).all())
 
 
 def _glyph_polylines(name, x0, y0, w, h):
@@ -292,11 +325,19 @@ def glyph_recall(pred, page):
     }
 
 
+def arm_recall(pred, page):
+    """Recall por braço horizontal (sem as hastes, que um filtro de pauta
+    preserva de qualquer jeito): E T T2 H S, E_on_line e pencil_on_line."""
+    return {
+        name: _frac((pred & mask).sum(), mask.sum()) for name, mask in page.arms.items()
+    }
+
+
 def short_stroke_recall(pred, page):
-    """(c) Recall agregado dos glifos E T S H (traços horizontais curtos)."""
+    """(c) Recall agregado dos braços horizontais curtos de E T S H."""
     keys = SHORT_STROKE_GLYPHS
-    num = sum((pred & page.glyphs[k]).sum() for k in keys)
-    den = sum(page.glyphs[k].sum() for k in keys)
+    num = sum((pred & page.arms[k]).sum() for k in keys)
+    den = sum(page.arms[k].sum() for k in keys)
     return _frac(num, den)
 
 
@@ -305,14 +346,16 @@ def score_filter(page, fn=None, threshold=0.5):
     prob = page.prob if fn is None else fn(page.prob.copy())
     pred = prob > threshold
     recalls = glyph_recall(pred, page)
+    arms = arm_recall(pred, page)
     return {
         "ruling_removed": ruling_removed(pred, page),
         "crossing_preserved": crossing_preserved(pred, page),
         "ticks_residual": ticks_residual(pred, page),
         "short_stroke_recall": short_stroke_recall(pred, page),
-        "on_line_recall": recalls["E_on_line"],
-        "pencil_on_line_recall": recalls["pencil_on_line"],
+        "on_line_recall": arms["E_on_line"],
+        "pencil_on_line_recall": arms["pencil_on_line"],
         "recalls": recalls,
+        "arm_recalls": arms,
     }
 
 
@@ -371,6 +414,15 @@ def run_clip(clip_dir, flags, *, detector=None, page_clean=None, verify=None):
     meta = json.loads((clip_dir / "clip.json").read_text())
     config.apply_format("a4", meta.get("orientation", "retrato"))
     series = []
+    retracted = {"carry": 0, "last": 0}
+
+    def _track_retractions(stats):
+        # O acumulador zera quando a folha muda: o que já foi retratado antes
+        # do zero entra no total (review do PR #54).
+        now = int(stats.get("retracted_px_total") or 0)
+        if now < retracted["last"]:
+            retracted["carry"] += retracted["last"]
+        retracted["last"] = now
 
     real = pipeline_module.Pipeline
     holder = {}
@@ -384,6 +436,7 @@ def run_clip(clip_dir, flags, *, detector=None, page_clean=None, verify=None):
             result = super().step(packet)
             stats = self.ink_worker.stats()
             series.append(stats.get("provisional_px") or 0)
+            _track_retractions(stats)
             return result
 
     pipeline_module.Pipeline = Spy
@@ -409,15 +462,19 @@ def run_clip(clip_dir, flags, *, detector=None, page_clean=None, verify=None):
         if loop.clean_mask is None
         else np.asarray(loop.clean_mask) > 0
     )
+    # O replay publica a tinta do último quadro DEPOIS de Pipeline.step: a
+    # amostra final vem do estado final, não do último passo.
     stats = loop.ink_worker.stats()
+    _track_retractions(stats)
+    final_provisional = int(stats.get("provisional_px") or 0)
     scene_s = len(records) / meta["scene_fps"]
     out = {
         "clip": clip_dir.name,
         "frames": len(records),
         "canvas_px": int(mask.sum()),
         "provisional_median_px": float(np.median(series)) if series else 0.0,
-        "provisional_last_px": int(series[-1]) if series else 0,
-        "retracted_px_total": int(stats.get("retracted_px_total") or 0),
+        "provisional_last_px": final_provisional,
+        "retracted_px_total": retracted["carry"] + retracted["last"],
         "passes": int(stats.get("passes_total") or 0),
         "cpu_s_per_scene_s": cpu / scene_s if scene_s else float("nan"),
         "wall_s": wall,
@@ -436,6 +493,38 @@ def run_clip(clip_dir, flags, *, detector=None, page_clean=None, verify=None):
 # ------------------------------------------------------------------------ CLI
 
 
+def _json_safe(value):
+    """NaN/inf (razão sem denominador) viram null: JSON estrito não os aceita."""
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, float) and not np.isfinite(value):
+        return None
+    return value
+
+
+def identity_filter():
+    """Fábrica do filtro identidade (exemplo e teste de --filter)."""
+    return lambda prob: prob
+
+
+def _load_filter(spec):
+    """`pacote.modulo:fabrica` -> fn(prob) -> prob (a fábrica é chamada sem args)."""
+    import importlib
+
+    module, _, attr = spec.partition(":")
+    if not module or not attr:
+        raise ValueError(f"--filter espera modulo:fabrica, recebeu {spec!r}")
+    return getattr(importlib.import_module(module), attr)()
+
+
+def _ms(value):
+    return "-" if value is None else f"{value:.2f}"
+
+
 def _print_synthetic(results):
     print("== sintético (gabarito exato) ==")
     print(
@@ -449,8 +538,7 @@ def _print_synthetic(results):
             f"{name:22s} {r['ruling_removed']:10.1%} {r['crossing_preserved']:10.1%} "
             f"{r['ticks_residual']:7d} {r['short_stroke_recall']:12.1%} "
             f"{r['on_line_recall']:12.1%} {r['pencil_on_line_recall']:15.1%} "
-            f"{t.get('p50_ms', float('nan')):8.2f} "
-            f"{t.get('p90_ms', float('nan')):8.2f}"
+            f"{_ms(t.get('p50_ms')):>8s} {_ms(t.get('p90_ms')):>8s}"
         )
 
 
@@ -479,6 +567,11 @@ def main(argv=None):
         default="legado,ganho",
         help="presets separados por vírgula: " + ", ".join(PRESETS),
     )
+    parser.add_argument(
+        "--filter",
+        help="modulo:fabrica de um filtro prob->prob a medir no sintético "
+        "(custo p50/p90 incluso); sem ele, só a linha de base sem filtro",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--models", default=str(_REPO_ROOT / "models"))
     parser.add_argument("--json", help="grava o resultado completo neste arquivo")
@@ -492,14 +585,24 @@ def main(argv=None):
     report = {}
     if args.synthetic:
         pages = {
-            "reta": make_synthetic_page(seed=args.seed),
-            "torta (V 0,35)": make_synthetic_page(seed=args.seed, tilt=0.35),
+            "": make_synthetic_page(seed=args.seed),
+            ", pagina torta (V 0,35)": make_synthetic_page(seed=args.seed, tilt=0.35),
         }
         results = {
-            f"sem filtro, pagina {name}": score_filter(pg) for name, pg in pages.items()
+            f"sem filtro (identidade){suffix}": score_filter(pg)
+            for suffix, pg in pages.items()
         }
+        if args.filter:
+            try:
+                for suffix, pg in pages.items():
+                    fn = _load_filter(args.filter)
+                    row = score_filter(pg, fn)
+                    row["timing"] = time_ms(fn, pg.prob)
+                    results[f"{args.filter}{suffix}"] = row
+            except (ValueError, ImportError, AttributeError) as error:
+                parser.error(str(error))
         report["synthetic"] = {
-            k: {kk: vv for kk, vv in v.items() if kk != "recalls"}
+            k: {kk: vv for kk, vv in v.items() if kk not in ("recalls", "arm_recalls")}
             for k, v in results.items()
         }
         _print_synthetic(results)
@@ -509,10 +612,17 @@ def main(argv=None):
         from draw.perception import NeuralSheetDetector
 
         models = Path(args.models)
-        detector = NeuralSheetDetector(
-            str(models / "draw_seg_v3_dyn.onnx"), verify=verify_model
-        )
-        detector.load()
+
+        def fresh_detector():
+            # O detector guarda bordas e máscara entre detecções: reusá-lo
+            # entre clipes/presets faria o resultado depender da ordem de
+            # execução (review do PR #54).
+            detector = NeuralSheetDetector(
+                str(models / "draw_seg_v3_dyn.onnx"), verify=verify_model
+            )
+            detector.load()
+            return detector
+
         page_clean = PageCleanInk(
             str(models / "page_clean_unet.onnx"), verify=verify_model
         )
@@ -527,7 +637,7 @@ def main(argv=None):
                 row = run_clip(
                     clip,
                     preset_flags(preset),
-                    detector=detector,
+                    detector=fresh_detector(),
                     page_clean=page_clean,
                     verify=None,
                 )
@@ -537,7 +647,9 @@ def main(argv=None):
         report["clips"] = rows
         _print_clips(rows)
     if args.json:
-        Path(args.json).write_text(json.dumps(report, indent=1, default=float))
+        Path(args.json).write_text(
+            json.dumps(_json_safe(report), indent=1, allow_nan=False)
+        )
     return 0
 
 
