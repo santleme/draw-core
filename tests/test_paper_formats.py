@@ -176,3 +176,13 @@ def test_warp_sheet_em_paisagem_sai_deitado():
         assert paper.warp_sheet(frame, quad).shape == (850, 1200, 3)
     finally:
         config.apply_format("a4")
+
+
+def test_paper_mm_valida_como_paper_grid():
+    """Mesma validação nas duas funções (review #50): orientação ou
+    formato desconhecido é ValueError, não dimensões inventadas."""
+    with pytest.raises(ValueError, match="orientacao"):
+        config.paper_mm("a4", "diagonal")
+    with pytest.raises(ValueError, match="formato"):
+        config.paper_mm("a9")
+    assert config.paper_mm("carta", "paisagem") == (279.0, 216.0)

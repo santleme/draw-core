@@ -1772,7 +1772,10 @@ def main():
         "--format",
         choices=list(config.FORMATS),
         default=None,
-        help="formato da sessao em retrato (padrao: a4)",
+        help=(
+            "formato da folha (padrao: a4); em retrato, a menos que combinado "
+            "com --orientation paisagem"
+        ),
     )
     args = parser.parse_args()
     if args.allow_unverified:

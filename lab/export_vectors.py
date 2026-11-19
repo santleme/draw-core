@@ -12,6 +12,7 @@ Exemplo:
   python lab/export_vectors.py pagina.png --out-dir saida/
       [--mask model|otsu] [--onnx models/page_clean_unet.onnx]
       [--epsilon 1.5] [--format a4|a5|a3|carta|caderno]
+      [--orientation auto|retrato|paisagem]
 """
 
 import argparse
@@ -65,6 +66,30 @@ def ink_mask_model(bgr, onnx_path, verify, threshold=None):
     return cleaner.ink_mask(bgr) > 0, cleaner.threshold
 
 
+def resolve_orientation(orientation, img_w, img_h):
+    """ "auto" deduz da imagem: mais larga que alta = paisagem.
+
+    O canvas que o app salva (tecla s) tem a grade da sessão — em
+    paisagem, 1200x850 — e o formato A4 é registrado em retrato: sem
+    isto, a imagem deitada era escalada como retrato (largura
+    encolhida e altura esticada, review do PR #50).
+    """
+    if orientation == "auto":
+        return "paisagem" if img_w > img_h else "retrato"
+    if orientation not in config.ORIENTATIONS:
+        raise ValueError(f"orientacao desconhecida: {orientation}")
+    return orientation
+
+
+def _format_table():
+    """Grades canônicas (nome, mm, grade, mm/px) nas duas orientações."""
+    return [
+        (n, config.paper_mm(n, o), config.paper_grid(n, o), config.mm_per_px(n))
+        for n in config.FORMATS
+        for o in config.ORIENTATIONS
+    ]
+
+
 def export_vectors(
     bgr,
     mask_source="model",
@@ -75,20 +100,24 @@ def export_vectors(
     paper_format="a4",
     verify="manifest",
     threshold=None,
+    orientation="auto",
 ):
     """Imagem na grade da página -> dict com polilinhas e estatísticas.
 
     verify é o callable de integridade do modelo: o padrão "manifest"
     injeta draw.infra.manifest.verify_model; None desliga (bancadas e
     testes com modelos fora do manifesto). Só se aplica a --mask model.
+    orientation: "auto" (padrão, deduzida da imagem), "retrato" ou
+    "paisagem"; só vale sem paper_mm.
     """
     if verify == "manifest":
         from draw.infra.manifest import verify_model
 
         verify = verify_model
     img_h, img_w = bgr.shape[:2]
+    orientation = resolve_orientation(orientation, img_w, img_h)
     if paper_mm is None:
-        paper_w_mm, paper_h_mm = config.FORMATS[paper_format]
+        paper_w_mm, paper_h_mm = config.paper_mm(paper_format, orientation)
         # A escala uniforme do formato só vale na grade canônica dele;
         # fora dela, por eixo a partir das dimensões (adendo da
         # auditoria #47 — ver _export_scale nos primitivos).
@@ -97,10 +126,7 @@ def export_vectors(
             img_h,
             paper_w_mm,
             paper_h_mm,
-            formats=[
-                (n, dims, config.paper_grid(n), config.mm_per_px(n))
-                for n, dims in config.FORMATS.items()
-            ],
+            formats=_format_table(),
         )
     else:
         paper_w_mm, paper_h_mm = paper_mm
@@ -126,6 +152,8 @@ def export_vectors(
         "stroke_width_px": width_px,
         "stroke_width_mm": width_px * 0.5 * (sx + sy),
         "scale_mm_per_px": (sx, sy),
+        "paper_mm": (paper_w_mm, paper_h_mm),
+        "orientation": orientation,
         "points_raw": int(sum(len(poly["points"]) for poly in raw)),
         "points_simplified": int(sum(len(poly["points"]) for poly in simplified)),
         "mask_threshold": mask_threshold,
@@ -170,6 +198,16 @@ def main(argv=None):
             "(ex.: 0.85 para o round-v1), que senão herda o DEFAULT_THRESHOLD"
         ),
     )
+    parser.add_argument(
+        "--orientation",
+        choices=("auto", *config.ORIENTATIONS),
+        default="auto",
+        help=(
+            "orientação da folha para a escala em mm (padrão auto: imagem mais "
+            "larga que alta = paisagem, como o canvas salvo por --orientation "
+            "paisagem do app); só vale com --format"
+        ),
+    )
     size = parser.add_mutually_exclusive_group()
     size.add_argument(
         "--format",
@@ -194,9 +232,6 @@ def main(argv=None):
         print(f"erro: não foi possível ler {args.input}", file=sys.stderr)
         return 1
     img_h, img_w = bgr.shape[:2]
-    paper_w_mm, paper_h_mm = (
-        config.FORMATS[args.format] if args.paper_mm is None else args.paper_mm
-    )
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     stem = Path(args.input).stem
@@ -212,7 +247,9 @@ def main(argv=None):
         paper_format=args.format,
         verify=verify,
         threshold=args.threshold,
+        orientation=args.orientation,
     )
+    paper_w_mm, paper_h_mm = result["paper_mm"]
     svg_path = out_dir / f"{stem}.svg"
     dxf_path = out_dir / f"{stem}.dxf"
     write_svg(
@@ -270,6 +307,7 @@ def main(argv=None):
         ),
         "page_px": [img_w, img_h],
         "paper_mm": [paper_w_mm, paper_h_mm],
+        "orientation": result["orientation"] if args.paper_mm is None else None,
         "paper_format": args.format if args.paper_mm is None else None,
         "scale_mm_per_px": result["scale_mm_per_px"],
         "epsilon_px": args.epsilon,

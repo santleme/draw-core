@@ -58,6 +58,10 @@ def paper_mm(name=None, orientation=None):
     """(largura_mm, altura_mm) da folha na orientação da grade."""
     name = PAPER_FORMAT if name is None else name
     orientation = PAPER_ORIENTATION if orientation is None else orientation
+    if name not in FORMATS:
+        raise ValueError(f"formato de folha desconhecido: {name}")
+    if orientation not in ORIENTATIONS:
+        raise ValueError(f"orientacao desconhecida: {orientation}")
     width_mm, height_mm = FORMATS[name]
     return (width_mm, height_mm) if orientation == "retrato" else (height_mm, width_mm)
 

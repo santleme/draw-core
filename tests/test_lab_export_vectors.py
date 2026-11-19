@@ -9,6 +9,8 @@ import numpy as np
 import pytest
 from lab.export_vectors import export_vectors, main
 
+from draw import config
+
 
 def _page(path):
     img = np.full((120, 85, 3), 245, np.uint8)
@@ -152,3 +154,66 @@ def test_main_threshold_override_for_older_model(tmp_path):
 def test_main_threshold_outside_open_interval_is_refused(tmp_path, bad):
     with pytest.raises(SystemExit):
         main([str(tmp_path / "x.png"), "--threshold", bad])
+
+
+def _canvas(w, h):
+    img = np.full((h, w, 3), 255, np.uint8)
+    cv2.line(img, (w // 12, h // 8), (w - w // 12, h // 8), 0, 5)
+    cv2.line(img, (w // 12, h // 8), (w // 12, h - h // 8), 0, 5)
+    return img
+
+
+def test_landscape_canvas_exports_with_uniform_scale():
+    """Canvas salvo em paisagem (1200x850): escala igual nos dois eixos,
+    folha 297x210. Antes saía 0,175 x 0,349 mm/px: 1000 px viravam
+    175 mm em vez de 247,5 (review #50)."""
+    result = export_vectors(_canvas(1200, 850), mask_source="otsu")
+    assert result["orientation"] == "paisagem"
+    assert result["paper_mm"] == (297.0, 210.0)
+    assert result["scale_mm_per_px"] == pytest.approx((0.2475, 0.2475))
+
+
+def test_portrait_canvas_is_unchanged():
+    result = export_vectors(_canvas(850, 1200), mask_source="otsu")
+    assert result["orientation"] == "retrato"
+    assert result["paper_mm"] == (210.0, 297.0)
+    assert result["scale_mm_per_px"] == pytest.approx((0.2475, 0.2475))
+
+
+@pytest.mark.parametrize("name", list(config.FORMATS))
+@pytest.mark.parametrize("orientation", config.ORIENTATIONS)
+def test_every_format_exports_uniform_scale_in_both_orientations(name, orientation):
+    """A grade canônica de qualquer formato, nas duas orientações, tem
+    a escala uniforme mm_per_px — nada de eixo esticado."""
+    w, h = config.paper_grid(name, orientation)
+    result = export_vectors(
+        _canvas(w, h), mask_source="otsu", paper_format=name, orientation=orientation
+    )
+    unit = config.mm_per_px(name)
+    assert result["scale_mm_per_px"] == pytest.approx((unit, unit))
+    assert result["paper_mm"] == config.paper_mm(name, orientation)
+
+
+def test_orientation_can_be_forced_and_validated():
+    img = _canvas(1200, 850)
+    assert (
+        export_vectors(img, mask_source="otsu", orientation="retrato")["orientation"]
+        == "retrato"
+    )
+    with pytest.raises(ValueError, match="orientacao"):
+        export_vectors(img, mask_source="otsu", orientation="diagonal")
+
+
+def test_main_landscape_png_writes_landscape_svg(tmp_path):
+    """Caminho completo do CLI com o PNG que a tecla s salva em paisagem."""
+    page = tmp_path / "canvas.png"
+    cv2.imwrite(str(page), _canvas(1200, 850))
+    out = tmp_path / "out"
+    assert main([str(page), "--out-dir", str(out), "--mask", "otsu"]) == 0
+    svg = (out / "canvas.svg").read_text()
+    assert 'width="297.0mm" height="210.0mm"' in svg
+    proof = json.loads((out / "canvas_proof.json").read_text())
+    assert proof["orientation"] == "paisagem"
+    assert proof["paper_mm"] == [297.0, 210.0]
+    assert proof["iou_svg_roundtrip"] > 0.5
+    assert proof["iou_dxf_roundtrip"] > 0.5
