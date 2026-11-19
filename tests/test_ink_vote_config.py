@@ -172,3 +172,25 @@ def test_markers_mode_rejects_ink_vote(monkeypatch):
     with pytest.raises(SystemExit) as error:
         app_module.main()
     assert error.value.code == 2
+
+
+def test_main_combines_ink_vote_gain_and_rotation(monkeypatch):
+    """As três opções coexistem em main(): soltar qualquer uma na montagem
+    do PipelineConfig/run passaria despercebido sem este teste (review
+    #53). Voto estrito, ganho e rotação chegam juntos ao run()."""
+    seen = []
+    monkeypatch.setattr(app_module, "run", lambda **kw: seen.append(kw))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["draw", "--ink-vote", "0.85", "--ink-gain", "--rotate", "180"],
+    )
+    app_module.main()
+    kwargs = seen[-1]
+    shift = 0.85 - LEGACY_VOTE_LEVEL
+    assert kwargs["pipeline_config"].ink_auto_gain is True
+    assert kwargs["pipeline_config"].ink.vote_score_strong == pytest.approx(
+        1.9 + 3 * shift
+    )
+    assert kwargs["pipeline_config"].ink.seen_threshold == 0.7
+    assert kwargs["rotation"] == 180
