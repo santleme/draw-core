@@ -32,6 +32,16 @@ class PipelineConfig:
     - seg_hand_occlusion (era DRAW_SEG_HAND_OCCLUSION): a classe mão
       do segmentador vira segundo sinal de oclusão — basta um dizer
       "mão" para a passada não enxergar a folha ali.
+    - coverage_iou_floor: piso do IoU entre o quad retificado e a
+      máscara de cobertura seg, no espaço da câmera. O quad fantasma
+      da mesa vazia — a máscara marca um blob espúrio e o fit infla
+      quatro cantos sobre mesa — mede IoU perto de zero; a folha
+      real com quad estourado em movimento segue dominada pela
+      interseção. Abaixo do piso a passada de tinta não sobe:
+      submeter a região é trabalho morto e cada pixel é mesa.
+      Medido nas capturas reais: quads fantasmas de mesa vazia até
+      0,082; pior folha real em movimento 0,514 — 0,2 separa os
+      dois lados com margem >2x de cada um. 0 desliga o piso.
     - follow_move (era DRAW_INK_FOLLOW_MOVE): com a geometria de
       tinta congelada sem mão, um deslocamento sustentado da folha
       reparte o histórico de cantos na posição nova.
@@ -43,5 +53,6 @@ class PipelineConfig:
     canvas_persist: bool = True
     skip_stale: bool = True
     seg_hand_occlusion: bool = True
+    coverage_iou_floor: float = 0.2
     follow_move: bool = True
     ink: InkConfig = InkConfig()

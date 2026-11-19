@@ -223,6 +223,26 @@ class Pipeline:
         )
         return coverage
 
+    def _quad_coverage_iou(self, warp_corners):
+        """IoU do quad com a mascara de cobertura no espaco da camera.
+
+        None sem mascara publicada (coverage desligado ou resultado
+        sem extras) — o piso fica inerte e o comportamento segue o
+        de antes. Com mascara, mede o quanto o quad que retifica o
+        warp confere com a folha segmentada: o quad fantasma sobre
+        mesa vazia cobre quase tudo de fora da mascara; a folha
+        real, mesmo com o quad estourado, domina a intersecao.
+        """
+        if self._coverage_mask is None:
+            return None
+        quad = np.zeros(self._coverage_mask.shape, np.uint8)
+        cv2.fillConvexPoly(quad, np.round(warp_corners).astype(np.int32), 1)
+        mask = self._coverage_mask > 0
+        union = (quad.astype(bool) | mask).sum()
+        if not union:
+            return 0.0
+        return float((quad.astype(bool) & mask).sum() / union)
+
     def _warp_and_submit_ink(self, frame, warp_corners):
         """Warp + visibilidade + submissao a trabalhadora de tinta.
 
@@ -242,6 +262,14 @@ class Pipeline:
             # zera) — a passada e trabalho morto por construcao.
             # Passada fresca nao e afetada: _frames_since_seen = 0
             # nela.
+            return
+        iou = self._quad_coverage_iou(warp_corners)
+        if iou is not None and iou < self._config.coverage_iou_floor:
+            # Coverage floor: o quad retifica uma regiao que a
+            # segmentacao nao reconhece como folha — o fit inflou
+            # cantos sobre um blob espurio da mesa vazia. Submeter
+            # o retificado de mesa e trabalho morto e cada pixel
+            # e mesa na trabalhadora de tinta.
             return
         ink_warped = self._warp_sheet(frame, warp_corners)
         # Visibilidade na grade da pagina: onde a mao esta, a
