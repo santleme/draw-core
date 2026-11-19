@@ -49,6 +49,8 @@ _JUMP_PENALTY = 0.02
 # Portão
 _T_RUN = 0.5  # probabilidade que conta como "tinta" para o run-length
 _R = 6  # janela vertical de medida, px de cada lado
+_SUPPORT_W = 48  # px de cada janela do teste de suporte
+_MIN_SUPPORT = 0.35  # fração minima de janelas com tinta sobre a linha
 _ANCHOR_PAD = 2  # colunas protegidas em volta de um cruzamento
 # Espessura apagável: <= h_pauta + _THIN_MARGIN (a pauta real oscila 3-6 px, medido no e5).
 _THIN_MARGIN = 2
@@ -264,7 +266,7 @@ def _refine(score, seeds, d_cols, c_lo, c_hi, c_seed=0, slope=0.0):
     return (base + band[off]).astype(np.float32)  # (C, K) linhas reduzidas
 
 
-def _segment(score, c_lo, c_hi, width):
+def _segment(score, c_lo, c_hi, width, height):
     found = _seeds(score, c_lo, c_hi)
     if found is None:
         return None
@@ -272,14 +274,20 @@ def _segment(score, c_lo, c_hi, width):
     dmax = int(1.2 * lag) + 2
     d_cols = _comb_track(score, seeds, c_seed, c_lo, c_hi, dmax, slope)
     rows = _refine(score, seeds, d_cols, c_lo, c_hi, c_seed, slope)  # (C, K)
-    xc = np.arange(c_lo, c_hi) * _DS_X + (_DS_X - 1) / 2.0
-    x0, x1 = c_lo * _DS_X, min(width, c_hi * _DS_X)
+    # A grade reduzida vem de um resize: o passo real é width/w_s (nao _DS_X
+    # quando a largura nao e multipla de 6: 850 -> 141 colunas deixava as
+    # ultimas 4 sem caminho). A ultima metade vai ate a borda.
+    w_s, h_s = score.shape[1], score.shape[0]
+    rx, ry = width / w_s, height / h_s
+    xc = (np.arange(c_lo, c_hi) + 0.5) * rx
+    x0 = int(round(c_lo * rx))
+    x1 = width if c_hi >= w_s else int(round(c_hi * rx))
     xs = np.arange(x0, x1, dtype=np.float32)
-    full = rows * _DS_Y + (_DS_Y - 1) / 2.0
+    full = (rows + 0.5) * ry
     paths = np.stack(
         [np.interp(xs, xc, full[:, k]) for k in range(full.shape[1])]
     ).astype(np.float32)
-    return Segment(x0=x0, x1=x1, paths=paths, period=float(lag * _DS_Y))
+    return Segment(x0=x0, x1=x1, paths=paths, period=float(lag * ry))
 
 
 def estimate(prob, visible=None):
@@ -292,9 +300,10 @@ def estimate(prob, visible=None):
     for c_lo, c_hi in ((0, split), (split, w_s)):
         if c_hi - c_lo < 20:
             continue
-        seg = _segment(score, c_lo, c_hi, w)
+        seg = _segment(score, c_lo, c_hi, w, h)
         if seg is not None:
             segments.append(seg)
+    segments = [seg for seg in segments if _support(prob, seg) >= _MIN_SUPPORT]
     if not segments:
         return None
     h_pauta = _estimate_h(prob, segments)
@@ -412,6 +421,22 @@ def _dilate_cols(mask, pad):
     return out
 
 
+def _support(prob, seg):
+    """Fração das janelas de _SUPPORT_W px, ao longo da pagina, em que a linha
+    tem tinta fina sobre o caminho (mediana das linhas).
+
+    Pauta de verdade corre a largura da folha; um tracejado de caneta, ou
+    qualquer coisa periodica numa faixa so, nao: seu suporte e local.
+    """
+    ink = (prob > _T_RUN).view(np.uint8)
+    pattern, _ = _Track(seg, prob.shape).window(ink)
+    has = _lut()[0][pattern] >= 1  # (K, X)
+    k, x = has.shape
+    n = max(1, x // _SUPPORT_W)
+    win = has[:, : n * _SUPPORT_W].reshape(k, n, _SUPPORT_W).any(axis=2)
+    return float(np.median(win.mean(axis=1)))
+
+
 def _estimate_h(prob, segments):
     """Espessura típica da pauta (px): mediana dos runs finos ao longo dos caminhos."""
     ink = (prob > _T_RUN).view(np.uint8)
@@ -507,7 +532,7 @@ def erase_tracks(prob, tracks, h_pauta):
         length = run[ks, xs].astype(np.int64) + 2
         top = centers[ks, xs] - up - 1
         flat_cols = xs + track.x0
-        for j in range(h_run + 3):
+        for j in range(h_run + _THIN_MARGIN + 2):
             sel = (j < length) & (top + j >= 0) & (top + j < h)
             if sel.any():
                 flat_prob[(top[sel] + j) * w + flat_cols[sel]] = 0.0
@@ -539,6 +564,11 @@ class RulingFilter:
             self._model = estimate(prob, visible) or RulingModel((), 0.0, prob.shape)
             self._tracks = [_Track(seg, prob.shape) for seg in self._model.segments]
             self._age = 0
+            if not self._tracks and visible is not None and not visible.all():
+                # Nao achou pauta com a mao tapando parte da folha: o negativo
+                # vale so para esta vista. Reestima na proxima passada, que
+                # pode ja ser sem mao (review do PR #56).
+                self._age = self.reestimate_every
         self._age += 1
         if not self._tracks:
             self.last_info = {"lines": 0, "estimated": stale}

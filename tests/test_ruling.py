@@ -251,3 +251,65 @@ def test_worker_drops_the_cached_model_when_the_generation_changes(monkeypatch):
     gen2 = worker.new_generation()
     _run_one_pass(worker, now, prob.shape, gen2)
     assert len(resets) == n + 1  # outra folha: reestima
+
+
+# ------------------------------------------------ achados do Devin (#56)
+
+
+def test_a_local_hatch_of_pen_strokes_is_not_mistaken_for_ruling():
+    """8 tracos de caneta igualmente espacados numa faixa so, em papel liso:
+    periodicos, mas sem suporte ao longo da folha (review #56)."""
+    prob = np.zeros((850, 850), np.float32)
+    for i in range(8):
+        prob[200 + 40 * i : 202 + 40 * i, 300:440] = 0.95
+    before = prob.copy()
+    assert ruling.estimate(before) is None
+    f = ruling.RulingFilter()
+    np.testing.assert_array_equal(f.apply(prob), before)
+    assert f.last_info["lines"] == 0
+
+
+def test_ruling_that_reaches_the_right_edge_of_an_850_wide_page_is_erased():
+    """850 // 6 = 141 colunas: o passo real nao e 6. As ultimas 4 colunas
+    ficavam sem caminho e a pauta ali sobrevivia ao voto (review #56)."""
+    prob = np.zeros((1200, 850), np.float32)
+    for k in range(18):
+        prob[100 + 50 * k : 102 + 50 * k, :] = 0.95
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out > 0.5).sum() == 0
+    assert (out[:, 840:] > 0.5).sum() == 0  # inclusive as colunas 846-849
+
+
+def test_soft_fringe_of_the_thickest_erasable_run_is_erased_too():
+    """Run de h_pauta + 2 linhas: a franja suave de baixo ficava (o laco
+    parava uma linha antes)."""
+    prob = np.zeros((600, 1200), np.float32)
+    for k in range(12):
+        y = 80 + 40 * k
+        prob[y : y + 2, :] = 0.95
+        prob[y : y + 4, 300:360] = 0.95  # trecho de h_pauta + 2
+        prob[y + 4, 300:360] = 0.3  # franja suave logo abaixo
+        prob[y - 1, 300:360] = 0.3  # e acima
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert out[:, 300:360].max() == 0.0
+
+
+def test_a_missed_estimate_under_a_hand_is_retried_when_the_hand_leaves():
+    """Sem pauta achada com a mao tapando a folha, o negativo nao pode ficar
+    em cache por 24 passadas: a pauta seria confirmada como tinta (review
+    #56)."""
+    prob = np.zeros((600, 1200), np.float32)
+    for k in range(12):
+        prob[80 + 40 * k : 82 + 40 * k, :] = 0.95
+    visible = np.zeros(prob.shape, bool)  # `visible` = sem mao: tudo tapado
+    f = ruling.RulingFilter()
+    f.apply(prob.copy(), visible)
+    assert f.last_info["lines"] == 0
+    out = f.apply(prob.copy(), None)  # mao saiu: reestima ja na passada seguinte
+    assert f.last_info["lines"] > 0 and (out > 0.5).sum() == 0
+    # e sem mao, um negativo continua em cache (nao reestima toda passada)
+    blank = ruling.RulingFilter()
+    blank.apply(np.zeros((600, 1200), np.float32), None)
+    assert blank.last_info["estimated"] is True
+    blank.apply(np.zeros((600, 1200), np.float32), None)
+    assert blank.last_info["estimated"] is False
