@@ -215,7 +215,10 @@ def main(argv=None):
     )
     parser.add_argument("--label", default="", help="rótulo gravado no summary")
     parser.add_argument(
-        "--threshold", type=float, default=None, help="limiar da máscara (vence o manifesto)"
+        "--threshold",
+        type=float,
+        default=None,
+        help="limiar da máscara (vence o manifesto)",
     )
     args = parser.parse_args(argv)
 
