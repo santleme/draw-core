@@ -431,6 +431,35 @@ def warp_sheet(frame, corners, destination=None):
 # Piso de cobertura válida do mapa denso: abaixo disso o remap
 # teria buraco demais e a homografia de 4 cantos é resposta melhor.
 _UVMAP_MIN_VALID = 0.2
+# Fração mínima de amostras válidas na vizinhança para um ponto do
+# mapa redimensionado continuar válido (convolução normalizada).
+_UVMAP_RESIZE_SUPPORT = 0.5
+
+
+def _uv_valid(uv):
+    """Ponto utilizável: as duas coordenadas finitas e dentro de [0, 1]."""
+    with np.errstate(invalid="ignore"):
+        return (np.isfinite(uv) & (uv >= 0.0) & (uv <= 1.0)).all(axis=0)
+
+
+def _resize_uv(uv, valid, w, h):
+    """Redimensiona o mapa sem espalhar buracos (convolução normalizada).
+
+    Interpolar NaN direto contamina os vizinhos válidos. Aqui cada
+    canal é reamostrado com os inválidos zerados e dividido pela
+    reamostragem do próprio peso de validade; só fica inválido o
+    ponto cuja vizinhança é majoritariamente buraco.
+    """
+    weight = valid.astype(np.float32)
+    support = cv2.resize(weight, (w, h), interpolation=cv2.INTER_LINEAR)
+    out = np.empty((2, h, w), np.float32)
+    for c in range(2):
+        filled = np.where(valid, uv[c], 0.0).astype(np.float32)
+        acc = cv2.resize(filled, (w, h), interpolation=cv2.INTER_LINEAR)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            out[c] = acc / support
+    out[:, support < _UVMAP_RESIZE_SUPPORT] = np.nan
+    return out
 
 
 def warp_sheet_uvmap(frame, uvmap, corners=None, destination=None):
@@ -438,13 +467,16 @@ def warp_sheet_uvmap(frame, uvmap, corners=None, destination=None):
 
     uvmap: mapa backward (2,H,W) normalizado em [0,1] — para cada
     posição da grade de saída, a coordenada de entrada a amostrar
-    (a convenção do modelo de folha v4). A grade do mapa define a
-    saída; NaN/|fora de [0,1]| vira borda preta.
+    (a convenção do modelo de folha v4). Ponto NaN ou fora de [0,1]
+    é inválido e vira borda preta.
 
-    Sem mapa, com mapa vazio demais ou com poucos pontos válidos
-    (<20%), cai na homografia de `corners` — o caminho clássico
-    segue disponível enquanto a cabeça uvmap não chega ao seg.
-    Devolve None se não houver nem mapa útil nem cantos.
+    A saída tem o mesmo contrato de `warp_sheet`: sempre a grade do
+    papel (PAPER_W x PAPER_H), com o mapa posicionado no retângulo de
+    `destination` — trocar de caminho nunca muda o tamanho da imagem.
+
+    Sem mapa, com mapa de área zero ou com poucos pontos válidos
+    (<20%, medidos já na grade de saída), cai na homografia de
+    `corners`. Devolve None se não houver nem mapa útil nem cantos.
     """
     if destination is None:
         destination = [
@@ -454,36 +486,35 @@ def warp_sheet_uvmap(frame, uvmap, corners=None, destination=None):
             (0, config.PAPER_H),
         ]
     dst = np.asarray(destination, dtype=np.float32).reshape(4, 2)
+    x0 = int(round(min(dst[0, 0], dst[3, 0])))
+    y0 = int(round(min(dst[0, 1], dst[1, 1])))
     w = int(round(max(dst[1, 0] - dst[0, 0], dst[2, 0] - dst[3, 0])))
     h = int(round(max(dst[3, 1] - dst[0, 1], dst[2, 1] - dst[1, 1])))
-    valid_frac = 0.0
-    if uvmap is not None:
-        uv = np.asarray(uvmap, dtype=np.float32)
-        if uv.ndim == 3 and uv.shape[0] == 2:
-            valid_frac = float(np.isfinite(uv).all(axis=0).mean())
-    if uvmap is None or valid_frac < _UVMAP_MIN_VALID:
+    uv = None
+    if uvmap is not None and w > 0 and h > 0:
+        candidate = np.asarray(uvmap, dtype=np.float32)
+        if candidate.ndim == 3 and candidate.shape[0] == 2 and candidate[0].size:
+            valid = _uv_valid(candidate)
+            if candidate.shape[1:] != (h, w):
+                candidate = _resize_uv(candidate, valid, w, h)
+                valid = _uv_valid(candidate)
+            if float(valid.mean()) >= _UVMAP_MIN_VALID:
+                uv = candidate
+    if uv is None:
         if corners is None:
             return None
         return warp_sheet(frame, corners, destination=destination)
-    if uv.shape[1:] != (h, w):
-        uv = np.stack(
-            [
-                cv2.resize(uv[c], (w, h), interpolation=cv2.INTER_LINEAR)
-                for c in range(2)
-            ]
-        )
-    map_x = uv[0] * (frame.shape[1] - 1)
-    map_y = uv[1] * (frame.shape[0] - 1)
-    bad = (
-        ~np.isfinite(map_x)
-        | ~np.isfinite(map_y)
-        | (map_x < 0)
-        | (map_x > frame.shape[1] - 1)
-        | (map_y < 0)
-        | (map_y > frame.shape[0] - 1)
-    )
-    map_x = np.where(bad, -1.0, map_x).astype(np.float32)
-    map_y = np.where(bad, -1.0, map_y).astype(np.float32)
+    grid_h, grid_w = config.PAPER_H, config.PAPER_W
+    map_x = np.full((grid_h, grid_w), -1.0, np.float32)
+    map_y = np.full((grid_h, grid_w), -1.0, np.float32)
+    # Recorte do retângulo de destino que cai dentro da grade.
+    gx0, gy0 = max(x0, 0), max(y0, 0)
+    gx1, gy1 = min(x0 + w, grid_w), min(y0 + h, grid_h)
+    if gx1 > gx0 and gy1 > gy0:
+        sub = uv[:, gy0 - y0 : gy1 - y0, gx0 - x0 : gx1 - x0]
+        ok = _uv_valid(sub)
+        map_x[gy0:gy1, gx0:gx1] = np.where(ok, sub[0] * (frame.shape[1] - 1), -1.0)
+        map_y[gy0:gy1, gx0:gx1] = np.where(ok, sub[1] * (frame.shape[0] - 1), -1.0)
     return cv2.remap(
         frame,
         map_x,

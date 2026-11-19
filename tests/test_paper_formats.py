@@ -63,9 +63,12 @@ def test_warp_sheet_uvmap_identity_map_reproduz_frame():
     out = paper.warp_sheet_uvmap(
         frame, uv, destination=[(0, 0), (80, 0), (80, 60), (0, 60)]
     )
+    # Mesmo contrato do warp_sheet: grade do papel, mapa no destino.
+    assert out.shape == (config.PAPER_H, config.PAPER_W, 3)
     np.testing.assert_allclose(
-        out[2:-2, 2:-2].astype(np.int32), frame[2:-2, 2:-2].astype(np.int32), atol=1
+        out[2:58, 2:78].astype(np.int32), frame[2:58, 2:78].astype(np.int32), atol=1
     )
+    assert not out[60:, :].any() and not out[:, 80:].any()
 
 
 def test_warp_sheet_uvmap_sem_mapa_cai_na_homografia():
@@ -91,6 +94,74 @@ def test_warp_sheet_uvmap_mapa_quase_vazio_faz_fallback():
         ),
         paper.warp_sheet(frame, quad, destination=[(0, 0), (80, 0), (80, 60), (0, 60)]),
     )
+
+
+_QUAD = np.float32([[10, 10], [290, 10], [290, 190], [10, 190]])
+
+
+def _frame_claro():
+    return np.full((200, 300, 3), 255, np.uint8)
+
+
+def _uv_identidade(h, w):
+    yy, xx = np.mgrid[0:h, 0:w]
+    return np.stack([xx / (w - 1.0), yy / (h - 1.0)]).astype(np.float32)
+
+
+def test_warp_sheet_uvmap_mapa_fora_de_0_1_cai_na_homografia():
+    """Coordenada finita fora de [0,1] não é ponto válido (review #46)."""
+    frame = _frame_claro()
+    uv = np.full((2, 60, 80), 1.7, np.float32)
+    np.testing.assert_array_equal(
+        paper.warp_sheet_uvmap(frame, uv, corners=_QUAD),
+        paper.warp_sheet(frame, _QUAD),
+    )
+
+
+def test_warp_sheet_uvmap_mapa_de_area_zero_cai_na_homografia():
+    frame = _frame_claro()
+    for uv in (np.zeros((2, 0, 0), np.float32), np.zeros((2, 0, 5), np.float32)):
+        np.testing.assert_array_equal(
+            paper.warp_sheet_uvmap(frame, uv, corners=_QUAD),
+            paper.warp_sheet(frame, _QUAD),
+        )
+
+
+def test_warp_sheet_uvmap_resize_nao_espalha_buraco():
+    """Um NaN no mapa de meia resolução vira buraco local, não uma
+    mancha: as amostras válidas vizinhas continuam válidas."""
+    frame = _frame_claro()
+    uv = _uv_identidade(30, 40)
+    uv[:, 15, 20] = np.nan
+    dest = [(0, 0), (80, 0), (80, 60), (0, 60)]
+    out = paper.warp_sheet_uvmap(frame, uv, destination=dest)
+    region = out[:60, :80].min(axis=2)
+    black = int(np.count_nonzero(region == 0))
+    assert black <= 4, black  # interpolar NaN direto apagava ~16 px
+    assert region[30, 30] == 255 and region[28, 44] == 255
+
+
+def test_warp_sheet_uvmap_cobertura_medida_na_grade_de_saida():
+    """Mapa que só parece cheio na resolução de origem: medido depois do
+    resize, cai abaixo do piso e vai para a homografia."""
+    frame = _frame_claro()
+    uv = _uv_identidade(4, 4)
+    uv[:, ::2, :] = np.nan  # linhas alternadas: suporte < 50% quase todo
+    uv[:, :, ::2] = np.nan
+    dest = [(0, 0), (300, 0), (300, 200), (0, 200)]
+    np.testing.assert_array_equal(
+        paper.warp_sheet_uvmap(frame, uv, corners=_QUAD, destination=dest),
+        paper.warp_sheet(frame, _QUAD, destination=dest),
+    )
+
+
+def test_warp_sheet_uvmap_tamanho_igual_nos_dois_caminhos():
+    """80x60 de destino: denso e fallback devolvem a mesma grade."""
+    frame = _frame_claro()
+    dest = [(0, 0), (80, 0), (80, 60), (0, 60)]
+    dense = paper.warp_sheet_uvmap(frame, _uv_identidade(60, 80), destination=dest)
+    fallback = paper.warp_sheet_uvmap(frame, None, corners=_QUAD, destination=dest)
+    assert dense.shape == fallback.shape == paper.warp_sheet(frame, _QUAD).shape
 
 
 def test_warp_sheet_uvmap_sem_mapa_nem_cantos_devolve_none():
