@@ -137,12 +137,14 @@ class LatestFrameCapture:
                     return
             ok, frame = self._capture.read()
             if ok and frame is not None:
-                if self._rotation == 180:
-                    frame = cv2.rotate(frame, cv2.ROTATE_180)
                 # Carimbo da thread de captura, tirado assim que o
                 # read() retorna — o consumidor ve o instante de
-                # publicacao, nao o do proprio relogio.
+                # publicacao, nao o do proprio relogio. Antes da
+                # rotacao: o HUD de latencia mede da leitura em
+                # diante, e o tempo de girar o quadro e latencia.
                 captured_at = time.monotonic()
+                if self._rotation == 180:
+                    frame = cv2.rotate(frame, cv2.ROTATE_180)
                 # Identidade do emissor quando a fonte a expõe
                 # (HelperCapture): entra no pacote e alimenta a
                 # contagem de descarte na origem.
