@@ -453,22 +453,37 @@ def test_script_launch_from_another_cwd_can_import_the_lab(tmp_path):
 
 def test_run_clip_final_provisional_comes_from_the_final_state(tmp_path, monkeypatch):
     """A amostra por passo antecede a publicação do último quadro; o
-    `provisional_last_px` tem de ser o do estado final."""
+    `provisional_last_px` tem de refletir TODAS as publicações (pump)."""
     clip = _fake_clip(tmp_path)
     from draw.ink import worker as worker_mod
 
-    real = worker_mod.PageCleanWorker.stats
-    calls = {"n": 0}
+    pumps = {"n": 0}
+    real_pump = worker_mod.PageCleanWorker.pump
+    real_stats = worker_mod.PageCleanWorker.stats
 
-    def stats(self):
-        out = dict(real(self))
-        calls["n"] += 1
-        out["provisional_px"] = 7 if calls["n"] > 10 else 3  # só o final muda
+    def pump(self):
+        out = real_pump(self)
+        pumps["n"] += 1  # cada pump publica; o contador imita o provisório
         return out
 
+    def stats(self):
+        out = dict(real_stats(self))
+        out["provisional_px"] = pumps["n"]
+        return out
+
+    monkeypatch.setattr(worker_mod.PageCleanWorker, "pump", pump)
     monkeypatch.setattr(worker_mod.PageCleanWorker, "stats", stats)
     out = bench.run_clip(clip, [], detector=_Detector(), page_clean=_Ink())
-    assert out["provisional_last_px"] == 7
+    assert pumps["n"] > 0
+    assert out["provisional_last_px"] == pumps["n"]  # não pumps["n"] - 1
+
+
+def test_score_filter_rejects_a_filter_that_changes_the_shape(page):
+    stacked = lambda prob: np.stack([prob, prob])  # noqa: E731
+    with pytest.raises(ValueError, match=r"\(2, 850, 1200\).*\(850, 1200\)"):
+        bench.score_filter(page, stacked)
+    with pytest.raises(ValueError):
+        bench.score_filter(page, lambda prob: prob[:100])
 
 
 def test_run_clip_sums_retractions_across_accumulator_resets(tmp_path, monkeypatch):

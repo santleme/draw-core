@@ -344,6 +344,12 @@ def short_stroke_recall(pred, page):
 def score_filter(page, fn=None, threshold=0.5):
     """Aplica `fn(prob) -> prob` (None = identidade) e mede (a), (b), (c)."""
     prob = page.prob if fn is None else fn(page.prob.copy())
+    if np.shape(prob) != page.prob.shape:
+        # Mapas empilhados repetiriam a máscara 2D no eixo extra e dariam
+        # recall > 100% (review do PR #54).
+        raise ValueError(
+            f"o filtro devolveu forma {np.shape(prob)}; esperado {page.prob.shape}"
+        )
     pred = prob > threshold
     recalls = glyph_recall(pred, page)
     arms = arm_recall(pred, page)
