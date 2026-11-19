@@ -126,7 +126,14 @@ class _FakeHandPresenceWorker:
 
 
 def _make_loop(
-    script, *, config=None, traces=None, ink=None, hand_presence=None, clock=None
+    script,
+    *,
+    config=None,
+    traces=None,
+    ink=None,
+    hand_presence=None,
+    hand_masker=None,
+    clock=None,
 ):
     det = _SyncDetectionWorker(script, traces=traces)
     ink = _FakeInkWorker() if ink is None else ink
@@ -134,6 +141,7 @@ def _make_loop(
         detection_worker=det,
         ink_worker=ink,
         hand_presence_worker=hand_presence,
+        hand_masker=hand_masker,
         config=config,
         clock=clock or (lambda: 0.0),
         log=lambda *_a: None,
@@ -426,6 +434,36 @@ def test_ink_auto_gain_excludes_the_hand_without_sheet_coverage():
     _drive(loop, 40, frame=frame)
     assert loop._hand_mask_det is not None
     assert loop.last_ink_gain == pytest.approx(2.5, rel=0.1)
+
+
+def test_ink_auto_gain_excludes_the_hand_from_the_classic_hand_masker():
+    """Review #52: sem modelo neural, a detecção clássica só tem o
+    HandMasker (landmarker) para saber onde está a mão. Sem cobertura e
+    sem máscara semântica, a mão clara ainda sai da estimativa do ganho."""
+    frame = np.full((720, 1280, 3), 80, np.uint8)
+    frame[100:400, 100:300] = 235  # mão clara sobre metade do quad
+
+    class _Masker:
+        def mask(self, image):
+            camera = np.zeros(image.shape[:2], np.uint8)
+            camera[100:400, 100:300] = 255
+            return camera
+
+    loop, _det, _ink = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", None),  # clássica: sem extras
+        config=PipelineConfig(ink_auto_gain=True),
+        hand_masker=_Masker(),
+    )
+    _drive(loop, 40, frame=frame)
+    assert loop._hand_mask_det is None  # nenhuma máscara semântica
+    assert loop.last_ink_gain == pytest.approx(2.5, rel=0.1)
+
+    loop, _det, _ink = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", None),
+        config=PipelineConfig(ink_auto_gain=True),
+    )  # sem o masker, a mão clara cancela o ganho: o teste discrimina
+    _drive(loop, 40, frame=frame)
+    assert loop.last_ink_gain == 1.0
 
 
 def _seen_then_lost():
