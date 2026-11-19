@@ -76,11 +76,17 @@ class SyntheticPage:
     pen: int = 0
 
 
-def ruling_y(k, x, *, y0, period, slope, bend_amp, bend_x, bend_w):
-    """Ordenada da linha k da pauta em x: inclinada e curva perto da lombada."""
+def ruling_y(k, x, *, y0, period, slope, bend_amp, bend_x, bend_w, tilt=0.0):
+    """Ordenada da linha k da pauta em x: inclinada e curva perto da lombada.
+
+    `tilt` abre as duas páginas em "V" (inclinações opostas de cada lado da
+    lombada), como num caderno aberto torto: slope - tilt à esquerda e
+    slope + tilt à direita.
+    """
     x = np.asarray(x, np.float64)
     bend = bend_amp * np.exp(-(((x - bend_x) / bend_w) ** 2))
-    return y0 + k * period + slope * (x - bend_x) + bend
+    side = np.where(x < bend_x, slope - tilt, slope + tilt)
+    return y0 + k * period + side * (x - bend_x) + bend
 
 
 def _polyline(mask, points, thickness):
@@ -107,6 +113,7 @@ def make_synthetic_page(
     pen=5,
     slope=0.03,
     bend_amp=22.0,
+    tilt=0.0,
     seed=0,
     noise=0.02,
 ):
@@ -126,10 +133,11 @@ def make_synthetic_page(
         bend_amp=bend_amp,
         bend_x=w * 0.5,
         bend_w=w * 0.12,
+        tilt=tilt,
     )
     ruling = np.zeros(shape, np.uint8)
     xs = np.arange(0, w, 4)
-    k = -2
+    k = -2 - int(abs(tilt) * w * 0.5 / period) - 2  # linhas que entram pela inclinação
     while True:
         ys = ruling_y(k, xs, **geo) + period * 0.7
         if ys.min() > h:
@@ -155,7 +163,7 @@ def make_synthetic_page(
     ):
         specs.append((name, _glyph_polylines(name, x0, y0, gw, gh)))
     # Diagonal e traço fino (cruzam a pauta em ângulo)
-    specs.append(("diag", [[(180, 480), (260, 620)], [(300, 480), (360, 640)]]))
+    specs.append(("diag", [[(260, 540), (330, 670)], [(360, 520), (420, 670)]]))
     # E com o braço de baixo exatamente sobre uma linha
     ex, kk = 160, 14
     base = line_y(kk, ex + gw // 2)
@@ -193,7 +201,13 @@ def make_synthetic_page(
     near_ruling = (
         cv2.dilate(ruling.astype(np.uint8), np.ones((2 * band + 1,) * 2, np.uint8)) > 0
     )
-    crossing_strokes = strokes & near_ruling
+    # Os glifos sobre a linha têm métrica própria (E_on_line, pencil_on_line):
+    # contá-los aqui misturaria o caso ambíguo com o cruzamento de verdade.
+    off_line = np.zeros(shape, bool)
+    for name, mask in glyphs.items():
+        if name not in ("E_on_line", "pencil_on_line"):
+            off_line |= mask
+    crossing_strokes = off_line & near_ruling
     ticks_zone = ruling_only & (
         cv2.dilate(strokes.astype(np.uint8), np.ones((13, 13), np.uint8)) > 0
     )
@@ -477,8 +491,13 @@ def main(argv=None):
 
     report = {}
     if args.synthetic:
-        page = make_synthetic_page(seed=args.seed)
-        results = {"sem filtro (identidade)": score_filter(page)}
+        pages = {
+            "reta": make_synthetic_page(seed=args.seed),
+            "torta (V 0,35)": make_synthetic_page(seed=args.seed, tilt=0.35),
+        }
+        results = {
+            f"sem filtro, pagina {name}": score_filter(pg) for name, pg in pages.items()
+        }
         report["synthetic"] = {
             k: {kk: vv for kk, vv in v.items() if kk != "recalls"}
             for k, v in results.items()

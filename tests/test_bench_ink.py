@@ -276,14 +276,16 @@ def test_cli_synthetic_prints_the_table(capsys):
     assert bench.main(["--synthetic"]) == 0
     out = capsys.readouterr().out
     assert "(a) pauta" in out and "sem filtro" in out and "sobre linha" in out
+    assert "pagina torta" in out
 
 
 def test_cli_writes_json(tmp_path):
     target = tmp_path / "r.json"
     assert bench.main(["--synthetic", "--json", str(target)]) == 0
     data = json.loads(target.read_text())
-    assert "sem filtro (identidade)" in data["synthetic"]
-    assert "recalls" not in data["synthetic"]["sem filtro (identidade)"]
+    assert "sem filtro, pagina reta" in data["synthetic"]
+    assert "sem filtro, pagina torta (V 0,35)" in data["synthetic"]
+    assert "recalls" not in data["synthetic"]["sem filtro, pagina reta"]
 
 
 def test_cli_requires_a_mode_and_rejects_unknown_presets(tmp_path):
@@ -302,4 +304,27 @@ def test_pencil_on_line_has_the_ruling_thickness_and_is_not_a_short_stroke(page)
     mask = page.glyphs["pencil_on_line"]
     col = mask[:, 730]  # no braço horizontal
     assert 1 <= int(col.sum()) <= page.h_pauta + 1
-    assert (mask & page.crossing_strokes).any()  # a haste cruza linhas
+    assert (mask & page.ruling).any()  # a haste cruza linhas e o braço está sobre uma
+
+
+def test_tilted_page_opens_the_two_halves_in_a_v():
+    """tilt = caderno aberto torto: inclinações opostas de cada lado da lombada."""
+    straight = bench.make_synthetic_page(seed=0)
+    tilted = bench.make_synthetic_page(seed=0, tilt=0.35)
+    geo = dict(y0=0.0, period=34.0, slope=0.03, bend_amp=22.0, bend_x=600, bend_w=144)
+    left = bench.ruling_y(10, np.array([0.0, 300.0]), tilt=0.35, **geo)
+    right = bench.ruling_y(10, np.array([900.0, 1200.0]), tilt=0.35, **geo)
+    assert (left[1] - left[0]) / 300 < -0.25  # sobe para a lombada à esquerda
+    assert (right[1] - right[0]) / 300 > 0.30  # desce à direita
+    assert tilted.ruling_only.sum() > 40_000
+    assert tilted.crossing_strokes.sum() > 300
+    # o gabarito de traço não depende da inclinação, só a pauta
+    for name in ("E", "T", "S", "H"):
+        np.testing.assert_array_equal(tilted.glyphs[name], straight.glyphs[name])
+    assert not np.array_equal(tilted.ruling, straight.ruling)
+
+
+def test_crossing_strokes_exclude_the_on_line_glyphs(page):
+    """E_on_line e pencil_on_line têm métrica própria."""
+    assert not (page.crossing_strokes & page.glyphs["pencil_on_line"]).any()
+    assert not (page.crossing_strokes & page.glyphs["E_on_line"]).any()
