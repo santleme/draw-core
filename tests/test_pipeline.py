@@ -516,29 +516,34 @@ def test_ink_divnorm_bright_desk_does_not_darken_paper_edge():
     assert float(vals.min()) > 220.0
 
 
-def test_ink_divnorm_makes_the_gain_redundant_when_both_are_on():
-    """Ganho + divnorm ligados: o ganho entra primeiro, mas a divisão por
-    I/blur(I) é praticamente invariante à escala — a página que chega à
-    tinta é quase a mesma do divnorm sozinho."""
-    grad = np.linspace(60, 110, 1280, dtype=np.float32)  # papel escuro
-    frame = np.repeat(np.repeat(grad[None, :], 720, axis=0)[..., None], 3, axis=2)
-    frame = frame.astype(np.uint8)
-    frame[200:300, 200:400] = 20  # traço
+def test_ink_divnorm_skips_the_gain_so_bright_paper_is_not_clipped():
+    """Review #48: com os dois ligados, o ganho clipava em 255 o papel
+    claro de uma folha com luz desigual, e o traço fraco sobre ele sumia
+    antes da normalização. Como a divisão por I/blur(I) já anula a
+    escala, o divnorm dispensa o ganho: o traço sobrevive."""
+    frame = np.full((720, 1280, 3), 70, np.uint8)  # papel escuro (maioria)
+    frame[100:400, 440:464] = 200  # faixa bem iluminada (6%: fora do p90)
+    frame[200:300, 450:454] = 175  # traço fraco sobre a parte clara
 
-    pages = {}
-    for label, cfg in (
-        ("divnorm", PipelineConfig(ink_divnorm=True)),
-        ("ambos", PipelineConfig(ink_divnorm=True, ink_auto_gain=True)),
-    ):
-        loop, _det, ink = _make_loop(
-            lambda _i: (QUAD.copy(), "paper", None), config=cfg
-        )
-        _drive(loop, 40, frame=frame)
-        pages[label] = ink.pages[-1].image.astype(np.float32)
-        if label == "ambos":
-            assert loop.last_ink_gain > 1.5  # o ganho de fato rodou
-    assert float(np.abs(pages["ambos"] - pages["divnorm"]).mean()) < 3.0
-    assert float(pages["ambos"].mean()) > 200.0  # papel normalizado ~branco
+    loop, _det, ink = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", None),
+        config=PipelineConfig(ink_divnorm=True, ink_auto_gain=True),
+    )
+    _drive(loop, 40, frame=frame)
+    assert loop.last_ink_gain == 1.0  # o divnorm dispensa o ganho
+    page = ink.pages[-1].image.mean(axis=2)
+    # Na grade da página (850 de largura para 400 px de quad) a faixa
+    # clara cai em x ~ 723-773 e o traço em x ~ 744-752, y ~ 400-800.
+    stroke = page[450:750, 745:751].mean()
+    paper = page[450:750, 758:770].mean()
+    assert paper - stroke > 15  # o traço continua visível ao modelo
+
+    alone, _det, ink_alone = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", None),
+        config=PipelineConfig(ink_divnorm=True),
+    )
+    _drive(alone, 40, frame=frame)
+    np.testing.assert_array_equal(ink.pages[-1].image, ink_alone.pages[-1].image)
 
 
 def _seen_then_lost():

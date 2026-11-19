@@ -325,7 +325,11 @@ class Pipeline:
                 seg_clear = ~seg_hand_dil
                 visible = seg_clear if visible is None else (visible & seg_clear)
         coverage = self._sheet_coverage_page(warp_corners)
-        if self._config.ink_auto_gain:
+        if self._config.ink_auto_gain and not self._config.ink_divnorm:
+            # Com ink_divnorm o ganho NÃO roda: a divisão por I/blur(I) já
+            # anula a escala, e o ganho só podia piorar — clipava em 255 o
+            # papel claro de uma folha com luz desigual e apagava o traço
+            # fraco sobre ele antes da normalização (review do PR #48).
             # Página escura (exposição no teto de 30 fps): o ganho que o
             # sensor não dá entra aqui, antes do page_clean. Estimado só
             # sobre a folha (coverage): a mesa clara do quad não cancela
@@ -344,9 +348,6 @@ class Pipeline:
                 ink_warped, gain_mask
             )
         if self._config.ink_divnorm:
-            # Depois do ganho: a divisão por I/blur(I) é praticamente
-            # invariante à escala, então com os dois ligados o ganho fica
-            # redundante (inofensivo, ~1 ms) e o domínio é o do v4.
             ink_warped = self._divnorm_page(ink_warped, coverage)
         if coverage is not None:
             # Fora da folha o warp é preto: a transição

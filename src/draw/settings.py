@@ -68,6 +68,8 @@ class PipelineConfig:
       entrega a página escura (teto físico de 1/30 s a 30 fps, driver
       sem gain UVC). Nunca escurece; desligado por padrão até a régua
       de replay confirmar que não regride cena bem iluminada.
+      Ignorado com ink_divnorm, que já normaliza a escala (o ganho
+      antes dele clipava o papel claro e apagava traço fraco).
     - ink: o preset do motor de tinta que a trabalhadora recebe na
       construção (quem monta a Pipeline cria a trabalhadora com ele).
     """
