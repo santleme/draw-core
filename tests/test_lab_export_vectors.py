@@ -135,6 +135,9 @@ def test_main_threshold_override_for_older_model(tmp_path):
         assert main(argv + ["--onnx", str(model), "--allow-unverified", *extra]) == 0
         proof = json.loads((out / "pagina_proof.json").read_text())
         mask = cv2.imread(str(out / "pagina_mask.png"), cv2.IMREAD_GRAYSCALE)
+        # imread devolve None se o PNG nao abre, e count_nonzero(None) e 0:
+        # sem esta checagem o caso "mascara vazia" passaria sem arquivo.
+        assert mask is not None and mask.shape == (120, 85), "mascara ilegivel"
         return proof["mask_source"], int(np.count_nonzero(mask))
 
     source, px_085 = run("--threshold", "0.85")
