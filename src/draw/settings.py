@@ -39,9 +39,13 @@ class PipelineConfig:
       real com quad estourado em movimento segue dominada pela
       interseção. Abaixo do piso a passada de tinta não sobe:
       submeter a região é trabalho morto e cada pixel é mesa.
-      Medido nas capturas reais: quads fantasmas de mesa vazia até
-      0,082; pior folha real em movimento 0,514 — 0,2 separa os
-      dois lados com margem >2x de cada um. 0 desliga o piso.
+      Medido nas capturas s1–s4 com o draw_seg de produção
+      (2026-11-19, 1 frame a cada 5): 52 quads fantasmas de mesa
+      vazia com IoU 0,044–0,108; folhas reais com IoU ≥ 0,298 (pior
+      caso em s3, geometria; s2/s4 ≥ 0,86). 0,2 separa os dois lados
+      com margem ~1,5x para cada um. Fração do quad coberta e IoU por
+      componente conexo foram medidos e NÃO separam (se sobrepõem).
+      0 desliga o piso.
     - follow_move (era DRAW_INK_FOLLOW_MOVE): com a geometria de
       tinta congelada sem mão, um deslocamento sustentado da folha
       reparte o histórico de cantos na posição nova.
