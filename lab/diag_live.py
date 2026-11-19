@@ -20,6 +20,7 @@ Exemplo:
 
 import argparse
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -37,6 +38,9 @@ from draw import config  # noqa: E402
 # só o tempo sem quadro distingue uma coisa da outra.
 _STALL_TIMEOUT_S = 10.0
 _RETRY_SLEEP_S = 0.05
+# Artefato por quadro: prefixo de TRÊS OU MAIS dígitos + "_" (diagnose_frame
+# usa :03d, então rodadas de 1000+ quadros geram 4 dígitos).
+_FRAME_ARTIFACT = re.compile(r"^\d{3,}_.+\.png$")
 # Leitura contínua (sem diagnóstico no meio) que mede o FPS da fonte.
 _FPS_BURST_S = 0.5
 
@@ -223,14 +227,18 @@ def _frames_from_source(
     try:
         t_start = last_ok = time.monotonic()
         reads = 0
+        t_first = None  # primeira leitura boa: a janela de FPS começa aqui
+        n_first = 0
 
         def read():
-            nonlocal reads, last_ok
+            nonlocal reads, last_ok, t_first, n_first
             ok, frame = cap.read()
             now = time.monotonic()
             if ok and frame is not None:
                 reads += 1
                 last_ok = now
+                if t_first is None:
+                    t_first, n_first = now, reads
                 return frame
             if now - last_ok > stall_s:
                 raise SourceExhausted(
@@ -239,10 +247,20 @@ def _frames_from_source(
             time.sleep(_RETRY_SLEEP_S)
             return None
 
-        burst_s = max(warmup_s, fps_burst_s)  # AE/AWB assentam; mede o FPS
-        while time.monotonic() - t_start < burst_s:
+        # Aquecimento (AE/AWB assentam) e janela de FPS: esta só abre na
+        # primeira leitura boa, senão um timeout inicial maior que a janela
+        # a fechava vazia e o resumo ficava com FPS 0 (review #51). O prazo
+        # de parada segue ativo dentro de read() durante a partida.
+        while True:
             read()
-        fps = reads / max(time.monotonic() - t_start, 1e-6)
+            now = time.monotonic()
+            if (
+                now - t_start >= warmup_s
+                and t_first is not None
+                and now - t_first >= fps_burst_s
+            ):
+                break
+        fps = (reads - n_first) / max(now - t_first, 1e-6)
         got = 0
         next_t = time.monotonic()
         while got < limit:
@@ -268,7 +286,7 @@ def _has_artifacts(out_dir):
     # resumo: o operador pode ter guardado só as máscaras de uma rodada.
     return out_dir.is_dir() and (
         (out_dir / "summary.json").exists()
-        or any(out_dir.glob("[0-9][0-9][0-9]_*.png"))
+        or any(_FRAME_ARTIFACT.match(f.name) for f in out_dir.iterdir())
     )
 
 
@@ -285,7 +303,10 @@ def main(argv=None):
     parser.add_argument(
         "--out",
         required=True,
-        help="pasta de saída; recusada se já tiver resumo ou artefatos NNN_*.png",
+        help=(
+            "pasta de saída; recusada se já tiver summary.json ou artefatos "
+            "NNN_*.png (prefixo de 3 ou mais dígitos)"
+        ),
     )
     parser.add_argument("--frames", type=int, default=6)
     parser.add_argument("--warmup", type=float, default=2.0, help="s de AE/AWB")
@@ -325,7 +346,8 @@ def main(argv=None):
     out_dir = Path(args.out)
     if _has_artifacts(out_dir):
         print(
-            f"erro: {out_dir} já tem um diagnóstico (summary.json ou *_raw.png); "
+            f"erro: {out_dir} já tem um diagnóstico (summary.json ou NNN_*.png, "
+            "3+ dígitos); "
             "use uma pasta nova para não misturar execuções",
             file=sys.stderr,
         )
@@ -392,7 +414,14 @@ def main(argv=None):
         "frames": records,
     }
     # O resumo sai também na falha: os quadros já gravados não ficam órfãos.
-    (out_dir / "summary.json").write_text(json.dumps(summary, indent=1))
+    # Se nem ele grava (volume cheio, permissão), erro claro e saída 1 — sem
+    # traceback e sem perder a linha de resumo no terminal.
+    summary_path = out_dir / "summary.json"
+    summary_error = None
+    try:
+        summary_path.write_text(json.dumps(summary, indent=1))
+    except OSError as exc:
+        summary_error = f"não foi possível gravar {summary_path}: {exc}"
     lum = [r["luminance"] for r in records]
     if lum:
         left = _mean([v.get("quad_left_mean") for v in lum])
@@ -404,13 +433,14 @@ def main(argv=None):
             f"quad_esq={'-' if left is None else round(left)}, "
             f"quad_dir={'-' if right is None else round(right)}"
         )
+    if summary_error is not None:
+        print(f"erro: {summary_error}", file=sys.stderr)
     if error is not None:
         print(
-            f"erro: {error} (resumo parcial em {out_dir / 'summary.json'})",
+            f"erro: {error} (resumo parcial em {summary_path})",
             file=sys.stderr,
         )
-        return 1
-    return 0
+    return 1 if (error is not None or summary_error is not None) else 0
 
 
 if __name__ == "__main__":

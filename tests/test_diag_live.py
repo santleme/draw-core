@@ -173,7 +173,7 @@ class _Capture:
 def test_dead_source_is_bounded_and_the_capture_released():
     """hvcam devolve False em stream caído: sem limite o laço não
     terminava e o resumo nunca saía (review #51)."""
-    cap = _Capture(good=3)
+    cap = _Capture(good=4)  # 1 abre a janela de FPS; 3 viram quadros
     got = []
     with pytest.raises(diag_live.SourceExhausted, match="sem quadro"):
         for frame, _fps in diag_live._frames_from_source(
@@ -383,3 +383,75 @@ def test_output_guard_catches_any_retained_artifact(tmp_path, fake_models, kept)
     src = _png_dir(tmp_path / "in", ["a.png"])
     assert diag_live.main(["--input", str(src), "--out", str(out)]) == 2
     assert (out / kept).read_bytes() == b"x"
+
+
+# --- terceira rodada do review do PR #51 --------------------------------
+
+
+@pytest.mark.parametrize("kept", ["1000_raw.png", "10000_mask.png", "0001_warp.png"])
+def test_output_guard_catches_four_plus_digit_frame_prefixes(
+    tmp_path, fake_models, kept
+):
+    """Rodadas de 1000+ quadros usam 4+ dígitos; a guarda só via 3 e a
+    rodada seguinte sobrescrevia o PNG guardado (review #51)."""
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / kept).write_bytes(b"x")
+    src = _png_dir(tmp_path / "in", ["a.png"])
+    assert diag_live.main(["--input", str(src), "--out", str(out)]) == 2
+    assert (out / kept).read_bytes() == b"x"
+
+
+def test_unrelated_png_names_do_not_trip_the_guard(tmp_path, fake_models):
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "notas.png").write_bytes(b"x")
+    (out / "12_x.png").write_bytes(b"x")  # 2 dígitos: não é artefato nosso
+    src = _png_dir(tmp_path / "in", ["a.png"])
+    assert diag_live.main(["--input", str(src), "--out", str(out)]) == 0
+
+
+def test_fps_window_opens_at_the_first_good_read():
+    """Com --warmup 0 o 1º read dá timeout (> a janela de FPS) e depois a
+    câmera entrega normalmente: o FPS não pode ficar 0 (review #51)."""
+
+    class _SlowStart(_Capture):
+        started = False
+
+        def read(self):
+            if not self.started:
+                self.started = True
+                time.sleep(0.2)  # timeout inicial, maior que a janela
+                return False, None
+            time.sleep(0.002)
+            return super().read()
+
+    cap = _SlowStart(good=10_000)
+    fps = [
+        f
+        for _frame, f in diag_live._frames_from_source(
+            "0", 2, 0.0, 0.0, stall_s=5.0, opener=lambda _s: cap, fps_burst_s=0.05
+        )
+    ]
+    assert len(fps) == 2 and fps[0] > 50
+
+
+def test_summary_write_failure_is_a_clear_error_not_a_traceback(
+    monkeypatch, tmp_path, fake_models, capsys
+):
+    """Volume cheio no resumo: erro nomeando o arquivo, saída 1, e a linha
+    de resumo do terminal ainda sai (review #51)."""
+    real = Path.write_text
+
+    def full_disk(self, *args, **kwargs):
+        if self.name == "summary.json":
+            raise OSError(28, "No space left on device")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", full_disk)
+    src = _png_dir(tmp_path / "in", ["a.png"])
+    code = diag_live.main(["--input", str(src), "--out", str(tmp_path / "out")])
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "summary.json" in captured.err and "No space left" in captured.err
+    assert "1 quadros" in captured.out
