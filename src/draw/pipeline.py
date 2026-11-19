@@ -274,10 +274,6 @@ class Pipeline:
             # e mesa na trabalhadora de tinta.
             return
         ink_warped = self._warp_sheet(frame, warp_corners)
-        if self._config.ink_auto_gain:
-            # Página escura (exposição no teto de 30 fps): o ganho
-            # que o sensor não dá entra aqui, antes do page_clean.
-            ink_warped, self.last_ink_gain = exposure.apply_paper_gain(ink_warped)
         # Visibilidade na grade da pagina: onde a mao esta, a
         # passada nao ve a folha — a passada nao pode votar com
         # evidencia fabricada sob oclusao.
@@ -310,6 +306,15 @@ class Pipeline:
                 seg_clear = ~seg_hand_dil
                 visible = seg_clear if visible is None else (visible & seg_clear)
         coverage = self._sheet_coverage_page(warp_corners)
+        if self._config.ink_auto_gain:
+            # Página escura (exposição no teto de 30 fps): o ganho que o
+            # sensor não dá entra aqui, antes do page_clean. Estimado só
+            # sobre a folha (coverage): a mesa clara do quad não cancela
+            # o ganho do papel, e o preenchimento abaixo já trabalha no
+            # domínio clareado.
+            ink_warped, self.last_ink_gain = exposure.apply_paper_gain(
+                ink_warped, coverage
+            )
         if coverage is not None:
             # Fora da folha o warp é preto: a transição
             # folha->preto é uma aresta artificial que o page_clean

@@ -373,6 +373,26 @@ def test_ink_auto_gain_brightens_dark_page_before_ink():
     assert float(lit.min()) < 0.5 * float(np.percentile(lit, 90))
 
 
+def test_ink_auto_gain_ignores_bright_desk_inside_the_quad():
+    """Review #52: o quad abrange papel escuro (86%) e mesa clara (14%);
+    o ganho é estimado só sobre a folha (cobertura), então o papel é
+    clareado em vez de o p90 da mesa cancelar o ganho."""
+    frame = np.full((720, 1280, 3), 225, np.uint8)  # mesa clara
+    frame[100:400, 100:442] = 80  # papel: 342 de 400 colunas do QUAD
+    coverage = _mask_block(100, 400, 100, 442)
+    script = lambda _i: (QUAD.copy(), "paper", {"coverage_mask": coverage})  # noqa: E731
+
+    loop, _det, _ink = _make_loop(script, config=PipelineConfig(ink_auto_gain=False))
+    _drive(loop, 40, frame=frame)
+    assert loop.last_ink_gain == 1.0
+
+    loop, _det, ink = _make_loop(script, config=PipelineConfig(ink_auto_gain=True))
+    _drive(loop, 40, frame=frame)
+    assert loop.last_ink_gain == pytest.approx(2.5, rel=0.1)
+    page = ink.pages[-1].image
+    assert float(np.percentile(page[page.mean(axis=2) < 255], 50)) > 150
+
+
 def _seen_then_lost():
     """Vê a folha nos 6 primeiros chamados, depois perde tudo."""
 

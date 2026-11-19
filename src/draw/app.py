@@ -1162,7 +1162,11 @@ def run(
                 if hand_model_available(hand_model)
                 else None
             )
-            ink_worker = PageCleanWorker(page_clean, hand_masker).start()
+            ink_worker = PageCleanWorker(
+                page_clean,
+                hand_masker,
+                config=None if pipeline_config is None else pipeline_config.ink,
+            ).start()
             print(
                 "Tinta em thread propria: o laco principal nao espera "
                 "o modelo (passadas com cadencia de ~250 ms)."
@@ -1816,6 +1820,10 @@ def main():
         or hand_model is not None
     ):
         parser.error("--neural/--page-clean/--hand-model nao combinam com --markers")
+    if args.markers and args.ink_gain:
+        parser.error(
+            "--ink-gain nao combina com --markers (sem tinta no modo marcadores)"
+        )
     if neural_model is not None and not neural_model:
         parser.error("--neural sem caminho: passe o arquivo .onnx")
     if page_clean_model is not None and not page_clean_model:
