@@ -87,3 +87,26 @@ def test_main_model_proof_records_calibrated_mask_threshold(tmp_path, monkeypatc
     source = json.loads((out / "pagina_proof.json").read_text())["mask_source"]
     assert f"quadro unico {calibrated};" in source
     assert "seen_threshold" in source
+
+
+def test_main_allow_unverified_skips_verifier_and_records_fallback(
+    tmp_path, monkeypatch
+):
+    """--allow-unverified: verify=None — o verificador não roda e a prova
+    registra DEFAULT_THRESHOLD, nunca uma calibração de manifesto."""
+    onnx_fixtures = pytest.importorskip("onnx_fixtures")
+    from draw.infra import manifest
+    from draw.page_clean import DEFAULT_THRESHOLD
+
+    def must_not_run(path):
+        raise AssertionError(f"verify_model chamado com --allow-unverified: {path}")
+
+    monkeypatch.setattr(manifest, "verify_model", must_not_run)
+    model = onnx_fixtures.page_clean_model(tmp_path / "pc.onnx", patch=256)
+    page = tmp_path / "pagina.png"
+    _page(page)
+    out = tmp_path / "out"
+    argv = [str(page), "--out-dir", str(out), "--mask", "model"]
+    assert main(argv + ["--onnx", str(model), "--allow-unverified"]) == 0
+    source = json.loads((out / "pagina_proof.json").read_text())["mask_source"]
+    assert f"quadro unico {DEFAULT_THRESHOLD};" in source
