@@ -45,6 +45,10 @@ class PipelineConfig:
       caso em s3, geometria; s2/s4 ≥ 0,86). 0,2 separa os dois lados
       com margem ~1,5x para cada um. Fração do quad coberta e IoU por
       componente conexo foram medidos e NÃO separam (se sobrepõem).
+      A máscara é a cobertura (papel+mão+tinta) de propósito: na mesa
+      vazia o seg marca 15%–24% do frame como mão fora do quad, e é
+      isso que derruba o IoU do fantasma — sem a classe mão o
+      fantasma sobe para 0,23–0,41 e cruza a folha real.
       0 desliga o piso.
     - follow_move (era DRAW_INK_FOLLOW_MOVE): com a geometria de
       tinta congelada sem mão, um deslocamento sustentado da folha

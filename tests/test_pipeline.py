@@ -261,11 +261,13 @@ def test_coverage_iou_floor_vetoes_phantom_through_app_detector():
 
     Medido nas capturas s1 (mesa vazia) com o draw_seg de producao:
     as 52 mascaras fantasmas ocupam 17%-28% do frame (todas >5%) e
-    o IoU quad x mascara fica em 0,044-0,108.
+    o IoU quad x mascara fica em 0,044-0,108. O fantasma do teste
+    reproduz o pior caso medido (IoU ~0,10, sobrepondo o quad): um
+    piso frouxo (0,05) deixa passar, o 0,2 veta.
     """
     from draw import app as app_module
 
-    phantom = _mask_block(0, 720, 1000, 1280)  # ~22% do frame, longe do QUAD
+    phantom = _mask_block(100, 400, 400, 1100)  # cobre 1/4 do QUAD + mesa
     assert 0.17 < np.count_nonzero(phantom) / phantom.size < 0.28
 
     class _Neural:
@@ -280,10 +282,23 @@ def test_coverage_iou_floor_vetoes_phantom_through_app_detector():
         _frame(), _Neural()
     )
     assert "coverage_mask" in extras  # sobreviveu ao filtro de 5%
+    quad = np.zeros(phantom.shape, bool)
+    quad[100:400, 100:500] = True  # QUAD é retângulo alinhado
+    mask = phantom > 0
+    iou = (quad & mask).sum() / (quad | mask).sum()
+    assert 0.09 < iou < 0.11  # pior fantasma medido: 0,108
+
     loop, _det, ink = _make_loop(lambda _i: (corners, verdict, extras))
     _drive(loop, 40)
     assert loop.tracker.corners is not None
     assert ink.submitted == []
+
+    loose, _det, ink_loose = _make_loop(
+        lambda _i: (corners, verdict, extras),
+        config=PipelineConfig(coverage_iou_floor=0.05),
+    )
+    _drive(loose, 40)
+    assert ink_loose.submitted, "o teste precisa discriminar o piso"
 
 
 def test_coverage_iou_floor_passes_aligned_sheet():
