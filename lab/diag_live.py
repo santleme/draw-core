@@ -32,6 +32,12 @@ sys.path.insert(0, str(_REPO_ROOT / "src"))
 
 from draw import config  # noqa: E402
 
+# Segundos sem nenhuma leitura boa que declaram a fonte parada. O hvcam
+# devolve False tanto no timeout transitório quanto no stream caído, então
+# só o tempo sem quadro distingue uma coisa da outra.
+_STALL_TIMEOUT_S = 10.0
+_RETRY_SLEEP_S = 0.05
+
 # Limiares comparados no relatório: o voto ao vivo (seen_threshold),
 # o corte calibrado do v1 e o do v2.
 _REPORT_THRESHOLDS = (0.5, 0.7, 0.85, 0.97)
@@ -109,16 +115,25 @@ def _resize_to(mask, shape):
     return cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
 
 
+class SourceExhausted(RuntimeError):
+    """A fonte ao vivo parou de entregar quadros antes do total pedido."""
+
+
+def _write_png(path, image):
+    """imwrite checado: False silencioso vira OSError nomeando o destino."""
+    if not cv2.imwrite(str(path), image):
+        raise OSError(f"falha ao gravar {path}")
+
+
 def diagnose_frame(frame, detector, page_clean, out_dir, idx):
     """Roda detector + page_clean num quadro e grava os artefatos."""
     stem = f"{idx:03d}"
-    cv2.imwrite(str(out_dir / f"{stem}_raw.png"), frame)
+    _write_png(out_dir / f"{stem}_raw.png", frame)
     corners, verdict, page_mask = detector(frame, return_mask=True)
     hand = _resize_to(getattr(detector, "last_hand_mask", None), frame.shape)
     page_mask = _resize_to(page_mask, frame.shape)
-    cv2.imwrite(
-        str(out_dir / f"{stem}_seg.png"),
-        seg_overlay(frame, page_mask, hand, corners),
+    _write_png(
+        out_dir / f"{stem}_seg.png", seg_overlay(frame, page_mask, hand, corners)
     )
     record = {
         "frame": idx,
@@ -135,58 +150,93 @@ def diagnose_frame(frame, detector, page_clean, out_dir, idx):
     }
     record["grids"] = {k: list(v) for k, v in grids.items()}
     record["ink_px"] = {}
+    # As duas grades têm tamanhos diferentes: a contagem bruta não compara,
+    # a fração (px de tinta / px da grade) sim.
+    record["ink_frac"] = {}
     for name, size in grids.items():
         warped = warp_to(frame, corners, size)
-        cv2.imwrite(str(out_dir / f"{stem}_{name}.png"), warped)
+        _write_png(out_dir / f"{stem}_{name}.png", warped)
         prob = page_clean.ink_prob(warped)
         if name == "warp":
-            cv2.imwrite(
-                str(out_dir / f"{stem}_prob.png"),
+            _write_png(
+                out_dir / f"{stem}_prob.png",
                 np.clip(prob * 255, 0, 255).astype(np.uint8),
             )
         suffix = "" if name == "warp" else "_aspect"
         mask = (prob > page_clean.threshold).astype(np.uint8) * 255
-        cv2.imwrite(str(out_dir / f"{stem}_mask{suffix}.png"), mask)
-        record["ink_px"][name] = {
-            str(t): int(np.count_nonzero(prob > t)) for t in _REPORT_THRESHOLDS
+        _write_png(out_dir / f"{stem}_mask{suffix}.png", mask)
+        counts = {str(t): int(np.count_nonzero(prob > t)) for t in _REPORT_THRESHOLDS}
+        record["ink_px"][name] = counts
+        record["ink_frac"][name] = {
+            t: round(c / (size[0] * size[1]), 6) for t, c in counts.items()
         }
     return record
 
 
 def _frames_from_dir(path, limit):
-    files = sorted(Path(path).glob("*.png"))[: limit or None]
-    for f in files:
+    """Quadros de uma pasta de PNGs; o limite conta só os que decodificam."""
+    folder = Path(path)
+    if not folder.is_dir():
+        raise FileNotFoundError(f"--input não é uma pasta: {path}")
+    got = 0
+    for f in sorted(folder.glob("*.png")):
+        if limit and got >= limit:
+            break
         img = cv2.imread(str(f), cv2.IMREAD_COLOR)
-        if img is not None:
-            yield img
+        if img is None:
+            print(f"AVISO: {f.name} ilegível; pulado", file=sys.stderr)
+            continue
+        got += 1
+        yield img
 
 
-def _frames_from_source(source, limit, warmup_s, spacing_s):
-    """Lê `limit` quadros da fonte (hvcam:// ou índice OpenCV), espaçados."""
-    from draw.hvcam import HvcamCapture, is_hvcam_source
+def _frames_from_source(
+    source, limit, warmup_s, spacing_s, stall_s=_STALL_TIMEOUT_S, opener=None
+):
+    """Lê `limit` quadros espaçados da fonte, pelo mesmo open_capture do app.
 
-    cap = HvcamCapture(source) if is_hvcam_source(source) else cv2.VideoCapture(source)
+    Sem leitura boa por `stall_s` segundos a fonte é declarada parada
+    (SourceExhausted) — o hvcam devolve False tanto no timeout transitório
+    quanto no stream caído, e sem o limite o laço nunca terminava. O FPS
+    devolvido é o de leituras reais sobre o tempo decorrido.
+    """
+    from draw.camera import open_capture, parse_source
+
+    cap = (opener or open_capture)(parse_source(source))
     if not cap.isOpened():
         raise RuntimeError(
             f"fonte {source} não abriu: {getattr(cap, 'open_error', '')}"
         )
     try:
-        t0 = time.monotonic()
+        t_start = last_ok = time.monotonic()
         reads = 0
-        while time.monotonic() - t0 < warmup_s:  # AE/AWB assentam
-            ok, _ = cap.read()
-            reads += ok
-        fps = reads / max(warmup_s, 1e-6)
+
+        def read():
+            nonlocal reads, last_ok
+            ok, frame = cap.read()
+            now = time.monotonic()
+            if ok and frame is not None:
+                reads += 1
+                last_ok = now
+                return frame
+            if now - last_ok > stall_s:
+                raise SourceExhausted(
+                    f"fonte parou de entregar: {now - last_ok:.1f} s sem quadro"
+                )
+            time.sleep(_RETRY_SLEEP_S)
+            return None
+
+        while time.monotonic() - t_start < warmup_s:  # AE/AWB assentam
+            read()
         got = 0
         next_t = time.monotonic()
         while got < limit:
-            ok, frame = cap.read()
-            if not ok:
+            frame = read()
+            if frame is None or time.monotonic() < next_t:
                 continue
-            if time.monotonic() >= next_t:
-                got += 1
-                next_t = time.monotonic() + spacing_s
-                yield frame.copy(), fps
+            got += 1
+            next_t = time.monotonic() + spacing_s
+            yield frame.copy(), reads / max(time.monotonic() - t_start, 1e-6)
     finally:
         cap.release()
 
@@ -197,16 +247,40 @@ def rotate_frame(frame, rotation):
     return frame
 
 
+def _has_artifacts(out_dir):
+    """Pasta de saída que já tem um diagnóstico: não se mistura execuções."""
+    return out_dir.is_dir() and (
+        (out_dir / "summary.json").exists() or any(out_dir.glob("*_raw.png"))
+    )
+
+
+def _mean(values):
+    finite = [v for v in values if v is not None and np.isfinite(v)]
+    return float(np.mean(finite)) if finite else None
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     src = parser.add_mutually_exclusive_group(required=True)
     src.add_argument("--source", help="hvcam://, hvcam+tcp://host ou índice")
     src.add_argument("--input", help="pasta com PNGs de quadros brutos")
-    parser.add_argument("--out", required=True, help="pasta de saída")
+    parser.add_argument("--out", required=True, help="pasta de saída (vazia)")
     parser.add_argument("--frames", type=int, default=6)
     parser.add_argument("--warmup", type=float, default=2.0, help="s de AE/AWB")
     parser.add_argument("--spacing", type=float, default=0.5, help="s entre quadros")
+    parser.add_argument(
+        "--stall-timeout",
+        type=float,
+        default=_STALL_TIMEOUT_S,
+        help="s sem quadro que declaram a fonte ao vivo parada",
+    )
     parser.add_argument("--rotate", type=int, choices=(0, 180), default=0)
+    parser.add_argument(
+        "--format",
+        choices=list(config.FORMATS),
+        default="a4",
+        help="formato da sessão (a grade do warp do app); padrão a4",
+    )
     parser.add_argument("--models", default=str(_REPO_ROOT / "models"))
     parser.add_argument(
         "--allow-unverified",
@@ -222,6 +296,21 @@ def main(argv=None):
     )
     args = parser.parse_args(argv)
 
+    out_dir = Path(args.out)
+    if _has_artifacts(out_dir):
+        print(
+            f"erro: {out_dir} já tem um diagnóstico (summary.json ou *_raw.png); "
+            "use uma pasta nova para não misturar execuções",
+            file=sys.stderr,
+        )
+        return 2
+    if args.input and not Path(args.input).is_dir():
+        print(f"erro: --input não é uma pasta: {args.input}", file=sys.stderr)
+        return 2
+    # Mesma grade que o app usa na sessão: o warp e a máscara do diagnóstico
+    # têm de ter as dimensões do que o runtime enxerga.
+    config.apply_format(args.format)
+
     from draw.infra.manifest import verify_model
     from draw.page_clean import PageCleanInk
     from draw.perception import NeuralSheetDetector
@@ -235,35 +324,60 @@ def main(argv=None):
     )
     page_clean.load()
 
-    out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
-    records, read_fps = [], None
+    records, read_fps, error = [], None, None
     if args.input:
         frames = ((f, None) for f in _frames_from_dir(args.input, args.frames))
     else:
-        source = int(args.source) if args.source.isdigit() else args.source
-        frames = _frames_from_source(source, args.frames, args.warmup, args.spacing)
-    for idx, (frame, fps) in enumerate(frames):
-        read_fps = fps if fps is not None else read_fps
-        frame = rotate_frame(frame, args.rotate)
-        records.append(diagnose_frame(frame, detector, page_clean, out_dir, idx))
+        frames = _frames_from_source(
+            args.source,
+            args.frames,
+            args.warmup,
+            args.spacing,
+            stall_s=args.stall_timeout,
+        )
+    try:
+        for idx, (frame, fps) in enumerate(frames):
+            read_fps = fps if fps is not None else read_fps
+            frame = rotate_frame(frame, args.rotate)
+            records.append(diagnose_frame(frame, detector, page_clean, out_dir, idx))
+    except SourceExhausted as exc:
+        error = str(exc)
+    finally:
+        close = getattr(frames, "close", None)
+        if close is not None:
+            close()  # libera a câmera mesmo com a falha no meio
+    if not records and error is None:
+        error = "nenhum quadro foi lido"
     summary = {
         "label": args.label,
         "rotate": args.rotate,
+        "format": args.format,
         "read_fps": read_fps,
         "mask_threshold": page_clean.threshold,
+        "complete": error is None,
+        "error": error,
         "frames": records,
     }
+    # O resumo sai também na falha: os quadros já gravados não ficam órfãos.
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=1))
     lum = [r["luminance"] for r in records]
     if lum:
+        left = _mean([v.get("quad_left_mean") for v in lum])
+        right = _mean([v.get("quad_right_mean") for v in lum])
         print(
             f"{args.label or out_dir.name}: {len(records)} quadros, "
-            f"fps_leitura={read_fps if read_fps is None else round(read_fps, 1)}, "
-            f"lum_media={np.mean([v['frame_mean'] for v in lum]):.0f}, "
-            f"quad_esq={np.mean([v.get('quad_left_mean', np.nan) for v in lum]):.0f}, "
-            f"quad_dir={np.mean([v.get('quad_right_mean', np.nan) for v in lum]):.0f}"
+            f"fps_leitura={'-' if read_fps is None else round(read_fps, 1)}, "
+            f"lum_media={_mean([v['frame_mean'] for v in lum]):.0f}, "
+            f"quad_esq={'-' if left is None else round(left)}, "
+            f"quad_dir={'-' if right is None else round(right)}"
         )
+    if error is not None:
+        print(
+            f"erro: {error} (resumo parcial em {out_dir / 'summary.json'})",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 
