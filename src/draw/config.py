@@ -46,11 +46,14 @@ def paper_grid(name, orientation="retrato"):
     Retrato devolve (curto, 1200); paisagem, (1200, curto).
 
     Limitacao herdada da grade A4 legada (850 px pinados): 850 x 0,2475
-    mm/px = 210,375 mm, 0,375 mm acima dos 210 nominais. Tinta nas duas
-    ultimas colunas (retrato) ou linhas (paisagem) cai ate 0,13 mm fora
-    da folha no export vetorial. E identica nas duas orientacoes
-    (medido em 2026-11-19), nao vem da paisagem; mudar a grade A4 e
-    decisao separada, pois mexe no mm/px de todo o historico.
+    mm/px = 210,375 mm, 0,375 mm acima dos 210 nominais. A linha de
+    centro da tinta nas duas ultimas colunas (retrato) ou linhas
+    (paisagem) cai ate 0,13 mm fora da folha no export vetorial; como o
+    SVG centra o traco nessa linha, o traco ultrapassa ainda mais, por
+    meia largura de traco (da ordem de 0,6 mm para um traco de 5 px).
+    E identico nas duas orientacoes (medido em 2026-11-19), nao vem da
+    paisagem; mudar a grade A4 e decisao separada, pois mexe no mm/px de
+    todo o historico.
     """
     if name not in FORMATS:
         raise ValueError(f"formato de folha desconhecido: {name}")
