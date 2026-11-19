@@ -26,6 +26,10 @@ from .contracts import FramePacket
 from .hvcam import HvcamCapture, is_hvcam_source
 from .protocol import HelperCapture, is_helper_source
 
+# Rotacoes de entrada suportadas (graus): 180 cobre a webcam invertida
+# sobre a mesa; 90/270 mudariam a proporcao do quadro e nao tem uso.
+INPUT_ROTATIONS = (0, 180)
+
 # Limite de falhas seguidas de leitura que declara a fonte morta.
 # Era a contagem do laco principal (15 read() falhos seguidos e o app
 # avisava e saia); com a leitura numa thread propria, a contagem mora
@@ -70,8 +74,17 @@ class LatestFrameCapture:
     mesma contagem, com o mesmo limite e o mesmo desfecho.
     """
 
-    def __init__(self, capture):
+    def __init__(self, capture, rotation=0):
+        if rotation not in INPUT_ROTATIONS:
+            raise ValueError(
+                f"rotacao de entrada {rotation!r} invalida; aceitas: {INPUT_ROTATIONS}"
+            )
         self._capture = capture
+        # Webcam montada de cabeca para baixo na mesa: o quadro gira
+        # aqui, na origem, antes de qualquer consumidor — preview,
+        # deteccao, quad, warp, tinta e o 's' de salvar enxergam o
+        # mesmo espaco ja orientado (nada de coordenada desalinhada).
+        self._rotation = rotation
         self._condition = threading.Condition()
         self._thread = threading.Thread(
             target=self._pump, name="draw-capture", daemon=True
@@ -124,6 +137,8 @@ class LatestFrameCapture:
                     return
             ok, frame = self._capture.read()
             if ok and frame is not None:
+                if self._rotation == 180:
+                    frame = cv2.rotate(frame, cv2.ROTATE_180)
                 # Carimbo da thread de captura, tirado assim que o
                 # read() retorna — o consumidor ve o instante de
                 # publicacao, nao o do proprio relogio.

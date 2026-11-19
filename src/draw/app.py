@@ -996,7 +996,7 @@ def _apply_fullscreen():
         )
 
 
-def _open_ready_source(target, helper_token_file=None, ready_seconds=None):
+def _open_ready_source(target, helper_token_file=None, ready_seconds=None, rotation=0):
     """Abre a fonte e so a devolve depois do primeiro quadro; senao levanta.
 
     A fonte antiga so e trocada por uma que ja entregou quadro: uma
@@ -1008,7 +1008,7 @@ def _open_ready_source(target, helper_token_file=None, ready_seconds=None):
     """
     started = time.monotonic()
     capture = open_capture(target, helper_token_file=helper_token_file)
-    candidate = LatestFrameCapture(capture).start()
+    candidate = LatestFrameCapture(capture, rotation=rotation).start()
     budget = _SWITCH_READY_SECONDS if ready_seconds is None else ready_seconds
     remaining = max(1.0, budget - (time.monotonic() - started))
     if candidate.wait_next(0, timeout=remaining) is None:
@@ -1094,6 +1094,7 @@ def run(
     page_clean_model=None,
     helper_token_file=None,
     fullscreen=False,
+    rotation=0,
 ):
     _apply_opencv_thread_cap()
     _require_gui_backend()
@@ -1187,7 +1188,7 @@ def run(
         capture = open_capture(
             parse_source(source), helper_token_file=helper_token_file
         )
-        frame_source = LatestFrameCapture(capture).start()
+        frame_source = LatestFrameCapture(capture, rotation=rotation).start()
         detection_worker = None
         if not markers_mode:
             # coverage=True na trabalhadora: os extras da deteccao
@@ -1380,7 +1381,9 @@ def run(
 
             def work():
                 try:
-                    candidate = _open_ready_source(target, helper_token_file)
+                    candidate = _open_ready_source(
+                        target, helper_token_file, rotation=rotation
+                    )
                     switch["result"] = (target, candidate, None)
                 except Exception as error:
                     switch["result"] = (target, None, error)
@@ -1740,6 +1743,16 @@ def main():
     )
     parser.add_argument("--save-dir", default="captures")
     parser.add_argument(
+        "--rotate",
+        type=int,
+        choices=camera_module.INPUT_ROTATIONS,
+        default=0,
+        help=(
+            "gira o quadro da camera na captura (180 = webcam invertida na "
+            "mesa); preview, quad e canvas giram juntos"
+        ),
+    )
+    parser.add_argument(
         "--allow-unverified",
         action="store_true",
         help="carrega modelos divergentes ou fora do manifesto com "
@@ -1790,6 +1803,7 @@ def main():
             page_clean_model=page_clean_model,
             helper_token_file=args.helper_token_file,
             fullscreen=args.fullscreen,
+            rotation=args.rotate,
         )
     except (RuntimeError, FileNotFoundError) as error:
         print(f"Erro: {error}")
