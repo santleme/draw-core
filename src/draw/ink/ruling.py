@@ -50,6 +50,7 @@ _JUMP_PENALTY = 0.02
 _T_RUN = 0.5  # probabilidade que conta como "tinta" para o run-length
 _R = 6  # janela vertical de medida, px de cada lado
 _OCCLUDED_BELOW = 0.85  # fração visível abaixo da qual um negativo é suspeito
+_HAND_LEFT = 0.1  # aumento da fração visível que conta como 'a mão saiu'
 _RETRY_PASSES = 3  # passadas ate reestimar um negativo suspeito
 _SUPPORT_W = 48  # px de cada janela do teste de suporte
 _MIN_SPAN = 0.6  # extensao minima (fração da metade) do suporte
@@ -439,12 +440,14 @@ def _support(prob, seg):
     n = max(1, x // _SUPPORT_W)
     win = has[:, : n * _SUPPORT_W].reshape(k, n, _SUPPORT_W).any(axis=2)
     frac = float(np.median(win.mean(axis=1)))
-    # Extensão: da primeira à última janela com tinta, em fração da metade.
-    # Um tracejado local ocupa poucas janelas, mesmo que sejam > 35% de uma
-    # metade estreita.
-    first = np.where(win.any(axis=1), win.argmax(axis=1), n)
-    last = np.where(win.any(axis=1), n - 1 - win[:, ::-1].argmax(axis=1), -1)
-    span = float(np.median(np.clip(last - first + 1, 0, n) / n))
+    # Extensão: da primeira à última COLUNA com tinta, em fração da metade
+    # (em pixels, não em janelas: o corte não depende do alinhamento). Um
+    # tracejado local ocupa pouco da metade, mesmo cobrindo > 35% das janelas
+    # de uma metade estreita.
+    anyc = has.any(axis=1)
+    first = has.argmax(axis=1)
+    last = x - 1 - has[:, ::-1].argmax(axis=1)
+    span = float(np.median(np.where(anyc, last - first + 1, 0) / x))
     return min(frac, span / _MIN_SPAN * _MIN_SUPPORT)
 
 
@@ -562,24 +565,26 @@ class RulingFilter:
         self._model = None
         self._tracks = None
         self._age = 0
+        self._neg_frac = 1.0
         self.last_info = {}
 
     def apply(self, prob, visible=None):
         """Devolve `prob` sem a pauta isolada (no lugar). Sem pauta: inalterado."""
+        frac = 1.0 if visible is None else float(visible.mean())
         stale = (
             self._tracks is None
             or self._age >= self.reestimate_every
             or self._model.shape != prob.shape
+            # negativo dado com a mao tapando boa parte da folha: reestima
+            # assim que ela sai (a pauta nao pode ser votada nesse meio tempo)
+            or (not self._tracks and frac >= self._neg_frac + _HAND_LEFT)
         )
         if stale:
             self._model = estimate(prob, visible) or RulingModel((), 0.0, prob.shape)
             self._tracks = [_Track(seg, prob.shape) for seg in self._model.segments]
             self._age = 0
-            if (
-                not self._tracks
-                and visible is not None
-                and float(visible.mean()) < _OCCLUDED_BELOW
-            ):
+            self._neg_frac = frac if not self._tracks else 1.0
+            if not self._tracks and frac < _OCCLUDED_BELOW:
                 # Nao achou pauta com a mao tapando boa parte da folha: o
                 # negativo vale so para esta vista. Tenta de novo em poucas
                 # passadas (nao a cada uma: em papel liso a mao esta quase

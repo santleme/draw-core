@@ -306,7 +306,9 @@ def _count_estimates(monkeypatch):
     return calls
 
 
-def test_a_missed_estimate_under_a_hand_is_retried_in_a_few_passes(monkeypatch):
+def test_a_missed_estimate_under_a_hand_is_retried_as_soon_as_the_hand_leaves(
+    monkeypatch,
+):
     """Sem pauta achada com a mao tapando a folha, o negativo nao pode ficar
     em cache por 24 passadas: a pauta seria confirmada como tinta (review
     #56)."""
@@ -317,11 +319,7 @@ def test_a_missed_estimate_under_a_hand_is_retried_in_a_few_passes(monkeypatch):
     f = ruling.RulingFilter()
     f.apply(prob.copy(), covered)
     assert f.last_info["lines"] == 0
-    out = None
-    for _ in range(ruling._RETRY_PASSES + 1):  # mao saiu
-        out = f.apply(prob.copy(), None)
-        if f.last_info["lines"]:
-            break
+    out = f.apply(prob.copy(), None)  # a mao saiu: reestima JA nesta passada
     assert f.last_info["lines"] > 0 and (out > 0.5).sum() == 0
 
 
@@ -367,3 +365,42 @@ def test_paths_use_pixel_index_coordinates_and_do_not_grab_a_neighbour_stroke():
     out = ruling.RulingFilter().apply(merged.copy())
     assert (out[80 + 40 * 3 + 3 : 80 + 40 * 3 + 5, 400:520] > 0.5).all()  # ficou
     assert (out[80 + 40 * 3 : 80 + 40 * 3 + 2, 540:700] > 0.5).sum() == 0  # pauta saiu
+
+
+@pytest.mark.parametrize("x0", [0, 7, 19, 30, 41, 53])
+def test_span_cutoff_does_not_depend_on_window_alignment(x0):
+    """O mesmo tracejado deslocado dentro da metade tem de dar o mesmo
+    veredito (review #56): a extensao e medida em colunas, nao em janelas."""
+    prob = np.zeros((850, 850), np.float32)
+    for i in range(8):
+        prob[200 + 40 * i : 202 + 40 * i, 80 + x0 : 80 + x0 + 146] = 0.95
+    assert ruling.estimate(prob) is None
+
+
+def _confirmed_after_votes(prob, config, passes=4):
+    from draw.ink.worker import PageCleanWorker
+
+    now = [1000.0]
+    worker = PageCleanWorker(_RuledInk(prob), clock=lambda: now[0], config=config)
+    gen = worker.new_generation()
+    for _ in range(passes):
+        _run_one_pass(worker, now, prob.shape, gen)
+    shown = worker.poll_display(gen, -1)
+    return np.asarray(shown.confirmed) > 0
+
+
+@pytest.mark.parametrize("level", [None, 0.85])
+def test_filter_holds_up_through_the_live_vote(straight, level):
+    """A regua mede o mapa; aqui o mapa filtrado passa pelo voto REAL do
+    worker (padrao e estrito) e o canvas confirmado e medido (review #56)."""
+    cfg = InkConfig(ruling_removal=True)
+    if level is not None:
+        cfg = InkConfig.strict_vote(level, ruling_removal=True)
+    confirmed = _confirmed_after_votes(straight.prob, cfg)
+    plain = _confirmed_after_votes(straight.prob, InkConfig())
+    iso = straight.ruling_only
+    assert confirmed[iso].sum() < 0.1 * plain[iso].sum()  # pauta: >= 90% fora do canvas
+    arms = np.zeros_like(confirmed)
+    for name in bench.SHORT_STROKE_GLYPHS:
+        arms |= straight.arms[name]
+    assert (confirmed & arms).sum() >= 0.97 * (plain & arms).sum()  # braços ficam
