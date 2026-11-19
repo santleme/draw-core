@@ -1,5 +1,6 @@
 """Remocao de pauta por DP (draw.ink.ruling), medida na regua lab.bench_ink."""
 
+import dataclasses
 import sys
 
 import numpy as np
@@ -397,7 +398,11 @@ def test_filter_holds_up_through_the_live_vote(straight, level):
     if level is not None:
         cfg = InkConfig.strict_vote(level, ruling_removal=True)
     confirmed = _confirmed_after_votes(straight.prob, cfg)
-    plain = _confirmed_after_votes(straight.prob, InkConfig())
+    # mesma regra de voto, sem o filtro: separa o que o voto rejeita do que a
+    # remocao de pauta apaga
+    plain = _confirmed_after_votes(
+        straight.prob, dataclasses.replace(cfg, ruling_removal=False)
+    )
     iso = straight.ruling_only
     assert confirmed[iso].sum() < 0.1 * plain[iso].sum()  # pauta: >= 90% fora do canvas
     arms = np.zeros_like(confirmed)
