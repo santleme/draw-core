@@ -155,6 +155,33 @@ def test_warp_sheet_uvmap_cobertura_medida_na_grade_de_saida():
     )
 
 
+def test_warp_sheet_uvmap_cobertura_conta_so_o_que_cai_na_grade():
+    """Review #46: destino que passa da grade — as amostras válidas
+    descartadas pelo recorte não podem segurar o caminho denso (a
+    saída sairia toda preta)."""
+    frame = _frame_claro()
+    w, h = config.PAPER_W, config.PAPER_H
+    # Destino com o dobro da largura: a metade direita cai fora da grade.
+    dest = [(0, 0), (2 * w, 0), (2 * w, h), (0, h)]
+    uv = _uv_identidade(h, 2 * w)
+    uv[:, :, :w] = np.nan  # válido só na metade que o recorte descarta
+    np.testing.assert_array_equal(
+        paper.warp_sheet_uvmap(frame, uv, corners=_QUAD, destination=dest),
+        paper.warp_sheet(frame, _QUAD, destination=dest),
+    )
+
+
+def test_warp_sheet_uvmap_destino_todo_fora_da_grade_cai_na_homografia():
+    frame = _frame_claro()
+    w, h = config.PAPER_W, config.PAPER_H
+    dest = [(w + 10, 0), (2 * w, 0), (2 * w, h), (w + 10, h)]
+    uv = _uv_identidade(h, w - 10)
+    np.testing.assert_array_equal(
+        paper.warp_sheet_uvmap(frame, uv, corners=_QUAD, destination=dest),
+        paper.warp_sheet(frame, _QUAD, destination=dest),
+    )
+
+
 def test_warp_sheet_uvmap_tamanho_igual_nos_dois_caminhos():
     """80x60 de destino: denso e fallback devolvem a mesma grade."""
     frame = _frame_claro()

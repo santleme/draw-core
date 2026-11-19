@@ -474,8 +474,9 @@ def warp_sheet_uvmap(frame, uvmap, corners=None, destination=None):
     papel (PAPER_W x PAPER_H), com o mapa posicionado no retângulo de
     `destination` — trocar de caminho nunca muda o tamanho da imagem.
 
-    Sem mapa, com mapa de área zero ou com poucos pontos válidos
-    (<20%, medidos já na grade de saída), cai na homografia de
+    Sem mapa, com mapa de área zero, com destino fora da grade ou com
+    poucos pontos válidos (<20%, medidos no trecho que cai DENTRO da
+    grade de saída), cai na homografia de
     `corners`. Devolve None se não houver nem mapa útil nem cantos.
     """
     if destination is None:
@@ -490,31 +491,29 @@ def warp_sheet_uvmap(frame, uvmap, corners=None, destination=None):
     y0 = int(round(min(dst[0, 1], dst[1, 1])))
     w = int(round(max(dst[1, 0] - dst[0, 0], dst[2, 0] - dst[3, 0])))
     h = int(round(max(dst[3, 1] - dst[0, 1], dst[2, 1] - dst[1, 1])))
-    uv = None
-    if uvmap is not None and w > 0 and h > 0:
+    grid_h, grid_w = config.PAPER_H, config.PAPER_W
+    # Recorte do retângulo de destino que cai dentro da grade: só ele
+    # chega à saída, então só ele conta para a cobertura.
+    gx0, gy0 = max(x0, 0), max(y0, 0)
+    gx1, gy1 = min(x0 + w, grid_w), min(y0 + h, grid_h)
+    sub = ok = None
+    if uvmap is not None and w > 0 and h > 0 and gx1 > gx0 and gy1 > gy0:
         candidate = np.asarray(uvmap, dtype=np.float32)
         if candidate.ndim == 3 and candidate.shape[0] == 2 and candidate[0].size:
-            valid = _uv_valid(candidate)
             if candidate.shape[1:] != (h, w):
-                candidate = _resize_uv(candidate, valid, w, h)
-                valid = _uv_valid(candidate)
-            if float(valid.mean()) >= _UVMAP_MIN_VALID:
-                uv = candidate
-    if uv is None:
+                candidate = _resize_uv(candidate, _uv_valid(candidate), w, h)
+            sub = candidate[:, gy0 - y0 : gy1 - y0, gx0 - x0 : gx1 - x0]
+            ok = _uv_valid(sub)
+            if float(ok.mean()) < _UVMAP_MIN_VALID:
+                sub = None
+    if sub is None:
         if corners is None:
             return None
         return warp_sheet(frame, corners, destination=destination)
-    grid_h, grid_w = config.PAPER_H, config.PAPER_W
     map_x = np.full((grid_h, grid_w), -1.0, np.float32)
     map_y = np.full((grid_h, grid_w), -1.0, np.float32)
-    # Recorte do retângulo de destino que cai dentro da grade.
-    gx0, gy0 = max(x0, 0), max(y0, 0)
-    gx1, gy1 = min(x0 + w, grid_w), min(y0 + h, grid_h)
-    if gx1 > gx0 and gy1 > gy0:
-        sub = uv[:, gy0 - y0 : gy1 - y0, gx0 - x0 : gx1 - x0]
-        ok = _uv_valid(sub)
-        map_x[gy0:gy1, gx0:gx1] = np.where(ok, sub[0] * (frame.shape[1] - 1), -1.0)
-        map_y[gy0:gy1, gx0:gx1] = np.where(ok, sub[1] * (frame.shape[0] - 1), -1.0)
+    map_x[gy0:gy1, gx0:gx1] = np.where(ok, sub[0] * (frame.shape[1] - 1), -1.0)
+    map_y[gy0:gy1, gx0:gx1] = np.where(ok, sub[1] * (frame.shape[0] - 1), -1.0)
     return cv2.remap(
         frame,
         map_x,
