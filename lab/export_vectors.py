@@ -69,6 +69,10 @@ def ink_mask_model(bgr, onnx_path, verify, threshold=None):
 def resolve_orientation(orientation, img_w, img_h):
     """ "auto" deduz da imagem: mais larga que alta = paisagem.
 
+    MUDANÇA DE COMPORTAMENTO: PNG mais largo que alto agora exporta em
+    paisagem por padrão (antes era escalado como retrato, o bug do review
+    do PR #50); --orientation retrato restaura o comportamento antigo.
+
     O canvas que o app salva (tecla s) tem a grade da sessão — em
     paisagem, 1200x850 — e o formato A4 é registrado em retrato: sem
     isto, a imagem deitada era escalada como retrato (largura
