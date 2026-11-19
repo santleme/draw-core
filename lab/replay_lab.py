@@ -290,6 +290,7 @@ def run_replay(
     from draw.page_clean import PageCleanInk
     from draw.paper import warp_sheet
     from draw.perception import NeuralSheetDetector
+    from draw.photometry import division_normalize
     from draw.pipeline import Pipeline
     from draw.tracker import _gate_info_from_trace
     from lab.sim_writer import _parse_flags
@@ -445,7 +446,12 @@ def run_replay(
             if quad is not None:
                 try:
                     warp = warp_sheet(frame, np.asarray(quad, np.float32))
-                    prob = page_clean.ink_prob(warp)
+                    # Overlay por quadro no MESMO domínio do canvas: com
+                    # ink_divnorm a trabalhadora recebe a página
+                    # normalizada; a prancha mostra o warp cru, mas a
+                    # inferência do overlay passa pela mesma fotometria.
+                    ink_in = division_normalize(warp) if config.ink_divnorm else warp
+                    prob = page_clean.ink_prob(ink_in)
                     ink_mask = (prob >= page_clean.threshold).astype(np.uint8)
                 except Exception:  # prancha sem warp é diagnóstico tb
                     warp, ink_mask = None, None

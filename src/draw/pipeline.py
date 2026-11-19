@@ -201,6 +201,25 @@ class Pipeline:
         self.last_ink_gain = 1.0
         self.generation_events = {"drop": 0, "reopen": 0}
 
+    @staticmethod
+    def _divnorm_page(ink_warped, coverage):
+        """ink_divnorm: domínio de entrada do modelo de tinta v4.
+
+        Paridade com o treino (draw-training pack_round4: mask_sheet
+        -> division_normalize): o fora-da-folha é preenchido ANTES da
+        normalização. Sem isso a mesa clara entra no blur de
+        iluminação e escurece a faixa de papel encostada nela — uma
+        borda falsa dentro da cobertura, que o preenchimento final
+        não alcança. O preenchimento usa a média da própria página
+        (o mesmo do caminho sem divnorm), não um branco fixo: papel
+        sob sombra ao lado de um branco fixo repetiria a borda.
+        """
+        if coverage is not None and coverage.any():
+            filled = ink_warped.copy()
+            filled[~coverage] = ink_warped[coverage].mean(axis=0).astype(np.uint8)
+            return photometry.division_normalize(filled)
+        return photometry.division_normalize(ink_warped)
+
     def _sheet_coverage_page(self, warp_corners):
         """Cobertura da folha na grade da página, ou None sem evidência.
 
@@ -274,11 +293,6 @@ class Pipeline:
             # e mesa na trabalhadora de tinta.
             return
         ink_warped = self._warp_sheet(frame, warp_corners)
-        if self._config.ink_divnorm:
-            # ink_divnorm: dominio do modelo v4 — a normalizacao
-            # por divisao vem antes de tudo (o preenchimento de
-            # cobertura a seguir ja opera em pixels normalizados).
-            ink_warped = photometry.division_normalize(ink_warped)
         # Visibilidade na grade da pagina: onde a mao esta, a
         # passada nao ve a folha — a passada nao pode votar com
         # evidencia fabricada sob oclusao.
@@ -329,6 +343,11 @@ class Pipeline:
             ink_warped, self.last_ink_gain = exposure.apply_paper_gain(
                 ink_warped, gain_mask
             )
+        if self._config.ink_divnorm:
+            # Depois do ganho: a divisão por I/blur(I) é praticamente
+            # invariante à escala, então com os dois ligados o ganho fica
+            # redundante (inofensivo, ~1 ms) e o domínio é o do v4.
+            ink_warped = self._divnorm_page(ink_warped, coverage)
         if coverage is not None:
             # Fora da folha o warp é preto: a transição
             # folha->preto é uma aresta artificial que o page_clean

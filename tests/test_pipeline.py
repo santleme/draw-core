@@ -492,6 +492,30 @@ def test_ink_divnorm_toggle_normalizes_submitted_page():
     assert float(dn_img.mean()) > 200.0  # papel achatado ~branco
 
 
+def test_ink_divnorm_bright_desk_does_not_darken_paper_edge():
+    """Review #48: mesa clara dentro do quad não pode escurecer a faixa
+    de papel encostada nela. O fora-da-folha é preenchido antes da
+    normalização (paridade com o treino: mask_sheet -> divnorm)."""
+    frame = np.full((720, 1280, 3), 220, np.uint8)  # mesa clara
+    frame[100:400, 100:350] = 100  # papel (mais escuro que a mesa)
+    coverage = np.zeros((720, 1280), np.uint8)
+    coverage[100:400, 100:350] = 255
+    loop, _det, ink = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", {"coverage_mask": coverage}),
+        config=PipelineConfig(ink_divnorm=True),
+    )
+    _drive(loop, 40, frame=frame)
+    page = ink.pages[-1]
+    img = page.image.mean(axis=2)
+    paper = page.coverage
+    assert paper is not None and paper.any()
+    vals = img[paper]
+    # Sem o preenchimento prévio o papel perto da mesa caía para ~155
+    # contra ~235 no interior; aqui a página sai uniforme.
+    assert float(vals.max() - vals.min()) < 12.0
+    assert float(vals.min()) > 220.0
+
+
 def _seen_then_lost():
     """Vê a folha nos 6 primeiros chamados, depois perde tudo."""
 

@@ -39,3 +39,13 @@ def test_parse_flags_rejects_unknown(flags):
 
     with pytest.raises(ValueError):
         _parse_flags(flags)
+
+
+def test_audit_refuses_ink_divnorm_with_frozen_model(tmp_path):
+    """Review #48: o sim_writer audita o INK_MODEL congelado (v2);
+    divnorm nele mediria o v2 fora do domínio — recusa antes de rodar."""
+    import pytest
+    from lab.sim_writer import audit_one
+
+    with pytest.raises(ValueError, match="v4"):
+        audit_one(tmp_path, tmp_path / "out", ["ink_divnorm=1"])

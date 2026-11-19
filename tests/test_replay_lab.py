@@ -187,3 +187,48 @@ def test_build_panel_sobrepoe_canvas_confirmado():
     # R ≈ 70 — branco do rótulo teria os três em 255.
     assert strip[..., 0].max() > 150 and strip[..., 1].max() > 150
     assert strip[..., 2].mean() < 120
+
+
+def test_run_replay_panel_overlay_honors_ink_divnorm(tmp_path):
+    """Review #48: com ink_divnorm=1 o overlay por quadro da prancha
+    infere sobre a página normalizada, como o canvas — nunca sobre o
+    warp cru."""
+    from lab.replay_lab import run_replay
+
+    from draw.paper import warp_sheet
+
+    grad = np.tile(np.linspace(60, 230, 64, dtype=np.float32), (64, 1))
+    frame = np.repeat(grad[..., None], 3, axis=2).astype(np.uint8)
+    for i in range(3):
+        cv2.imwrite(str(tmp_path / f"f{i}.png"), frame)
+    quad = np.float32([[2, 2], [60, 2], [60, 60], [2, 60]])
+    raw_warp = warp_sheet(frame, quad)
+    seen = []
+
+    class FakeDetector:
+        last_presence_logit = None
+
+        def __call__(self, frame, return_mask=False):
+            return (quad.copy(), "paper", np.ones(frame.shape[:2], np.uint8))
+
+    class FakeInk:
+        threshold = 0.5
+
+        def ink_prob(self, warp):
+            seen.append(np.array(warp, copy=True))
+            return np.zeros(warp.shape[:2], np.float32)
+
+        def ink_mask(self, warp):
+            return np.zeros(warp.shape[:2], np.uint8)
+
+    run_replay(
+        tmp_path,
+        tmp_path / "out",
+        detector=FakeDetector(),
+        page_clean=FakeInk(),
+        flags=["ink_divnorm=1"],
+        panel_frames={1, 2},
+        verify=None,
+    )
+    assert seen, "a prancha não rodou inferência"
+    assert not any(np.array_equal(x, raw_warp) for x in seen)

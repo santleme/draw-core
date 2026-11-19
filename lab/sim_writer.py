@@ -702,6 +702,15 @@ def audit_one(scen_dir, out_dir, flags, detector_kind="real"):
     from draw.tracker import _gate_info_from_trace
 
     config = _parse_flags(flags)
+    if config.ink_divnorm:
+        # A auditoria roda sempre o INK_MODEL do slot de produção (v2
+        # congelado, que espera RGB cru): ligar a normalização aqui
+        # mediria o v2 fora do domínio dele. O replay_lab aceita
+        # run_replay(ink_model=...) e pode parear divnorm com o v4.
+        raise ValueError(
+            "ink_divnorm=1 exige o modelo de tinta v4; o sim_writer audita o "
+            f"{INK_MODEL.name} congelado — use lab.replay_lab.run_replay(ink_model=...)"
+        )
     scen_dir, out_dir = Path(scen_dir), Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     side = json.loads((scen_dir / "sidecar.json").read_text())
