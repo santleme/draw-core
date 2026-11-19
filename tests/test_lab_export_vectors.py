@@ -60,18 +60,30 @@ def test_main_input_missing(tmp_path, capsys):
     assert "não foi possível ler" in capsys.readouterr().err
 
 
-def test_main_model_proof_names_mask_threshold_not_live_vote(tmp_path):
-    """A prova registra o limiar efetivo da máscara e não o vende como o voto ao vivo."""
+def test_main_model_proof_records_calibrated_mask_threshold(tmp_path, monkeypatch):
+    """A prova registra o runtime_threshold do manifesto (não o fallback)
+    e não o vende como o limiar do voto ao vivo."""
     onnx_fixtures = pytest.importorskip("onnx_fixtures")
+    from draw.infra import manifest
     from draw.page_clean import DEFAULT_THRESHOLD
 
+    calibrated = 0.79
+    assert calibrated != DEFAULT_THRESHOLD
     model = onnx_fixtures.page_clean_model(tmp_path / "pc.onnx", patch=256)
+    seen = []
+
+    def fake_verify(path):
+        seen.append(path)
+        return {"runtime_threshold": calibrated}
+
+    # Sem --allow-unverified: o caminho "manifest" injeta verify_model.
+    monkeypatch.setattr(manifest, "verify_model", fake_verify)
     page = tmp_path / "pagina.png"
     _page(page)
     out = tmp_path / "out"
     argv = [str(page), "--out-dir", str(out), "--mask", "model"]
-    argv += ["--onnx", str(model), "--allow-unverified"]
-    assert main(argv) == 0
+    assert main(argv + ["--onnx", str(model)]) == 0
+    assert seen, "o verificador do manifesto não foi chamado"
     source = json.loads((out / "pagina_proof.json").read_text())["mask_source"]
-    assert f"quadro unico {DEFAULT_THRESHOLD}" in source
+    assert f"quadro unico {calibrated};" in source
     assert "seen_threshold" in source
