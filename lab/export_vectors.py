@@ -47,17 +47,20 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ONNX = _REPO_ROOT / "models" / "page_clean_unet.onnx"
 
 
-def ink_mask_model(bgr, onnx_path, verify):
+def ink_mask_model(bgr, onnx_path, verify, threshold=None):
     """Máscara de tinta do app: PageCleanInk (mosaico 256). -> (máscara, limiar)
 
     Usa draw.page_clean, o mesmo caminho de inferência do Draw —
     inclusive a ordem de canais e o limiar de produção, que vem do
     runtime_threshold do manifesto (ou DEFAULT_THRESHOLD). O limiar
     efetivo volta junto para a prova registrar o que foi usado.
+    threshold explícito vence o manifesto e o default — é a saída
+    para um modelo fora do manifesto (--allow-unverified), que de
+    outro modo herdaria o DEFAULT_THRESHOLD do modelo vigente.
     """
     from draw.page_clean import PageCleanInk
 
-    cleaner = PageCleanInk(str(onnx_path), verify=verify)
+    cleaner = PageCleanInk(str(onnx_path), threshold=threshold, verify=verify)
     cleaner.load()
     return cleaner.ink_mask(bgr) > 0, cleaner.threshold
 
@@ -71,6 +74,7 @@ def export_vectors(
     min_area=4,
     paper_format="a4",
     verify="manifest",
+    threshold=None,
 ):
     """Imagem na grade da página -> dict com polilinhas e estatísticas.
 
@@ -104,7 +108,7 @@ def export_vectors(
     if mask_source == "model":
         if onnx_path is None or not Path(onnx_path).exists():
             raise FileNotFoundError(f"modelo page-clean não encontrado: {onnx_path}")
-        ink, mask_threshold = ink_mask_model(bgr, onnx_path, verify)
+        ink, mask_threshold = ink_mask_model(bgr, onnx_path, verify, threshold)
     else:
         ink, mask_threshold = ink_mask_otsu(bgr), None
     ink = filter_microfragments(ink, min_area=min_area)
@@ -156,6 +160,16 @@ def main(argv=None):
         action="store_true",
         help="desliga a verificação do manifesto sobre o .onnx",
     )
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=None,
+        help=(
+            "limiar da máscara para --mask model; vence o runtime_threshold "
+            "do manifesto. Use com um .onnx antigo sob --allow-unverified "
+            "(ex.: 0.85 para o round-v1), que senão herda o DEFAULT_THRESHOLD"
+        ),
+    )
     size = parser.add_mutually_exclusive_group()
     size.add_argument(
         "--format",
@@ -172,6 +186,8 @@ def main(argv=None):
         help="dimensões livres, API legada (sem --format)",
     )
     args = parser.parse_args(argv)
+    if args.threshold is not None and not 0 < args.threshold < 1:
+        parser.error("--threshold precisa estar em (0, 1)")
 
     bgr = cv2.imread(str(args.input), cv2.IMREAD_COLOR)
     if bgr is None:
@@ -195,6 +211,7 @@ def main(argv=None):
         paper_mm=args.paper_mm,
         paper_format=args.format,
         verify=verify,
+        threshold=args.threshold,
     )
     svg_path = out_dir / f"{stem}.svg"
     dxf_path = out_dir / f"{stem}.dxf"

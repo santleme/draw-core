@@ -110,3 +110,26 @@ def test_main_allow_unverified_skips_verifier_and_records_fallback(
     assert main(argv + ["--onnx", str(model), "--allow-unverified"]) == 0
     source = json.loads((out / "pagina_proof.json").read_text())["mask_source"]
     assert f"quadro unico {DEFAULT_THRESHOLD};" in source
+
+
+def test_main_threshold_override_for_older_model(tmp_path):
+    """Modelo antigo sob --allow-unverified não fica preso no
+    DEFAULT_THRESHOLD do modelo vigente: --threshold vence (review #47)."""
+    onnx_fixtures = pytest.importorskip("onnx_fixtures")
+    from draw.page_clean import DEFAULT_THRESHOLD
+
+    assert DEFAULT_THRESHOLD != 0.85
+    model = onnx_fixtures.page_clean_model(tmp_path / "pc.onnx", patch=256)
+    page = tmp_path / "pagina.png"
+    _page(page)
+    out = tmp_path / "out"
+    argv = [str(page), "--out-dir", str(out), "--mask", "model", "--onnx", str(model)]
+    assert main(argv + ["--allow-unverified", "--threshold", "0.85"]) == 0
+    source = json.loads((out / "pagina_proof.json").read_text())["mask_source"]
+    assert "quadro unico 0.85;" in source
+
+
+@pytest.mark.parametrize("bad", ["0", "1", "1.5", "-0.1"])
+def test_main_threshold_outside_open_interval_is_refused(tmp_path, bad):
+    with pytest.raises(SystemExit):
+        main([str(tmp_path / "x.png"), "--threshold", bad])
