@@ -1792,6 +1792,16 @@ def main():
         ),
     )
     parser.add_argument(
+        "--ink-ruling",
+        action="store_true",
+        help=(
+            "remove a pauta do caderno do mapa de tinta por programacao "
+            "dinamica antes do voto (InkConfig.ruling_removal): segue a "
+            "curvatura da lombada e preserva cruzamentos de caneta; "
+            "experimental, desligado por padrao"
+        ),
+    )
+    parser.add_argument(
         "--allow-unverified",
         action="store_true",
         help="carrega modelos divergentes ou fora do manifesto com "
@@ -1833,6 +1843,12 @@ def main():
             ink_config = InkConfig.strict_vote(args.ink_vote)
         except ValueError as error:
             parser.error(str(error))
+    if args.ink_ruling:
+        if args.markers:
+            parser.error(
+                "--ink-ruling nao combina com --markers (sem tinta no modo marcadores)"
+            )
+        ink_config = dataclasses.replace(ink_config, ruling_removal=True)
     pipeline_config = PipelineConfig(ink=ink_config, ink_auto_gain=args.ink_gain)
     if args.check:
         parsed = parse_source(args.source)

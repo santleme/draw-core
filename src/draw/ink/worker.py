@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 
 from ..contracts import InkDisplaySnapshot, InkSnapshot
-from . import accumulator, identity, registration
+from . import accumulator, identity, registration, ruling
 from . import anchor as anchor_mod
 from .config import InkConfig
 
@@ -158,6 +158,10 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
     ):
         self._page_clean = page_clean
         self._config = config if config is not None else InkConfig()
+        # Filtro de pauta (InkConfig.ruling_removal, opt-in): modelo em cache
+        # por folha; zerado quando a geracao vira (outra folha, outro quad).
+        self._ruling = ruling.RulingFilter() if self._config.ruling_removal else None
+        self._ruling_generation = None
         # Relogio monotonico injetavel: o padrao e o do processo;
         # replays com pump() passam o relogio da cena.
         self._clock = clock
@@ -772,6 +776,11 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 prob = ink_prob(warped)
             else:
                 prob = (self._page_clean.ink_mask(warped) > 0).astype(np.float32)
+            if self._ruling is not None:
+                if generation != self._ruling_generation:
+                    self._ruling.reset()
+                    self._ruling_generation = generation
+                prob = self._ruling.apply(prob, visible)
             # Cobertura de folha (cobertura de folha do loop) viaja em
             # canal proprio ate depois do registro: o veto nao e
             # cego nem se confunde com oclusao de mao — ver o

@@ -45,6 +45,11 @@ class InkConfig:
     vote_hit: float = 0.5
     vote_score: float = 1.4
     vote_score_strong: float = 1.9
+    # Remocao de pauta por programacao dinamica no mapa de probabilidade
+    # (draw.ink.ruling), antes do registro e do voto. Opt-in: o default
+    # fica desligado ate a regua (lab/bench_ink.py) e o uso ao vivo
+    # provarem o ganho.
+    ruling_removal: bool = False
 
     @classmethod
     def strict_vote(cls, level, **overrides):
