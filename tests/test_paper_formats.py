@@ -56,6 +56,47 @@ def test_apply_format_a4_eh_incumbente():
     )
 
 
+def test_warp_sheet_uvmap_identity_map_reproduz_frame():
+    frame = np.arange(60 * 80 * 3, dtype=np.uint8).reshape(60, 80, 3)
+    yy, xx = np.mgrid[0:60, 0:80]
+    uv = np.stack([xx / 79.0, yy / 59.0]).astype(np.float32)
+    out = paper.warp_sheet_uvmap(
+        frame, uv, destination=[(0, 0), (80, 0), (80, 60), (0, 60)]
+    )
+    np.testing.assert_allclose(
+        out[2:-2, 2:-2].astype(np.int32), frame[2:-2, 2:-2].astype(np.int32), atol=1
+    )
+
+
+def test_warp_sheet_uvmap_sem_mapa_cai_na_homografia():
+    frame = np.arange(200 * 300 * 3, dtype=np.uint8).reshape(200, 300, 3)
+    quad = np.float32([[10, 10], [290, 10], [290, 190], [10, 190]])
+    np.testing.assert_array_equal(
+        paper.warp_sheet_uvmap(frame, None, corners=quad),
+        paper.warp_sheet(frame, quad),
+    )
+
+
+def test_warp_sheet_uvmap_mapa_quase_vazio_faz_fallback():
+    frame = np.zeros((60, 80, 3), np.uint8)
+    uv = np.full((2, 60, 80), np.nan, np.float32)
+    uv[:, :10, :10] = 0.5  # 1,4% válido: abaixo do piso de 20%
+    quad = np.float32([[0, 0], [79, 0], [79, 59], [0, 59]])
+    np.testing.assert_array_equal(
+        paper.warp_sheet_uvmap(
+            frame,
+            uv,
+            corners=quad,
+            destination=[(0, 0), (80, 0), (80, 60), (0, 60)],
+        ),
+        paper.warp_sheet(frame, quad, destination=[(0, 0), (80, 0), (80, 60), (0, 60)]),
+    )
+
+
+def test_warp_sheet_uvmap_sem_mapa_nem_cantos_devolve_none():
+    assert paper.warp_sheet_uvmap(np.zeros((4, 4, 3), np.uint8), None) is None
+
+
 def test_apply_format_recomputa_marcadores():
     config.apply_format("carta")
     assert config.MARKER_CENTERS[1] == (929 - 90, 90)

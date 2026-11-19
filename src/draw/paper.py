@@ -428,6 +428,72 @@ def warp_sheet(frame, corners, destination=None):
     return cv2.warpPerspective(frame, matrix, (config.PAPER_W, config.PAPER_H))
 
 
+# Piso de cobertura válida do mapa denso: abaixo disso o remap
+# teria buraco demais e a homografia de 4 cantos é resposta melhor.
+_UVMAP_MIN_VALID = 0.2
+
+
+def warp_sheet_uvmap(frame, uvmap, corners=None, destination=None):
+    """Retifica a folha por remap denso (folha curva/dobrada).
+
+    uvmap: mapa backward (2,H,W) normalizado em [0,1] — para cada
+    posição da grade de saída, a coordenada de entrada a amostrar
+    (a convenção do modelo de folha v4). A grade do mapa define a
+    saída; NaN/|fora de [0,1]| vira borda preta.
+
+    Sem mapa, com mapa vazio demais ou com poucos pontos válidos
+    (<20%), cai na homografia de `corners` — o caminho clássico
+    segue disponível enquanto a cabeça uvmap não chega ao seg.
+    Devolve None se não houver nem mapa útil nem cantos.
+    """
+    if destination is None:
+        destination = [
+            (0, 0),
+            (config.PAPER_W, 0),
+            (config.PAPER_W, config.PAPER_H),
+            (0, config.PAPER_H),
+        ]
+    dst = np.asarray(destination, dtype=np.float32).reshape(4, 2)
+    w = int(round(max(dst[1, 0] - dst[0, 0], dst[2, 0] - dst[3, 0])))
+    h = int(round(max(dst[3, 1] - dst[0, 1], dst[2, 1] - dst[1, 1])))
+    valid_frac = 0.0
+    if uvmap is not None:
+        uv = np.asarray(uvmap, dtype=np.float32)
+        if uv.ndim == 3 and uv.shape[0] == 2:
+            valid_frac = float(np.isfinite(uv).all(axis=0).mean())
+    if uvmap is None or valid_frac < _UVMAP_MIN_VALID:
+        if corners is None:
+            return None
+        return warp_sheet(frame, corners, destination=destination)
+    if uv.shape[1:] != (h, w):
+        uv = np.stack(
+            [
+                cv2.resize(uv[c], (w, h), interpolation=cv2.INTER_LINEAR)
+                for c in range(2)
+            ]
+        )
+    map_x = uv[0] * (frame.shape[1] - 1)
+    map_y = uv[1] * (frame.shape[0] - 1)
+    bad = (
+        ~np.isfinite(map_x)
+        | ~np.isfinite(map_y)
+        | (map_x < 0)
+        | (map_x > frame.shape[1] - 1)
+        | (map_y < 0)
+        | (map_y > frame.shape[0] - 1)
+    )
+    map_x = np.where(bad, -1.0, map_x).astype(np.float32)
+    map_y = np.where(bad, -1.0, map_y).astype(np.float32)
+    return cv2.remap(
+        frame,
+        map_x,
+        map_y,
+        cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    )
+
+
 def warp_paper(frame):
     """Retifica a folha-modelo a partir dos marcadores.
 
