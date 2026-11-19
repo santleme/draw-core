@@ -316,9 +316,11 @@ class Pipeline:
             # a conta como folha), mas uma mão clara não é papel e
             # cancelaria o ganho do papel escuro ao redor (review do PR
             # #52). `visible` já une os dois sinais de oclusão.
+            # Sem cobertura (detecção clássica não a fornece) a mão ainda
+            # sai da conta: `visible` sozinha serve de máscara.
             gain_mask = coverage
-            if coverage is not None and visible is not None:
-                gain_mask = coverage & visible
+            if visible is not None:
+                gain_mask = visible if coverage is None else coverage & visible
             ink_warped, self.last_ink_gain = exposure.apply_paper_gain(
                 ink_warped, gain_mask
             )

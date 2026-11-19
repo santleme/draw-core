@@ -413,6 +413,21 @@ def test_ink_auto_gain_ignores_a_bright_hand_over_the_sheet():
     assert loop.last_ink_gain == pytest.approx(2.5, rel=0.1)  # papel, não a mão
 
 
+def test_ink_auto_gain_excludes_the_hand_without_sheet_coverage():
+    """Review #52: na detecção clássica não há máscara de cobertura; a mão
+    (landmarker/seg) ainda precisa sair da estimativa do ganho."""
+    frame = np.full((720, 1280, 3), 80, np.uint8)
+    frame[100:400, 100:300] = 235  # mão clara sobre metade do quad
+    hand = _mask_block(100, 400, 100, 300)
+    loop, _det, _ink = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", {"hand_mask": hand}),
+        config=PipelineConfig(ink_auto_gain=True),
+    )
+    _drive(loop, 40, frame=frame)
+    assert loop._hand_mask_det is not None
+    assert loop.last_ink_gain == pytest.approx(2.5, rel=0.1)
+
+
 def _seen_then_lost():
     """Vê a folha nos 6 primeiros chamados, depois perde tudo."""
 
