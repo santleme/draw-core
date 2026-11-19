@@ -34,7 +34,7 @@ import cv2
 import numpy as np
 
 from . import config as config_module
-from . import contracts, paper, tracker
+from . import contracts, paper, photometry, tracker
 from .ink import render as ink_render
 from .settings import PipelineConfig
 from .tracker import _SHEET_LOST_MIN_FRAMES
@@ -272,6 +272,11 @@ class Pipeline:
             # e mesa na trabalhadora de tinta.
             return
         ink_warped = self._warp_sheet(frame, warp_corners)
+        if self._config.ink_divnorm:
+            # ink_divnorm: dominio do modelo v4 — a normalizacao
+            # por divisao vem antes de tudo (o preenchimento de
+            # cobertura a seguir ja opera em pixels normalizados).
+            ink_warped = photometry.division_normalize(ink_warped)
         # Visibilidade na grade da pagina: onde a mao esta, a
         # passada nao ve a folha — a passada nao pode votar com
         # evidencia fabricada sob oclusao.

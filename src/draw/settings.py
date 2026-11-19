@@ -42,6 +42,10 @@ class PipelineConfig:
       Medido nas capturas reais: quads fantasmas de mesa vazia até
       0,082; pior folha real em movimento 0,514 — 0,2 separa os
       dois lados com margem >2x de cada um. 0 desliga o piso.
+    - ink_divnorm: aplica draw.photometry.division_normalize no
+      retificado antes do page_clean — o domínio de entrada do
+      modelo de tinta v4 (sombra da mão e pauta viram problema
+      supervisionado). Desligado: o v2 congelado espera RGB cru.
     - follow_move (era DRAW_INK_FOLLOW_MOVE): com a geometria de
       tinta congelada sem mão, um deslocamento sustentado da folha
       reparte o histórico de cantos na posição nova.
@@ -54,5 +58,6 @@ class PipelineConfig:
     skip_stale: bool = True
     seg_hand_occlusion: bool = True
     coverage_iou_floor: float = 0.2
+    ink_divnorm: bool = False
     follow_move: bool = True
     ink: InkConfig = InkConfig()

@@ -76,6 +76,7 @@ class _FakeInkWorker:
         self.submitted = []  # (generation, corners, visible, coverage)
         self.new_generation_calls = []
         self.presence_calls = []
+        self.pages = []
         self._display = display
 
     def new_generation(self, preserve_identity=False):
@@ -84,6 +85,7 @@ class _FakeInkWorker:
         return self.generation
 
     def submit(self, page):
+        self.pages.append(page)
         self.submitted.append(
             (
                 page.generation,
@@ -284,6 +286,32 @@ def test_coverage_iou_floor_inert_without_mask():
     )
     _drive(loop, 40)
     assert ink.submitted
+
+
+def test_ink_divnorm_toggle_normalizes_submitted_page():
+    """ink_divnorm=True: o retificado chega já normalizado à tinta.
+
+    Frame com gradiente suave de iluminação: sem o toggle o warp
+    preserva o gradiente; com ele a imagem submetida sai achatada
+    (~branco de referência, std baixo) — o domínio do modelo v4.
+    """
+    grad = np.linspace(80, 220, 1280, dtype=np.float32)
+    frame = np.repeat(grad[None, :], 720, axis=0)[..., None]
+    frame = np.repeat(frame, 3, axis=2).astype(np.uint8)
+
+    loop, _det, ink_raw = _make_loop(lambda _i: (QUAD.copy(), "paper", None))
+    _drive(loop, 40, frame=frame)
+    raw_img = ink_raw.pages[-1].image
+    assert float(raw_img.std()) > 10.0  # gradiente cru preservado
+
+    loop, _det, ink_dn = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", None),
+        config=PipelineConfig(ink_divnorm=True),
+    )
+    _drive(loop, 40, frame=frame)
+    dn_img = ink_dn.pages[-1].image
+    assert float(dn_img.std()) < float(raw_img.std()) * 0.6
+    assert float(dn_img.mean()) > 200.0  # papel achatado ~branco
 
 
 def _seen_then_lost():
