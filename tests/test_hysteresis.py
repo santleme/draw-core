@@ -327,3 +327,45 @@ def test_cli_prints_the_temporal_table(capsys):
     assert bench.main(["--synthetic"]) == 0
     out = capsys.readouterr().out
     assert "sintético temporal" in out and "voto0.85+histerese" in out
+
+
+# ------------------------------------------------- revisao do PR #57 (Devin)
+
+
+def test_two_pass_speck_at_startup_does_not_confirm():
+    speck = _mask((50, 52, 60, 62))
+    acc = _acc(InkConfig(hysteresis=True))
+    out = None
+    for v in (0.97, 0.97, 0.0):
+        m = np.zeros((H, W), np.float32)
+        m[speck] = v
+        out = acc.add(m, np.ones((H, W), bool))
+    assert not (out["confirmed"][speck] > 0).any()
+
+
+def test_persistent_strong_dot_still_confirms_at_startup():
+    dot = _mask((50, 53, 60, 63))
+    acc = _acc(InkConfig(hysteresis=True))
+    out = None
+    for _ in range(3):
+        m = np.zeros((H, W), np.float32)
+        m[dot] = 0.99
+        out = acc.add(m, np.ones((H, W), bool))
+    assert (out["confirmed"][dot] > 0).all()
+
+
+def test_new_anchor_on_visible_side_does_not_reveal_the_covered_side():
+    stroke = _mask((10, 14, 5, 29))  # 24 px de largura
+    left, right = _mask((10, 14, 5, 17)), _mask((10, 14, 17, 29))
+    acc = _acc(InkConfig(hysteresis=True, provisional_min_px=1))
+    m = np.zeros((H, W), np.float32)
+    m[stroke] = 0.85  # sem ancora: filtrado
+    out = acc.add(m, np.ones((H, W), bool))
+    assert not (out["provisional"] > 0).any()
+    hand = np.ones((H, W), bool)
+    hand[left] = False
+    m2 = np.zeros((H, W), np.float32)
+    m2[right] = 0.95
+    out = acc.add(m2, hand)
+    assert (out["provisional"][right] > 0).all()
+    assert not (out["provisional"][left] > 0).any()

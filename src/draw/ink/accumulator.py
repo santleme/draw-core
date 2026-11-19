@@ -164,7 +164,8 @@ class LayeredInkAccumulator:
             # e >= t_low e o componente dele tem uma ancora (media >= t_high
             # ou tinta ja confirmada). Escala da media, nao do seen.
             cfg = self._config
-            mean = score / len(self._window)
+            # Janela ainda enchendo: passada faltante e evidencia zero.
+            mean = score / votes._INK_VOTE_WINDOW
             strong = confirmed_rule & (mean >= cfg.t_high)
             weak = confirmed_rule & ~strong & (mean >= cfg.t_low)
             kept = hysteresis.keep_anchored(weak, strong | confirmed_before)
@@ -232,6 +233,10 @@ class LayeredInkAccumulator:
                 t_high=self._config.t_high,
                 min_px=self._config.provisional_min_px,
             )
+            if visible is not None:
+                # Ancora nova no lado visivel nao revela o lado coberto: o
+                # coberto so mantem o que ja era mostrado (merge abaixo).
+                provisional_now = provisional_now & visible
         previous_provisional = self._provisional > 0
         if visible is not None:
             # Sem visao nao ha retracao nem estreia: o provisorio

@@ -644,6 +644,8 @@ def _parse_flags(flags):
             if not hasattr(config, name) or name == "ink":
                 raise ValueError(f"PipelineConfig sem campo {name!r}")
             object.__setattr__(config, name, _flag_value(raw, getattr(config, name)))
+    # object.__setattr__ pula __post_init__: revalida o par final (ex.: t_high < t_low).
+    ink = dataclasses.replace(ink)
     object.__setattr__(config, "ink", ink)
     return config
 

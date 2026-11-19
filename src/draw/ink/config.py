@@ -58,6 +58,10 @@ class InkConfig:
     #  - camada provisoria exibida: so componentes 8-conectados com >=
     #    provisional_min_px pixels E com uma ancora (prob. desta passada >=
     #    t_high, ou colados a tinta confirmada).
+    # Nota: a media divide sempre pela janela cheia (passada faltante = zero),
+    # e um traco vizinho de tinta confirmada serve de ancora; por isso duas
+    # leituras fortes + um zero (media ~0,66 >= t_low) ainda estendem um traco
+    # ja confirmado. E intencional; endurecer exigiria hits == janela.
     # Campos proprios, separados do seen_threshold (que governa identidade da
     # pagina, testemunha de remocao e ancora da porta de fronteira: ver #53).
     # Opt-in: o default fica desligado ate a regua e o uso ao vivo provarem.

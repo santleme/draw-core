@@ -49,3 +49,16 @@ def test_audit_refuses_ink_divnorm_with_frozen_model(tmp_path):
 
     with pytest.raises(ValueError, match="v4"):
         audit_one(tmp_path, tmp_path / "out", ["ink_divnorm=1"])
+
+
+def test_parse_flags_validates_final_hysteresis_thresholds():
+    from lab.sim_writer import _parse_flags
+
+    with pytest.raises(ValueError):
+        _parse_flags(["ink.hysteresis=1", "ink.t_high=0.60"])
+    for order in (
+        ["ink.t_low=0.5", "ink.t_high=0.8"],
+        ["ink.t_high=0.8", "ink.t_low=0.5"],
+    ):
+        cfg = _parse_flags(order)
+        assert (cfg.ink.t_low, cfg.ink.t_high) == (0.5, 0.8)
