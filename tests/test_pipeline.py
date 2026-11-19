@@ -516,6 +516,31 @@ def test_ink_divnorm_bright_desk_does_not_darken_paper_edge():
     assert float(vals.min()) > 220.0
 
 
+def test_ink_divnorm_makes_the_gain_redundant_when_both_are_on():
+    """Ganho + divnorm ligados: o ganho entra primeiro, mas a divisão por
+    I/blur(I) é praticamente invariante à escala — a página que chega à
+    tinta é quase a mesma do divnorm sozinho."""
+    grad = np.linspace(60, 110, 1280, dtype=np.float32)  # papel escuro
+    frame = np.repeat(np.repeat(grad[None, :], 720, axis=0)[..., None], 3, axis=2)
+    frame = frame.astype(np.uint8)
+    frame[200:300, 200:400] = 20  # traço
+
+    pages = {}
+    for label, cfg in (
+        ("divnorm", PipelineConfig(ink_divnorm=True)),
+        ("ambos", PipelineConfig(ink_divnorm=True, ink_auto_gain=True)),
+    ):
+        loop, _det, ink = _make_loop(
+            lambda _i: (QUAD.copy(), "paper", None), config=cfg
+        )
+        _drive(loop, 40, frame=frame)
+        pages[label] = ink.pages[-1].image.astype(np.float32)
+        if label == "ambos":
+            assert loop.last_ink_gain > 1.5  # o ganho de fato rodou
+    assert float(np.abs(pages["ambos"] - pages["divnorm"]).mean()) < 3.0
+    assert float(pages["ambos"].mean()) > 200.0  # papel normalizado ~branco
+
+
 def _seen_then_lost():
     """Vê a folha nos 6 primeiros chamados, depois perde tudo."""
 
