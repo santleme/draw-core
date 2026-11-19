@@ -256,12 +256,15 @@ def test_worker_drops_the_cached_model_when_the_generation_changes(monkeypatch):
 # ------------------------------------------------ achados do Devin (#56)
 
 
-def test_a_local_hatch_of_pen_strokes_is_not_mistaken_for_ruling():
+@pytest.mark.parametrize(("x0", "x1"), [(300, 440), (80, 219)])
+def test_a_local_hatch_of_pen_strokes_is_not_mistaken_for_ruling(x0, x1):
     """8 tracos de caneta igualmente espacados numa faixa so, em papel liso:
-    periodicos, mas sem suporte ao longo da folha (review #56)."""
+    periodicos, mas sem suporte ao longo da folha. (300-440) atravessa a
+    divisoria das metades; (80-219) fica inteiro na metade esquerda (review
+    #56)."""
     prob = np.zeros((850, 850), np.float32)
     for i in range(8):
-        prob[200 + 40 * i : 202 + 40 * i, 300:440] = 0.95
+        prob[200 + 40 * i : 202 + 40 * i, x0:x1] = 0.95
     before = prob.copy()
     assert ruling.estimate(before) is None
     f = ruling.RulingFilter()
@@ -294,22 +297,73 @@ def test_soft_fringe_of_the_thickest_erasable_run_is_erased_too():
     assert out[:, 300:360].max() == 0.0
 
 
-def test_a_missed_estimate_under_a_hand_is_retried_when_the_hand_leaves():
+def _count_estimates(monkeypatch):
+    calls = []
+    real = ruling.estimate
+    monkeypatch.setattr(
+        ruling, "estimate", lambda *a, **k: calls.append(1) or real(*a, **k)
+    )
+    return calls
+
+
+def test_a_missed_estimate_under_a_hand_is_retried_in_a_few_passes(monkeypatch):
     """Sem pauta achada com a mao tapando a folha, o negativo nao pode ficar
     em cache por 24 passadas: a pauta seria confirmada como tinta (review
     #56)."""
     prob = np.zeros((600, 1200), np.float32)
     for k in range(12):
         prob[80 + 40 * k : 82 + 40 * k, :] = 0.95
-    visible = np.zeros(prob.shape, bool)  # `visible` = sem mao: tudo tapado
+    covered = np.zeros(prob.shape, bool)  # `visible` = sem mao: tudo tapado
     f = ruling.RulingFilter()
-    f.apply(prob.copy(), visible)
+    f.apply(prob.copy(), covered)
     assert f.last_info["lines"] == 0
-    out = f.apply(prob.copy(), None)  # mao saiu: reestima ja na passada seguinte
+    out = None
+    for _ in range(ruling._RETRY_PASSES + 1):  # mao saiu
+        out = f.apply(prob.copy(), None)
+        if f.last_info["lines"]:
+            break
     assert f.last_info["lines"] > 0 and (out > 0.5).sum() == 0
-    # e sem mao, um negativo continua em cache (nao reestima toda passada)
-    blank = ruling.RulingFilter()
-    blank.apply(np.zeros((600, 1200), np.float32), None)
-    assert blank.last_info["estimated"] is True
-    blank.apply(np.zeros((600, 1200), np.float32), None)
-    assert blank.last_info["estimated"] is False
+
+
+def test_blank_page_with_a_small_hand_does_not_estimate_every_pass(monkeypatch):
+    """Em papel liso a mao esta quase sempre no quadro: so uma oclusao grande
+    justifica reestimar cedo, e mesmo assim com recuo (review #56)."""
+    calls = _count_estimates(monkeypatch)
+    blank = np.zeros((600, 1200), np.float32)
+    small_hand = np.ones(blank.shape, bool)
+    small_hand[:, :120] = False  # 10% tapado
+    f = ruling.RulingFilter()
+    for _ in range(10):
+        f.apply(blank.copy(), small_hand)
+    assert len(calls) == 1
+    big_hand = np.zeros(blank.shape, bool)  # tudo tapado: tenta de novo, com recuo
+    calls.clear()
+    f = ruling.RulingFilter()
+    for _ in range(10):
+        f.apply(blank.copy(), big_hand)
+    assert 2 <= len(calls) <= 4  # a cada _RETRY_PASSES, nao a cada passada
+    # e sem mao, um negativo continua em cache
+    calls.clear()
+    f = ruling.RulingFilter()
+    for _ in range(10):
+        f.apply(blank.copy(), None)
+    assert len(calls) == 1
+
+
+def test_paths_use_pixel_index_coordinates_and_do_not_grab_a_neighbour_stroke():
+    """O centro de um bloco reduzido 2:1 que cobre as linhas y e y+1 e y+0,5
+    (coordenadas de indice), nao y+1: o erro de meio pixel fazia o arredondamento
+    escolher um traco de caneta vizinho (review #56)."""
+    prob = np.zeros((600, 1200), np.float32)
+    for k in range(12):
+        prob[80 + 40 * k : 82 + 40 * k, :] = 0.95
+    model = ruling.estimate(prob.copy())
+    first = model.segments[0].paths[0]
+    assert abs(float(np.median(first)) - 80.5) < 0.3
+    # traco de caneta (2 px) colado a pauta, separado por UMA linha em branco
+    pen = np.zeros_like(prob)
+    pen[80 + 40 * 3 + 3 : 80 + 40 * 3 + 5, 400:520] = 0.95
+    merged = np.maximum(prob, pen)
+    out = ruling.RulingFilter().apply(merged.copy())
+    assert (out[80 + 40 * 3 + 3 : 80 + 40 * 3 + 5, 400:520] > 0.5).all()  # ficou
+    assert (out[80 + 40 * 3 : 80 + 40 * 3 + 2, 540:700] > 0.5).sum() == 0  # pauta saiu

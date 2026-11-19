@@ -49,7 +49,10 @@ _JUMP_PENALTY = 0.02
 # Portão
 _T_RUN = 0.5  # probabilidade que conta como "tinta" para o run-length
 _R = 6  # janela vertical de medida, px de cada lado
+_OCCLUDED_BELOW = 0.85  # fração visível abaixo da qual um negativo é suspeito
+_RETRY_PASSES = 3  # passadas ate reestimar um negativo suspeito
 _SUPPORT_W = 48  # px de cada janela do teste de suporte
+_MIN_SPAN = 0.6  # extensao minima (fração da metade) do suporte
 _MIN_SUPPORT = 0.35  # fração minima de janelas com tinta sobre a linha
 _ANCHOR_PAD = 2  # colunas protegidas em volta de um cruzamento
 # Espessura apagável: <= h_pauta + _THIN_MARGIN (a pauta real oscila 3-6 px, medido no e5).
@@ -279,11 +282,12 @@ def _segment(score, c_lo, c_hi, width, height):
     # ultimas 4 sem caminho). A ultima metade vai ate a borda.
     w_s, h_s = score.shape[1], score.shape[0]
     rx, ry = width / w_s, height / h_s
-    xc = (np.arange(c_lo, c_hi) + 0.5) * rx
+    # centro do bloco reduzido em coordenadas de INDICE de pixel: -0,5
+    xc = (np.arange(c_lo, c_hi) + 0.5) * rx - 0.5
     x0 = int(round(c_lo * rx))
     x1 = width if c_hi >= w_s else int(round(c_hi * rx))
     xs = np.arange(x0, x1, dtype=np.float32)
-    full = (rows + 0.5) * ry
+    full = (rows + 0.5) * ry - 0.5
     paths = np.stack(
         [np.interp(xs, xc, full[:, k]) for k in range(full.shape[1])]
     ).astype(np.float32)
@@ -434,7 +438,14 @@ def _support(prob, seg):
     k, x = has.shape
     n = max(1, x // _SUPPORT_W)
     win = has[:, : n * _SUPPORT_W].reshape(k, n, _SUPPORT_W).any(axis=2)
-    return float(np.median(win.mean(axis=1)))
+    frac = float(np.median(win.mean(axis=1)))
+    # Extensão: da primeira à última janela com tinta, em fração da metade.
+    # Um tracejado local ocupa poucas janelas, mesmo que sejam > 35% de uma
+    # metade estreita.
+    first = np.where(win.any(axis=1), win.argmax(axis=1), n)
+    last = np.where(win.any(axis=1), n - 1 - win[:, ::-1].argmax(axis=1), -1)
+    span = float(np.median(np.clip(last - first + 1, 0, n) / n))
+    return min(frac, span / _MIN_SPAN * _MIN_SUPPORT)
 
 
 def _estimate_h(prob, segments):
@@ -564,11 +575,16 @@ class RulingFilter:
             self._model = estimate(prob, visible) or RulingModel((), 0.0, prob.shape)
             self._tracks = [_Track(seg, prob.shape) for seg in self._model.segments]
             self._age = 0
-            if not self._tracks and visible is not None and not visible.all():
-                # Nao achou pauta com a mao tapando parte da folha: o negativo
-                # vale so para esta vista. Reestima na proxima passada, que
-                # pode ja ser sem mao (review do PR #56).
-                self._age = self.reestimate_every
+            if (
+                not self._tracks
+                and visible is not None
+                and float(visible.mean()) < _OCCLUDED_BELOW
+            ):
+                # Nao achou pauta com a mao tapando boa parte da folha: o
+                # negativo vale so para esta vista. Tenta de novo em poucas
+                # passadas (nao a cada uma: em papel liso a mao esta quase
+                # sempre no quadro e a estimativa custa ~13 ms).
+                self._age = max(0, self.reestimate_every - _RETRY_PASSES)
         self._age += 1
         if not self._tracks:
             self.last_info = {"lines": 0, "estimated": stale}
