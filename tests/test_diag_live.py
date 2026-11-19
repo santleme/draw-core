@@ -1,6 +1,8 @@
 """Ferramenta de diagnóstico ao vivo (lab/diag_live.py): partes puras."""
 
 import json
+import time
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -175,7 +177,7 @@ def test_dead_source_is_bounded_and_the_capture_released():
     got = []
     with pytest.raises(diag_live.SourceExhausted, match="sem quadro"):
         for frame, _fps in diag_live._frames_from_source(
-            "hvcam://", 6, 0.0, 0.0, stall_s=0.3, opener=lambda _s: cap
+            "hvcam://", 6, 0.0, 0.0, stall_s=0.3, opener=lambda _s: cap, fps_burst_s=0.0
         ):
             got.append(frame)
     assert len(got) == 3
@@ -191,17 +193,23 @@ def test_source_opens_through_the_app_open_capture():
         seen.append(target)
         return _Capture(good=2)
 
-    list(diag_live._frames_from_source("0", 1, 0.0, 0.0, opener=opener))
-    list(diag_live._frames_from_source("hvcam://", 1, 0.0, 0.0, opener=opener))
+    list(
+        diag_live._frames_from_source("0", 1, 0.0, 0.0, opener=opener, fps_burst_s=0.0)
+    )
+    list(
+        diag_live._frames_from_source(
+            "hvcam://", 1, 0.0, 0.0, opener=opener, fps_burst_s=0.0
+        )
+    )
     assert seen == [0, "hvcam://"]  # '0' vira índice; URL segue como texto
 
 
 def test_warmup_zero_still_reports_a_real_fps():
-    cap = _Capture(good=50)
+    cap = _Capture(good=1_000_000)
     fps = [
         f
         for _frame, f in diag_live._frames_from_source(
-            "0", 3, 0.0, 0.0, opener=lambda _s: cap
+            "0", 3, 0.0, 0.0, opener=lambda _s: cap, fps_burst_s=0.05
         )
     ]
     assert len(fps) == 3 and all(v > 0 for v in fps)
@@ -304,3 +312,74 @@ def test_ink_fraction_is_comparable_across_grids(tmp_path):
     assert px["warp"]["0.5"] != px["warp_aspect"]["0.5"]  # grades diferentes
     assert record["ink_frac"]["warp"]["0.5"] == pytest.approx(1.0)
     assert record["ink_frac"]["warp_aspect"]["0.5"] == pytest.approx(1.0)
+
+
+# --- segunda rodada do review do PR #51 ---------------------------------
+
+
+def test_empty_input_path_is_rejected_and_never_opens_a_camera(
+    monkeypatch, tmp_path, fake_models, capsys
+):
+    """--input "" caía no ramo da webcam (verdade falsa) e Path("") é a
+    pasta atual: agora é erro de uso (review #51)."""
+
+    def boom(*_a, **_k):
+        raise AssertionError("não devia abrir a câmera")
+
+    monkeypatch.setattr(diag_live, "_frames_from_source", boom)
+    assert diag_live.main(["--input", "", "--out", str(tmp_path / "o")]) == 2
+    assert diag_live.main(["--input", "  ", "--out", str(tmp_path / "o")]) == 2
+    assert "não é uma pasta" in capsys.readouterr().err
+
+
+def test_read_fps_is_not_diluted_by_diagnosis_time():
+    """O gerador fica suspenso durante o diagnóstico; o FPS vem de uma
+    rajada contínua de leituras, não de leituras ÷ tempo total."""
+
+    class _Slow(_Capture):
+        def read(self):
+            time.sleep(0.01)  # ~100 leituras/s
+            return super().read()
+
+    cap = _Slow(good=10_000)
+    seen = []
+    for _frame, fps in diag_live._frames_from_source(
+        "0", 3, 0.0, 0.0, opener=lambda _s: cap
+    ):
+        seen.append(fps)
+        time.sleep(0.4)  # "diagnóstico" demorado entre os quadros
+    assert len(seen) == 3 and len(set(seen)) == 1  # medido uma vez
+    assert seen[0] > 50  # sem diluir: ~95/s, não ~20/s
+
+
+def test_png_write_failure_keeps_completed_frames(monkeypatch, tmp_path, fake_models):
+    """Falha ao gravar o PNG do 2º quadro: o 1º segue no resumo parcial
+    (review #51)."""
+    real = diag_live._write_png
+
+    def flaky(path, image):
+        if Path(path).name.startswith("001_"):
+            raise OSError(f"falha ao gravar {path}")
+        return real(path, image)
+
+    monkeypatch.setattr(diag_live, "_write_png", flaky)
+    src = _png_dir(tmp_path / "in", ["a.png", "b.png", "c.png"])
+    out = tmp_path / "out"
+    assert diag_live.main(["--input", str(src), "--out", str(out)]) == 1
+    summary = json.loads((out / "summary.json").read_text())
+    assert summary["complete"] is False and "001_" in summary["error"]
+    assert len(summary["frames"]) == 1
+
+
+@pytest.mark.parametrize(
+    "kept", ["000_mask.png", "000_warp.png", "003_prob.png", "001_seg.png"]
+)
+def test_output_guard_catches_any_retained_artifact(tmp_path, fake_models, kept):
+    """Operador guardou só as máscaras/warps de uma rodada: a pasta
+    continua sendo uma rodada anterior (review #51)."""
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / kept).write_bytes(b"x")
+    src = _png_dir(tmp_path / "in", ["a.png"])
+    assert diag_live.main(["--input", str(src), "--out", str(out)]) == 2
+    assert (out / kept).read_bytes() == b"x"

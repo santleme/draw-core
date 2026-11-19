@@ -37,6 +37,8 @@ from draw import config  # noqa: E402
 # só o tempo sem quadro distingue uma coisa da outra.
 _STALL_TIMEOUT_S = 10.0
 _RETRY_SLEEP_S = 0.05
+# Leitura contínua (sem diagnóstico no meio) que mede o FPS da fonte.
+_FPS_BURST_S = 0.5
 
 # Limiares comparados no relatório: o voto ao vivo (seen_threshold),
 # o corte calibrado do v1 e o do v2.
@@ -191,14 +193,25 @@ def _frames_from_dir(path, limit):
 
 
 def _frames_from_source(
-    source, limit, warmup_s, spacing_s, stall_s=_STALL_TIMEOUT_S, opener=None
+    source,
+    limit,
+    warmup_s,
+    spacing_s,
+    stall_s=_STALL_TIMEOUT_S,
+    opener=None,
+    fps_burst_s=_FPS_BURST_S,
 ):
     """Lê `limit` quadros espaçados da fonte, pelo mesmo open_capture do app.
 
     Sem leitura boa por `stall_s` segundos a fonte é declarada parada
     (SourceExhausted) — o hvcam devolve False tanto no timeout transitório
-    quanto no stream caído, e sem o limite o laço nunca terminava. O FPS
-    devolvido é o de leituras reais sobre o tempo decorrido.
+    quanto no stream caído, e sem o limite o laço nunca terminava. O prazo
+    é checado ENTRE leituras: a granularidade é o timeout de leitura da
+    própria fonte (hvcam: 1 s), então um --stall-timeout menor que isso
+    só vale na próxima volta. O FPS é medido numa rajada contínua de
+    leituras (o aquecimento, no mínimo _FPS_BURST_S), antes de qualquer
+    diagnóstico: durante o diagnóstico o gerador está suspenso e dividir
+    por esse tempo subestimaria a câmera (review do PR #51).
     """
     from draw.camera import open_capture, parse_source
 
@@ -226,8 +239,10 @@ def _frames_from_source(
             time.sleep(_RETRY_SLEEP_S)
             return None
 
-        while time.monotonic() - t_start < warmup_s:  # AE/AWB assentam
+        burst_s = max(warmup_s, fps_burst_s)  # AE/AWB assentam; mede o FPS
+        while time.monotonic() - t_start < burst_s:
             read()
+        fps = reads / max(time.monotonic() - t_start, 1e-6)
         got = 0
         next_t = time.monotonic()
         while got < limit:
@@ -236,7 +251,7 @@ def _frames_from_source(
                 continue
             got += 1
             next_t = time.monotonic() + spacing_s
-            yield frame.copy(), reads / max(time.monotonic() - t_start, 1e-6)
+            yield frame.copy(), fps
     finally:
         cap.release()
 
@@ -249,8 +264,11 @@ def rotate_frame(frame, rotation):
 
 def _has_artifacts(out_dir):
     """Pasta de saída que já tem um diagnóstico: não se mistura execuções."""
+    # Qualquer artefato por quadro (NNN_raw/seg/warp/prob/mask*.png) ou o
+    # resumo: o operador pode ter guardado só as máscaras de uma rodada.
     return out_dir.is_dir() and (
-        (out_dir / "summary.json").exists() or any(out_dir.glob("*_raw.png"))
+        (out_dir / "summary.json").exists()
+        or any(out_dir.glob("[0-9][0-9][0-9]_*.png"))
     )
 
 
@@ -264,7 +282,11 @@ def main(argv=None):
     src = parser.add_mutually_exclusive_group(required=True)
     src.add_argument("--source", help="hvcam://, hvcam+tcp://host ou índice")
     src.add_argument("--input", help="pasta com PNGs de quadros brutos")
-    parser.add_argument("--out", required=True, help="pasta de saída (vazia)")
+    parser.add_argument(
+        "--out",
+        required=True,
+        help="pasta de saída; recusada se já tiver resumo ou artefatos NNN_*.png",
+    )
     parser.add_argument("--frames", type=int, default=6)
     parser.add_argument("--warmup", type=float, default=2.0, help="s de AE/AWB")
     parser.add_argument("--spacing", type=float, default=0.5, help="s entre quadros")
@@ -272,7 +294,11 @@ def main(argv=None):
         "--stall-timeout",
         type=float,
         default=_STALL_TIMEOUT_S,
-        help="s sem quadro que declaram a fonte ao vivo parada",
+        help=(
+            "s sem quadro que declaram a fonte ao vivo parada; checado entre "
+            "leituras, então a granularidade é o timeout de leitura da fonte "
+            "(hvcam: 1 s)"
+        ),
     )
     parser.add_argument("--rotate", type=int, choices=(0, 180), default=0)
     parser.add_argument(
@@ -304,8 +330,12 @@ def main(argv=None):
             file=sys.stderr,
         )
         return 2
-    if args.input and not Path(args.input).is_dir():
-        print(f"erro: --input não é uma pasta: {args.input}", file=sys.stderr)
+    # `is not None`, não verdade: --input "" é um caminho vazio (inválido), não
+    # a ausência da opção — e Path("") é a pasta atual.
+    if args.input is not None and (
+        not args.input.strip() or not Path(args.input).is_dir()
+    ):
+        print(f"erro: --input não é uma pasta: {args.input!r}", file=sys.stderr)
         return 2
     # Mesma grade que o app usa na sessão: o warp e a máscara do diagnóstico
     # têm de ter as dimensões do que o runtime enxerga.
@@ -326,7 +356,7 @@ def main(argv=None):
 
     out_dir.mkdir(parents=True, exist_ok=True)
     records, read_fps, error = [], None, None
-    if args.input:
+    if args.input is not None:
         frames = ((f, None) for f in _frames_from_dir(args.input, args.frames))
     else:
         frames = _frames_from_source(
@@ -341,7 +371,9 @@ def main(argv=None):
             read_fps = fps if fps is not None else read_fps
             frame = rotate_frame(frame, args.rotate)
             records.append(diagnose_frame(frame, detector, page_clean, out_dir, idx))
-    except SourceExhausted as exc:
+    except (SourceExhausted, OSError) as exc:
+        # Fonte parada ou PNG que não gravou: os quadros já concluídos
+        # ficam no resumo parcial em vez de órfãos.
         error = str(exc)
     finally:
         close = getattr(frames, "close", None)
