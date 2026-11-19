@@ -49,6 +49,12 @@ class PipelineConfig:
       vazia o seg marca 15%–24% do frame como mão fora do quad, e é
       isso que derruba o IoU do fantasma — sem a classe mão o
       fantasma sobe para 0,23–0,41 e cruza a folha real.
+      LIMITAÇÃO CONHECIDA (não medida): a mesma cobertura conta mão
+      ou antebraço FORA da folha na união do IoU. Folha pequena com um
+      antebraço grande em cena pode cair abaixo do piso e ser vetada
+      (a tinta não sobe até a mão sair). Nenhuma captura real desse
+      caso existe ainda; o pior caso medido com mão (s4, escrita) fica
+      em IoU 0,864. Se aparecer, `coverage_iou_floor=0` desliga o piso.
       0 desliga o piso.
     - follow_move (era DRAW_INK_FOLLOW_MOVE): com a geometria de
       tinta congelada sem mão, um deslocamento sustentado da folha
