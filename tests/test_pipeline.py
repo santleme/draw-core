@@ -76,6 +76,7 @@ class _FakeInkWorker:
         self.submitted = []  # (generation, corners, visible, coverage)
         self.new_generation_calls = []
         self.presence_calls = []
+        self.pages = []
         self._display = display
 
     def new_generation(self, preserve_identity=False):
@@ -84,6 +85,7 @@ class _FakeInkWorker:
         return self.generation
 
     def submit(self, page):
+        self.pages.append(page)
         self.submitted.append(
             (
                 page.generation,
@@ -330,6 +332,21 @@ def test_coverage_iou_floor_inert_without_mask():
     )
     _drive(loop, 40)
     assert ink.submitted
+
+
+def test_paisagem_submete_pagina_deitada_a_tinta():
+    """--orientation paisagem: o quad largo chega à tinta numa grade
+    deitada (1200x850), sem espremer o conteúdo na grade em pé."""
+    from draw import config as config_module
+
+    config_module.apply_format("a4", "paisagem")
+    try:
+        loop, _det, ink = _make_loop(lambda _i: (QUAD.copy(), "paper", None))
+        _drive(loop, 40)
+        page = ink.pages[-1].image
+        assert page.shape[:2] == (850, 1200)
+    finally:
+        config_module.apply_format("a4")
 
 
 def _seen_then_lost():

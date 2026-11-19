@@ -729,3 +729,25 @@ def test_mouse_wheel_events_are_ignored_by_the_handler(monkeypatch):
     _reset_camera_menu(monkeypatch)
     app_module._camera_menu["open"] = True
     app_module._on_mouse(app_module.cv2.EVENT_MOUSEWHEEL, 5, 5, 7 << 16, None)
+
+
+def test_main_orientation_paisagem_deita_a_grade(monkeypatch):
+    seen = []
+    monkeypatch.setattr(
+        app_module,
+        "run",
+        lambda **kw: seen.append(
+            (config.PAPER_ORIENTATION, config.PAPER_W, config.PAPER_H)
+        ),
+    )
+    monkeypatch.setattr(sys, "argv", ["draw", "--orientation", "paisagem"])
+    app_module.main()
+    assert seen[-1] == ("paisagem", 1200, 850)
+    config.apply_format("a4")
+
+
+def test_main_orientation_paisagem_recusa_markers(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["draw", "--markers", "--orientation", "paisagem"])
+    with pytest.raises(SystemExit) as error:
+        app_module.main()
+    assert error.value.code == 2

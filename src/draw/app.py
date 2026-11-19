@@ -1205,13 +1205,14 @@ def run(
         ).start()
         format_metadata = {
             "paper_format": config.PAPER_FORMAT,
+            "paper_orientation": config.PAPER_ORIENTATION,
             "page_grid": [config.PAPER_W, config.PAPER_H],
             "mm_per_px": config.mm_per_px(),
         }
         telemetry.update(**format_metadata)
         telemetry.event("session_open", **format_metadata)
         print(
-            f"Formato da sessao: {config.PAPER_FORMAT}, "
+            f"Formato da sessao: {config.PAPER_FORMAT} ({config.PAPER_ORIENTATION}), "
             f"grade {config.PAPER_W}x{config.PAPER_H}, "
             f"{config.mm_per_px():.6f} mm/px."
         )
@@ -1753,6 +1754,15 @@ def main():
         ),
     )
     parser.add_argument(
+        "--orientation",
+        choices=config.ORIENTATIONS,
+        default="retrato",
+        help=(
+            "orientacao da grade da pagina: paisagem para caderno aberto ou "
+            "folha deitada (evita espremer o conteudo largo na grade em pe)"
+        ),
+    )
+    parser.add_argument(
         "--allow-unverified",
         action="store_true",
         help="carrega modelos divergentes ou fora do manifesto com "
@@ -1772,7 +1782,11 @@ def main():
             "manifesto serao carregados apenas com aviso."
         )
     try:
-        config.apply_format(args.format or "a4")
+        if args.markers and args.orientation != "retrato":
+            parser.error(
+                "--orientation paisagem nao combina com --markers (folha-modelo A4 em pe)"
+            )
+        config.apply_format(args.format or "a4", args.orientation)
     except ValueError as error:
         parser.error(str(error))
     if args.check:
