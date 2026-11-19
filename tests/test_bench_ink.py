@@ -60,7 +60,17 @@ def test_synthetic_ground_truth_is_consistent(page):
     assert page.ticks_zone.sum() > 500  # e tracinhos possíveis
     assert not (page.ruling_only & page.strokes).any()
     assert (page.crossing_strokes <= page.strokes).all()
-    for name in ("E", "T", "T2", "S", "H", "diag", "thin", "E_on_line"):
+    for name in (
+        "E",
+        "T",
+        "T2",
+        "S",
+        "H",
+        "diag",
+        "thin",
+        "E_on_line",
+        "pencil_on_line",
+    ):
         assert page.glyphs[name].sum() > 300, name
     # a pauta é de fato curva: a ordenada da mesma linha varia com x
     geo = dict(y0=0.0, period=34.0, slope=0.03, bend_amp=22.0, bend_x=600, bend_w=144)
@@ -84,6 +94,7 @@ def test_identity_filter_keeps_everything_including_the_ruling(page):
     assert r["crossing_preserved"] > 0.99
     assert r["short_stroke_recall"] > 0.99
     assert r["on_line_recall"] > 0.99
+    assert r["pencil_on_line_recall"] > 0.99
     assert r["ticks_residual"] > 500
 
 
@@ -120,7 +131,17 @@ def test_naive_morphology_is_caught_by_the_short_stroke_metric(page):
 
 def test_glyph_recall_names_every_glyph(page):
     recalls = bench.glyph_recall(page.prob > 0.5, page)
-    assert set(recalls) == {"E", "T", "T2", "S", "H", "diag", "thin", "E_on_line"}
+    assert set(recalls) == {
+        "E",
+        "T",
+        "T2",
+        "S",
+        "H",
+        "diag",
+        "thin",
+        "E_on_line",
+        "pencil_on_line",
+    }
     assert set(bench.SHORT_STROKE_GLYPHS) <= set(recalls)
 
 
@@ -272,3 +293,13 @@ def test_cli_requires_a_mode_and_rejects_unknown_presets(tmp_path):
     with pytest.raises(SystemExit) as error:
         bench.main(["--synthetic", "--presets", "inventado"])
     assert error.value.code == 2
+
+
+def test_pencil_on_line_has_the_ruling_thickness_and_is_not_a_short_stroke(page):
+    """O lápis fino sobre a linha tem a espessura da pauta (é o caso
+    ambíguo) e fica de fora da meta (c), reportado à parte."""
+    assert "pencil_on_line" not in bench.SHORT_STROKE_GLYPHS
+    mask = page.glyphs["pencil_on_line"]
+    col = mask[:, 730]  # no braço horizontal
+    assert 1 <= int(col.sum()) <= page.h_pauta + 1
+    assert (mask & page.crossing_strokes).any()  # a haste cruza linhas

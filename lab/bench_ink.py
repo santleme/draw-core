@@ -173,6 +173,16 @@ def make_synthetic_page(
     glyphs = _glyph_masks(shape, specs, pen)
     thin = _glyph_masks(shape, [("thin", [[(520, 470), (540, 640)]])], max(2, pen - 2))
     glyphs.update(thin)
+    # Lápis fino deitado SOBRE a linha, com a espessura da própria pauta: o
+    # caso ambíguo de qualquer filtro de pauta (só a probabilidade ou a
+    # continuidade com a haste o separam). Reportado à parte, sem meta fixa.
+    px, pk = 700, 14
+    pbase = line_y(pk, px + gw // 2)
+    pencil_pts = [
+        [(px, pbase - gh), (px, pbase)],
+        [(px, pbase), (px + gw, line_y(pk, px + gw))],
+    ]
+    glyphs.update(_glyph_masks(shape, [("pencil_on_line", pencil_pts)], h_pauta))
     strokes = np.zeros(shape, bool)
     for mask in glyphs.values():
         strokes |= mask
@@ -261,7 +271,7 @@ def ticks_residual(pred, page):
 
 
 def glyph_recall(pred, page):
-    """Recall por glifo (E, T, S, H, diag, thin, E_on_line)."""
+    """Recall por glifo (E, T, S, H, diag, thin, E_on_line, pencil_on_line)."""
     return {
         name: _frac((pred & mask).sum(), mask.sum())
         for name, mask in page.glyphs.items()
@@ -287,6 +297,7 @@ def score_filter(page, fn=None, threshold=0.5):
         "ticks_residual": ticks_residual(pred, page),
         "short_stroke_recall": short_stroke_recall(pred, page),
         "on_line_recall": recalls["E_on_line"],
+        "pencil_on_line_recall": recalls["pencil_on_line"],
         "recalls": recalls,
     }
 
@@ -415,14 +426,16 @@ def _print_synthetic(results):
     print("== sintético (gabarito exato) ==")
     print(
         f"{'filtro':22s} {'(a) pauta':>10s} {'(b) cruz.':>10s} {'ticks':>7s} "
-        f"{'(c) E T S H':>12s} {'sobre linha':>12s} {'p50 ms':>8s} {'p90 ms':>8s}"
+        f"{'(c) E T S H':>12s} {'sobre linha':>12s} {'lapis s/ linha':>15s} "
+        f"{'p50 ms':>8s} {'p90 ms':>8s}"
     )
     for name, r in results.items():
         t = r.get("timing", {})
         print(
             f"{name:22s} {r['ruling_removed']:10.1%} {r['crossing_preserved']:10.1%} "
             f"{r['ticks_residual']:7d} {r['short_stroke_recall']:12.1%} "
-            f"{r['on_line_recall']:12.1%} {t.get('p50_ms', float('nan')):8.2f} "
+            f"{r['on_line_recall']:12.1%} {r['pencil_on_line_recall']:15.1%} "
+            f"{t.get('p50_ms', float('nan')):8.2f} "
             f"{t.get('p90_ms', float('nan')):8.2f}"
         )
 
