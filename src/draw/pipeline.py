@@ -312,8 +312,15 @@ class Pipeline:
             # sobre a folha (coverage): a mesa clara do quad não cancela
             # o ganho do papel, e o preenchimento abaixo já trabalha no
             # domínio clareado.
+            # A mão visível fica fora da conta: a cobertura a inclui (o seg
+            # a conta como folha), mas uma mão clara não é papel e
+            # cancelaria o ganho do papel escuro ao redor (review do PR
+            # #52). `visible` já une os dois sinais de oclusão.
+            gain_mask = coverage
+            if coverage is not None and visible is not None:
+                gain_mask = coverage & visible
             ink_warped, self.last_ink_gain = exposure.apply_paper_gain(
-                ink_warped, coverage
+                ink_warped, gain_mask
             )
         if coverage is not None:
             # Fora da folha o warp é preto: a transição

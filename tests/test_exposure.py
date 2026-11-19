@@ -95,3 +95,21 @@ def test_gain_is_much_cheaper_than_the_naive_full_frame_version():
         return min(times)
 
     assert best(lambda: exposure.apply_paper_gain(img)) < 0.35 * best(naive)
+
+
+@pytest.mark.parametrize("period", [24, 28, 32, 40])
+def test_sparse_estimate_tracks_the_full_resolution_gain_on_ruled_pages(period):
+    """Review #52: o percentil sai de uma amostra com passo fixo de 8; em
+    pauta de período múltiplo do passo, a amostra poderia cair sempre na
+    linha (ou sempre fora dela). Compara com o p90 de resolução cheia em
+    todos os deslocamentos da pauta."""
+    h, w = 600, 420
+    for paper in (80, 110):
+        for offset in range(period):
+            img = np.full((h, w, 3), paper, np.uint8)
+            for y in range(offset, h, period):
+                img[y : y + 2] = 25  # linha de pauta escura de 2 px
+            img[200:260, 100:300] = 30  # uma mancha de tinta
+            full = float(np.clip(200.0 / np.percentile(img.mean(axis=2), 90), 1.0, 3.0))
+            sampled = exposure.paper_gain(img)
+            assert sampled == pytest.approx(full, rel=0.02), (period, offset, paper)

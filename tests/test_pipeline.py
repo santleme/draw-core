@@ -393,6 +393,26 @@ def test_ink_auto_gain_ignores_bright_desk_inside_the_quad():
     assert float(np.percentile(page[page.mean(axis=2) < 255], 50)) > 150
 
 
+def test_ink_auto_gain_ignores_a_bright_hand_over_the_sheet():
+    """Review #52: a cobertura do seg inclui a mão; uma mão clara sobre
+    metade do quad cancelaria o ganho do papel escuro. O ganho usa só a
+    folha visível (cobertura & sem mão)."""
+    frame = np.full((720, 1280, 3), 80, np.uint8)  # papel escuro
+    frame[100:400, 100:300] = 235  # mão clara sobre metade do quad
+    coverage = _mask_block(100, 400, 100, 500)  # inclui a mão
+    hand = _mask_block(100, 400, 100, 300)
+    script = lambda _i: (  # noqa: E731
+        QUAD.copy(),
+        "paper",
+        {"coverage_mask": coverage, "hand_mask": hand},
+    )
+
+    loop, _det, _ink = _make_loop(script, config=PipelineConfig(ink_auto_gain=True))
+    _drive(loop, 40, frame=frame)
+    assert loop._hand_mask_det is not None
+    assert loop.last_ink_gain == pytest.approx(2.5, rel=0.1)  # papel, não a mão
+
+
 def _seen_then_lost():
     """Vê a folha nos 6 primeiros chamados, depois perde tudo."""
 
