@@ -50,6 +50,30 @@ class InkConfig:
     # fica desligado ate a regua (lab/bench_ink.py) e o uso ao vivo
     # provarem o ganho.
     ruling_removal: bool = False
+    # Histerese espaco-temporal (draw.ink.accumulator): poeira isolada nao
+    # confirma nem aparece. Escala: media da janela de votos (0-1).
+    #  - confirmacao: um pixel que a regra de voto confirmaria so entra se a
+    #    media for >= t_low E o componente 8-conectado dele contiver uma
+    #    ancora (media >= t_high ou tinta ja confirmada);
+    #  - camada provisoria exibida: so componentes 8-conectados com >=
+    #    provisional_min_px pixels E com uma ancora (prob. desta passada >=
+    #    t_high, ou colados a tinta confirmada).
+    # Campos proprios, separados do seen_threshold (que governa identidade da
+    # pagina, testemunha de remocao e ancora da porta de fronteira: ver #53).
+    # Opt-in: o default fica desligado ate a regua e o uso ao vivo provarem.
+    hysteresis: bool = False
+    t_high: float = 0.90
+    t_low: float = 0.65
+    provisional_min_px: int = 12
+
+    def __post_init__(self):
+        if not 0.0 < self.t_low < self.t_high <= 1.0:
+            raise ValueError(
+                f"histerese exige 0 < t_low < t_high <= 1, recebeu "
+                f"t_low={self.t_low}, t_high={self.t_high}"
+            )
+        if self.provisional_min_px < 1:
+            raise ValueError("provisional_min_px deve ser >= 1")
 
     @classmethod
     def strict_vote(cls, level, **overrides):

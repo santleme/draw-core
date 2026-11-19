@@ -5,7 +5,7 @@ from collections import deque
 import cv2
 import numpy as np
 
-from . import identity, registration, votes
+from . import hysteresis, identity, registration, votes
 from .config import InkConfig
 
 
@@ -159,6 +159,16 @@ class LayeredInkAccumulator:
                 > 0
             )
             confirmed_rule &= seen_as_ink | ~near_anchor
+        if self._config.hysteresis and np.any(confirmed_rule):
+            # Poeira isolada: um candidato so confirma se a media da janela
+            # e >= t_low e o componente dele tem uma ancora (media >= t_high
+            # ou tinta ja confirmada). Escala da media, nao do seen.
+            cfg = self._config
+            mean = score / len(self._window)
+            strong = confirmed_rule & (mean >= cfg.t_high)
+            weak = confirmed_rule & ~strong & (mean >= cfg.t_low)
+            kept = hysteresis.keep_anchored(weak, strong | confirmed_before)
+            confirmed_rule = strong | kept
         new_confirmed = confirmed_rule & ~confirmed_before
         new_confirmed_px = int(np.count_nonzero(new_confirmed))
         if new_confirmed_px:
@@ -214,6 +224,14 @@ class LayeredInkAccumulator:
                 hits[removed] = 0
         confirmed_now = self._confirmed > 0
         provisional_now = seen_as_ink & ~confirmed_now
+        if self._config.hysteresis:
+            provisional_now = hysteresis.filter_provisional(
+                provisional_now,
+                evidence,
+                confirmed_now,
+                t_high=self._config.t_high,
+                min_px=self._config.provisional_min_px,
+            )
         previous_provisional = self._provisional > 0
         if visible is not None:
             # Sem visao nao ha retracao nem estreia: o provisorio

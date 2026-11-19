@@ -54,6 +54,12 @@ PRESETS = {
     "ganho+voto0.85": ["ink_auto_gain=1", "@strict=0.85"],
     "ganho+voto0.92": ["ink_auto_gain=1", "@strict=0.92"],
     "ganho+pauta": ["ink_auto_gain=1", "ink.ruling_removal=1"],
+    "ganho+histerese": ["ink_auto_gain=1", "ink.hysteresis=1"],
+    "ganho+pauta+histerese": [
+        "ink_auto_gain=1",
+        "ink.ruling_removal=1",
+        "ink.hysteresis=1",
+    ],
     "ganho+voto0.85+pauta": ["ink_auto_gain=1", "@strict=0.85", "ink.ruling_removal=1"],
 }
 
@@ -367,6 +373,66 @@ def score_filter(page, fn=None, threshold=0.5):
     }
 
 
+# ------------------------------------------- sintético temporal (o voto)
+
+
+def make_dust_passes(page, passes=10, *, seed=0, n_blobs=80, n_persistent=10):
+    """Sequência de mapas por passada: traço estável + poeira que pisca.
+
+    A poeira (pontos de 1-3 px, prob 0,80-0,97) vive 1-2 passadas em lugares
+    aleatórios longe do traço e da pauta; `n_persistent` manchinhas de 2x2
+    ficam todas as passadas (a textura que o voto confirmaria). Devolve
+    (mapas, mascara_da_poeira).
+    """
+    rng = np.random.default_rng(seed)
+    base = np.where(page.strokes, page.prob, 0.0).astype(np.float32)
+    busy = (page.strokes | page.ruling).astype(np.uint8)
+    free = cv2.dilate(busy, np.ones((25, 25), np.uint8)) == 0
+    ys, xs = np.nonzero(free[8:-8, 8:-8])
+    ys, xs = ys + 8, xs + 8
+    maps = [base.copy() for _ in range(passes)]
+    dust = np.zeros(base.shape, bool)
+    for i in range(n_blobs + n_persistent):
+        j = int(rng.integers(len(ys)))
+        y, x = int(ys[j]), int(xs[j])
+        persistent = i >= n_blobs
+        side = 2 if persistent else int(rng.integers(1, 4))
+        life = passes if persistent else int(rng.integers(1, 3))
+        start = 0 if persistent else int(rng.integers(0, max(1, passes - life + 1)))
+        value = float(rng.uniform(0.80, 0.97))
+        for k in range(start, min(passes, start + life)):
+            maps[k][y : y + side, x : x + side] = value
+        dust[y : y + side, x : x + side] = True
+    return maps, dust
+
+
+def score_accumulator(page, config, passes=10, *, seed=0):
+    """Passa a sequência de poeira pelo acumulador real e mede o que o voto
+    deixa entrar no canvas e o que a tela mostra (camada provisória)."""
+    from draw.ink.accumulator import LayeredInkAccumulator
+
+    maps, dust = make_dust_passes(page, passes, seed=seed)
+    acc = LayeredInkAccumulator(config.seen_threshold, config)
+    visible = np.ones(page.prob.shape, bool)
+    off_stroke = ~cv2.dilate(page.strokes.astype(np.uint8), np.ones((9, 9), np.uint8))
+    prov_dust, first_visible = [], None
+    result = None
+    for k, prob in enumerate(maps):
+        result = acc.add(prob.copy(), visible)
+        shown = (result["provisional"] > 0) | (result["confirmed"] > 0)
+        prov_dust.append(int(((result["provisional"] > 0) & off_stroke).sum()))
+        if k == 0:
+            first_visible = _frac((shown & page.strokes).sum(), page.strokes.sum())
+    confirmed = result["confirmed"] > 0
+    return {
+        "dust_confirmed_px": int((confirmed & off_stroke).sum()),
+        "dust_provisional_median_px": float(np.median(prov_dust)),
+        "stroke_recall": _frac((confirmed & page.strokes).sum(), page.strokes.sum()),
+        "stroke_first_pass_visible": first_visible,
+        "dust_px_total": int(dust.sum()),
+    }
+
+
 def time_ms(fn, arg, *, runs=30, warmup=3):
     """Tempo (ms) de fn(arg): p50 e p90. Cada medida recebe uma cópia nova."""
     for _ in range(warmup):
@@ -550,6 +616,36 @@ def _print_synthetic(results):
         )
 
 
+TEMPORAL_CONFIGS = {
+    "legado": {},
+    "histerese": {"hysteresis": True},
+    "voto0.85": {"@strict": 0.85},
+    "voto0.85+histerese": {"@strict": 0.85, "hysteresis": True},
+}
+
+
+def _temporal_config(spec):
+    from draw.ink.config import InkConfig
+
+    spec = dict(spec)
+    level = spec.pop("@strict", None)
+    return InkConfig.strict_vote(level, **spec) if level else InkConfig(**spec)
+
+
+def _print_temporal(results):
+    print("== sintético temporal (voto real, poeira que pisca) ==")
+    print(
+        f"{'config':22s} {'poeira conf.':>13s} {'poeira prov.med':>16s} "
+        f"{'traço conf.':>12s} {'traço 1a passada':>17s}"
+    )
+    for name, r in results.items():
+        print(
+            f"{name:22s} {r['dust_confirmed_px']:13d} "
+            f"{r['dust_provisional_median_px']:16.0f} "
+            f"{r['stroke_recall']:12.1%} {r['stroke_first_pass_visible']:17.1%}"
+        )
+
+
 def _print_clips(rows):
     print("== clipes reais ==")
     print(
@@ -614,6 +710,12 @@ def main(argv=None):
             for k, v in results.items()
         }
         _print_synthetic(results)
+        temporal = {
+            name: score_accumulator(pages[""], _temporal_config(spec), seed=args.seed)
+            for name, spec in TEMPORAL_CONFIGS.items()
+        }
+        report["synthetic_temporal"] = temporal
+        _print_temporal(temporal)
     if args.clips:
         from draw.infra.manifest import verify_model
         from draw.page_clean import PageCleanInk

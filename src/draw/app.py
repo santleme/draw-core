@@ -1802,6 +1802,15 @@ def main():
         ),
     )
     parser.add_argument(
+        "--ink-hysteresis",
+        action="store_true",
+        help=(
+            "histerese espaco-temporal da tinta (InkConfig.hysteresis): poeira "
+            "isolada nao confirma nem aparece na camada provisoria; so "
+            "componentes ligados a tinta forte. Experimental, desligado por padrao"
+        ),
+    )
+    parser.add_argument(
         "--allow-unverified",
         action="store_true",
         help="carrega modelos divergentes ou fora do manifesto com "
@@ -1849,6 +1858,12 @@ def main():
                 "--ink-ruling nao combina com --markers (sem tinta no modo marcadores)"
             )
         ink_config = dataclasses.replace(ink_config, ruling_removal=True)
+    if args.ink_hysteresis:
+        if args.markers:
+            parser.error(
+                "--ink-hysteresis nao combina com --markers (sem tinta no modo marcadores)"
+            )
+        ink_config = dataclasses.replace(ink_config, hysteresis=True)
     pipeline_config = PipelineConfig(ink=ink_config, ink_auto_gain=args.ink_gain)
     if args.check:
         parsed = parse_source(args.source)
