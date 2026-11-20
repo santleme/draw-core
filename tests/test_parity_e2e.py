@@ -255,3 +255,72 @@ def test_driver_fecha_maskers_no_finally():
 
     drv._close_hand_masker(MaskerRuim())  # engole a exceção
     drv._close_hand_masker(None)
+
+
+def test_run_new_pins_legacy_tier_a_config(monkeypatch, tmp_path):
+    """A régua de paridade contra o SheetInkLoop legado precisa fixar a base
+    legada (sem ganho, sem Detect-Wake e com InkConfig()) tanto no Pipeline
+    quanto na PageCleanWorker (review #74)."""
+    from lab import parity_e2e
+
+    from draw import hand as hand_module
+    from draw import page_clean as page_clean_module
+    from draw import perception as perception_module
+    from draw import pipeline as pipeline_module
+    from draw.ink import worker as worker_module
+    from draw.ink.config import InkConfig
+    from draw.settings import PipelineConfig
+
+    seen = {}
+
+    class _NoModel:
+        def __init__(self, *_a, **_kw):
+            pass
+
+        def load(self):
+            pass
+
+    class _FakeWorker:
+        error = None
+
+        def __init__(self, _pc, _hm, *, clock=None, config=None):
+            seen["worker_config"] = config
+
+        def pump(self):
+            return False
+
+    class _FakePipeline:
+        class tracker:
+            corners = None
+
+        clean_mask = None
+
+        def __init__(self, **kw):
+            seen["pipeline_config"] = kw.get("config")
+
+        def step(self, _pkt):
+            return None
+
+        def collect_ink(self):
+            return None
+
+    monkeypatch.setattr(perception_module, "NeuralSheetDetector", _NoModel)
+    monkeypatch.setattr(page_clean_module, "PageCleanInk", _NoModel)
+    monkeypatch.setattr(hand_module, "hand_model_available", lambda _m: False)
+    monkeypatch.setattr(worker_module, "PageCleanWorker", _FakeWorker)
+    monkeypatch.setattr(pipeline_module, "Pipeline", _FakePipeline)
+    monkeypatch.setattr(parity_e2e, "iter_frames", lambda _c, _f: iter(()))
+
+    parity_e2e.run_new(
+        "corpus",
+        tmp_path,
+        frames=0,
+        fps=30,
+        sheet_model="s.onnx",
+        ink_model="i.onnx",
+        hand_model=None,
+        verify=None,
+    )
+    expected = PipelineConfig(ink=InkConfig(), ink_auto_gain=False, detect_wake=False)
+    assert seen["pipeline_config"] == expected
+    assert seen["worker_config"] == expected.ink

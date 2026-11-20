@@ -110,10 +110,12 @@ def run_new(
     from draw.app import _detect_sheet_combined_traced
     from draw.contracts import DetectionResult, FramePacket
     from draw.hand_presence import make_hand_presence
+    from draw.ink.config import InkConfig
     from draw.ink.worker import PageCleanWorker
     from draw.page_clean import PageCleanInk
     from draw.perception import NeuralSheetDetector
     from draw.pipeline import Pipeline
+    from draw.settings import PipelineConfig
     from draw.tracker import _gate_info_from_trace
 
     detector = NeuralSheetDetector(str(sheet_model), verify=verify)
@@ -173,7 +175,15 @@ def run_new(
 
     det = SyncDet()
     presence_worker = _SyncPresence(presence) if presence is not None else None
-    worker = PageCleanWorker(page_clean, hand_masker, clock=clock)
+    # A régua de paridade compara contra o SheetInkLoop legado (Tier A, sem
+    # ganho, sem Detect-Wake e com voto/cadência legados): fixa a mesma base
+    # em Pipeline e PageCleanWorker para não misturar o preset de produção.
+    legacy_config = PipelineConfig(
+        ink=InkConfig(), ink_auto_gain=False, detect_wake=False
+    )
+    worker = PageCleanWorker(
+        page_clean, hand_masker, clock=clock, config=legacy_config.ink
+    )
     loop = Pipeline(
         detection_worker=det,
         ink_worker=worker,
@@ -181,6 +191,7 @@ def run_new(
         hand_masker=hand_masker,
         clock=clock,
         log=lambda *_a: None,
+        config=legacy_config,
     )
 
     out_dir = Path(out_dir)

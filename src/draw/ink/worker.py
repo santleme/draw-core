@@ -9,7 +9,7 @@ import numpy as np
 
 from .. import config as paper_config
 from ..contracts import InkDelta, InkDisplaySnapshot, InkSnapshot
-from . import accumulator, identity, motion, registration, ruling
+from . import accumulator, identity, motion, registration, ruling, votes
 from . import anchor as anchor_mod
 from .config import InkConfig
 
@@ -301,7 +301,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         self._published_display = None
         self._display_version = 0
         self._hand_state = None
-        self._confirm_once = False
+        self._confirm_passes = 0
         self._still_passes = 0
         # Descanso total (so a trabalhadora e o new_generation
         # tocam): passadas desta geracao e passadas seguidas sem
@@ -388,6 +388,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             self._anchor_roll = 0
             self._last_registration = None
             self._still_passes = 0
+            self._confirm_passes = 0
             self._generation_passes = 0
             self._quiet_passes = 0
             self._activity_quiet_passes = 0
@@ -512,15 +513,42 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             )
             self._condition.notify_all()
 
+    def _post_exit_confirm_passes(self):
+        """Passadas de confirmacao apos a saida da mao.
+
+        No voto legado (vote_score_strong <= 1,9 e sem histerese), duas
+        leituras fortes confirmam (uma antes da saida + uma depois),
+        entao basta 1 passada. Com voto estrito ou histerese (ex.:
+        InkConfig.production, onde vote_score_strong = 2,55 e t_high =
+        0,90 sobre a media de 3 passadas), um traco forte exige 3
+        leituras na janela: a saida da mao arma uma janela completa
+        (_INK_VOTE_WINDOW) para fechar o traco antes do descanso total.
+        """
+        if (
+            self._config.vote_score_strong > votes._INK_VOTE_SCORE_STRONG
+            or self._config.hysteresis
+        ):
+            return votes._INK_VOTE_WINDOW
+        return 1
+
+    @property
+    def _confirm_once(self):
+        return self._confirm_passes > 0
+
+    @_confirm_once.setter
+    def _confirm_once(self, value):
+        self._confirm_passes = self._post_exit_confirm_passes() if value else 0
+
     def set_hand_presence(self, present, moved=False):
         """Alimenta a porta de ociosidade: True, False ou None.
 
-        A transicao para False arma exatamente uma passada de
-        confirmacao: a mao saiu, a pagina assentou, e essa passada
-        fecha o voto do que foi escrito. Depois dela, sem mao, a
-        trabalhadora sonda a no maximo 1 Hz enquanto a saida
-        confirmada ainda muda — e entra em descanso total (zero
-        passadas) quando ela para de mudar; ver _at_rest.
+        A transicao para False arma a janela de confirmacao pos-saida
+        (1 passada no legado; _INK_VOTE_WINDOW no voto estrito/histerese):
+        a mao saiu, a pagina assentou, e essas passadas fecham o voto do
+        que foi escrito. Depois delas, sem mao, a trabalhadora sonda a
+        no maximo 1 Hz enquanto a saida confirmada ainda muda — e entra
+        em descanso total (zero passadas) quando ela para de mudar; ver
+        _at_rest.
 
         moved=True e o sinal de atividade da mascara (ver
         _MediaPipeHandPresence.sample): reseta o relogio de
@@ -530,7 +558,9 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         """
         with self._condition:
             if present is False and self._hand_state is not False:
-                self._confirm_once = True
+                self._confirm_passes = self._post_exit_confirm_passes()
+            elif present is not False:
+                self._confirm_passes = 0
             if present is not None:
                 self._still_passes = 0
             if present is not None and (moved or present != self._hand_state):
@@ -868,8 +898,8 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         scheduled_hand_state = self._hand_state
         self._last_pass_start = self._clock()
         pass_started_at = self._last_pass_start
-        if self._confirm_once:
-            self._confirm_once = False
+        if self._confirm_passes > 0:
+            self._confirm_passes -= 1
         return (
             warped,
             generation,

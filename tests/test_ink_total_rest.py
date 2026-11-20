@@ -154,3 +154,65 @@ def test_total_rest_without_hand_wakes_on_real_thread(monkeypatch):
             assert not worker.stats()["resting"]
     finally:
         worker.stop()
+
+
+def test_production_vote_confirms_late_stroke_after_hand_exit_and_then_rests():
+    """Regressao (review #74): numa pagina madura e quieta, um traco forte
+    escrito logo antes da mao sair (visto 1x antes da saida e o resto apos
+    a saida) precisa fechar as 3 leituras do InkConfig.production() antes
+    do descanso total e depois entrar em descanso sem novo movimento."""
+    from draw.ink.config import InkConfig
+
+    class _LateDashInk:
+        threshold = 0.7
+
+        def __init__(self):
+            self.calls = 0
+            self.add_dash = False
+
+        def ink_prob(self, _warped):
+            self.calls += 1
+            prob = np.zeros((H, W), dtype=np.float32)
+            # Bloco base sempre presente na pagina.
+            prob[5:15, 5:20] = 0.98
+            if self.add_dash:
+                prob[25:33, 35:50] = 0.98
+            return prob
+
+    now = [1000.0]
+    fake = _LateDashInk()
+    cfg = InkConfig.production()
+    worker = worker_mod.PageCleanWorker(fake, clock=lambda: now[0], config=cfg)
+    generation = worker.new_generation()
+    worker.set_hand_presence(True, moved=True)
+    # 1) Aquece e confirma o bloco base ate acumular passadas quietas (>= 2).
+    _pump_for(worker, generation, now, 1.0)
+    base_snap = worker.poll(generation, 0)
+    assert base_snap is not None
+    assert int(np.count_nonzero(base_snap.confirmed[5:15, 5:20])) == 10 * 15
+    assert int(np.count_nonzero(base_snap.confirmed[25:33, 35:50])) == 0
+    assert worker._generation_passes >= worker_mod._REST_MIN_GENERATION_PASSES
+    assert worker._quiet_passes >= worker_mod._REST_QUIET_PASSES
+
+    # 2) Usuario risca um traco curto: modelo ve 1x com a mao presente, e logo
+    #    em seguida a mao sai da folha.
+    fake.add_dash = True
+    worker.set_hand_presence(True, moved=True)
+    _pump_for(worker, generation, now, 0.16)
+    calls_before_exit = fake.calls
+    assert (
+        int(np.count_nonzero(worker.poll(generation, 0).confirmed[25:33, 35:50])) == 0
+    )
+    worker.set_hand_presence(False)
+
+    # 3) Sem nenhum novo movimento da mao, a janela pos-saida fecha as 3
+    #    leituras na cadencia ativa, confirma o traco e depois descansa.
+    _pump_for(worker, generation, now, 0.5)
+    after_snap = worker.poll(generation, 0)
+    assert int(np.count_nonzero(after_snap.confirmed[25:33, 35:50])) == 8 * 15
+    assert fake.calls >= calls_before_exit + 2
+    _pump_for(worker, generation, now, 2.5)
+    assert worker.stats()["resting"] is True
+    calls_at_rest = fake.calls
+    _pump_for(worker, generation, now, 0.5)
+    assert fake.calls == calls_at_rest

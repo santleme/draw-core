@@ -7,7 +7,12 @@ See [`docs/MIGRATION_SPEC.md`](docs/MIGRATION_SPEC.md) for structure and plan.
 
 ## Run the live app
 
+Place the model binaries verified by [`assets/manifest.json`](assets/manifest.json)
+(`draw_seg_v3_dyn.onnx`, `page_clean_unet.onnx`, and optionally
+`hand_landmarker.task`) in `models/`, then run:
+
 ```sh
+uv run --extra gui --extra hand draw --check
 uv run --extra gui --extra hand draw
 ```
 

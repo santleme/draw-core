@@ -62,7 +62,8 @@ PRESETS = {
         "ink.hysteresis=1",
     ],
     "ganho+voto0.85+pauta": ["ink_auto_gain=1", "@strict=0.85", "ink.ruling_removal=1"],
-    # O preset de producao (InkConfig.production + ganho + Detect-Wake).
+    # O preset de producao de PipelineConfig (InkConfig.production + ganho +
+    # Detect-Wake), medido via run_replay sem os workers de mao do MediaPipe.
     "producao": ["@production"],
 }
 

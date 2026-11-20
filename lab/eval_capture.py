@@ -180,6 +180,7 @@ def run_pipeline(
     hand_model=None,
     on_frame=None,
     verify="manifest",
+    pipeline_config=None,
 ):
     """Consome VideoCapture ou SyntheticCapture via Pipeline real.
 
@@ -192,19 +193,27 @@ def run_pipeline(
     verify é o callable de integridade dos modelos: o padrão "manifest"
     injeta draw.infra.manifest.verify_model (sha256 + tamanho contra
     assets/manifest.json); None desliga, para bancadas e testes com
-    modelos fora do manifesto.
+    modelos fora do manifesto. ``pipeline_config`` (padrão: base legada
+    sem ganho, sem Detect-Wake e com InkConfig(), como em sim_writer)
+    alinha o Pipeline e a PageCleanWorker no mesmo preset.
     """
     from draw import config, hand
     from draw.contracts import FramePacket
     from draw.hand_presence import make_hand_presence
     from draw.infra.manifest import verify_model
+    from draw.ink.config import InkConfig
     from draw.ink.worker import PageCleanWorker
     from draw.page_clean import PageCleanInk
     from draw.perception import NeuralSheetDetector
     from draw.pipeline import Pipeline
+    from draw.settings import PipelineConfig
 
     if verify == "manifest":
         verify = verify_model
+    if pipeline_config is None:
+        pipeline_config = PipelineConfig(
+            ink=InkConfig(), ink_auto_gain=False, detect_wake=False
+        )
 
     if not capture.isOpened():
         raise ValueError("não foi possível abrir a fonte de vídeo")
@@ -225,7 +234,9 @@ def run_pipeline(
         else None
     )
     visibility_configured = ecc_hand_masker is not None
-    worker = PageCleanWorker(page_clean, ecc_hand_masker, clock=clock)
+    worker = PageCleanWorker(
+        page_clean, ecc_hand_masker, clock=clock, config=pipeline_config.ink
+    )
     presence = make_hand_presence(hand_model, verify=verify)
     if presence is not None:
         hand_presence_worker = _SynchronousHandPresence(presence)
@@ -237,6 +248,7 @@ def run_pipeline(
         hand_masker=ecc_hand_masker,
         clock=clock,
         log=lambda *_args: None,
+        config=pipeline_config,
     )
     frame_index = 0
     anchors = []

@@ -441,3 +441,55 @@ def test_evaluate_canvas_usa_pose_verdadeira_do_bundle(tmp_path):
         stored, bundle_path, canvas_space="page", registrations=[record]
     )
     assert canonical["iou"] < 1.0
+
+
+def test_run_pipeline_alinha_config_entre_pipeline_e_worker(tmp_path, monkeypatch):
+    """Sem pipeline_config explícito, eval_capture usa a base legada em ambos;
+    com pipeline_config explícito, repassa config.ink à PageCleanWorker."""
+    from draw import pipeline as pipeline_module
+    from draw.ink import worker as worker_module
+    from draw.ink.config import InkConfig
+    from draw.settings import PipelineConfig
+
+    onnx_path = onnx_fixtures.page_clean_model(
+        tmp_path / "pc.onnx", patch=256, dynamic_batch=True
+    )
+    monkeypatch.setattr(ec, "_DEFAULT_SHEET_MODEL", tmp_path / "missing.onnx")
+    seen = []
+    real_worker = worker_module.PageCleanWorker
+    real_pipeline = pipeline_module.Pipeline
+
+    def spy_worker(*a, **kw):
+        seen.append(("worker", kw.get("config")))
+        return real_worker(*a, **kw)
+
+    def spy_pipeline(*a, **kw):
+        seen.append(("pipeline", kw.get("config")))
+        return real_pipeline(*a, **kw)
+
+    monkeypatch.setattr(worker_module, "PageCleanWorker", spy_worker)
+    monkeypatch.setattr(pipeline_module, "Pipeline", spy_pipeline)
+
+    ec.run_pipeline(
+        _FakeCapture(frames=1),
+        fps=10,
+        neural_model=None,
+        page_clean_model=str(onnx_path),
+        hand_model="__none__",
+        verify=None,
+    )
+    legacy = PipelineConfig(ink=InkConfig(), ink_auto_gain=False, detect_wake=False)
+    assert seen == [("worker", legacy.ink), ("pipeline", legacy)]
+
+    seen.clear()
+    prod = PipelineConfig()
+    ec.run_pipeline(
+        _FakeCapture(frames=1),
+        fps=10,
+        neural_model=None,
+        page_clean_model=str(onnx_path),
+        hand_model="__none__",
+        verify=None,
+        pipeline_config=prod,
+    )
+    assert seen == [("worker", prod.ink), ("pipeline", prod)]
