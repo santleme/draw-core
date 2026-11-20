@@ -1836,6 +1836,15 @@ def main():
         ),
     )
     parser.add_argument(
+        "--ink-motion-veto",
+        action="store_true",
+        help=(
+            "arbitro de registro e veto por movimento residual da folha "
+            "(InkConfig.motion_veto): passada desalinhada vota sem registro, "
+            "entra corrigida ou e vetada. Experimental, desligado por padrao"
+        ),
+    )
+    parser.add_argument(
         "--ink-interval",
         type=float,
         default=None,
@@ -1907,6 +1916,13 @@ def main():
             ink_config = InkConfig.strict_vote(args.ink_vote)
         except ValueError as error:
             parser.error(str(error))
+    if args.ink_motion_veto:
+        if args.markers:
+            parser.error(
+                "--ink-motion-veto nao combina com --markers (sem tinta no modo "
+                "marcadores)"
+            )
+        ink_config = dataclasses.replace(ink_config, motion_veto=True)
     if args.ink_interval is not None:
         if args.markers:
             parser.error(

@@ -76,3 +76,32 @@ def test_cli_flag_sets_it_and_markers_mode_rejects(monkeypatch):
         with pytest.raises(SystemExit) as error:
             app_module.main()
         assert error.value.code == 2
+
+
+def test_full_live_stack_flags_combine(monkeypatch):
+    # A pilha do teste de mesa: ganho, pauta, histerese, portao e cadencia.
+    seen = []
+    monkeypatch.setattr(app_module, "run", lambda **kw: seen.append(kw))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "draw",
+            "--ink-gain",
+            "--ink-ruling",
+            "--ink-hysteresis",
+            "--ink-motion-veto",
+            "--ink-interval",
+            "0.15",
+        ],
+    )
+    app_module.main()
+    config = seen[-1]["pipeline_config"]
+    ink = config.ink
+    assert config.ink_auto_gain
+    assert ink.ruling_removal and ink.hysteresis and ink.motion_veto
+    assert ink.pass_interval_s == 0.15
+    monkeypatch.setattr(sys, "argv", ["draw", "--markers", "--ink-motion-veto"])
+    with pytest.raises(SystemExit) as error:
+        app_module.main()
+    assert error.value.code == 2
