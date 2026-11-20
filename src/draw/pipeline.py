@@ -689,13 +689,12 @@ class Pipeline:
                     if (
                         not self._stale_hand_woke
                         and self._detect_wake is not None
-                        and self._detect_wake.settled
                         and self._hand_mask_det is not None
                         and np.any(self._hand_mask_det)
                     ):
-                        # Transicao para mao ausente enquanto o detector dormia
-                        # com mascara de mao velha: acorda uma vez para renovar
-                        # _hand_mask_det antes da passada de confirmacao.
+                        # Transicao para mao ausente com mascara de mao velha
+                        # em cache: acorda uma vez para renovar _hand_mask_det
+                        # no proximo quadro antes de fechar a confirmacao.
                         self._stale_hand_woke = True
                         self._detect_wake.wake()
                 else:
@@ -783,7 +782,13 @@ class Pipeline:
             )
         elif (
             self._detect_wake is not None
-            and self._detect_wake.settled
+            and (
+                self._detect_wake.settled
+                or (
+                    self.clean_hand_present is False
+                    and (self._hand_mask_det is None or not np.any(self._hand_mask_det))
+                )
+            )
             and self.tracker.corners is not None
             and self.ink_session_open
             and self.corner_history

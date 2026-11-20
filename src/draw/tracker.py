@@ -784,6 +784,7 @@ class DetectWakeGate:
 
     def reset(self):
         self._settled = False
+        self._force_next = False
         self._stable_count = 0
         self._last_corners = None
         self._last_detect_at = None
@@ -799,10 +800,11 @@ class DetectWakeGate:
         return self._settled
 
     def wake(self):
-        """Sai do estado assentado e volta a cadencia normal imediatamente."""
+        """Sai do estado assentado e agenda deteccao no proximo quadro."""
         if self._settled:
             self.wake_events += 1
         self._settled = False
+        self._force_next = True
         self._stable_count = 0
         self._ref_prof = None
         self._ref_valid = None
@@ -887,6 +889,10 @@ class DetectWakeGate:
     ):
         """Decide se este quadro dispara o detector neural."""
         if not self._settled:
+            if self._force_next:
+                self._force_next = False
+                self._last_submit_at = float(captured_at)
+                return True
             return bool(base_should_detect)
         now = float(captured_at)
         if wake_signal or self._sentinel_triggered(frame, hand_mask=hand_mask):

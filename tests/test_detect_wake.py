@@ -726,41 +726,56 @@ def test_cached_hand_mask_on_hand_exit_still_confirms_final_stroke_under_product
     # Mao cobre o centro (hand_blob em cache no detector) e desenha traco novo.
     with_stroke = still.copy()
     cv2.rectangle(with_stroke, (295, 225), (345, 255), (10, 10, 10), -1)
-    det.current_hand_mask = hand_blob
-    hand._seq += 1
-    hand.state = True
-    hand.moved = True
-    # Detector atualiza e coloca hand_blob em cache no pipeline (_hand_mask_det).
-    pipe._detect_wake.wake()
-    for seq in range(18, 22):
-        pipe.step(contracts.FramePacket(with_stroke, now[0], seq))
-        ink_worker.pump()
-        now[0] += 0.16
-    assert pipe._hand_mask_det is not None and np.any(pipe._hand_mask_det)
-
-    # Mao sai: no quadro da saida, uma passada ainda roda sob a mascara em
-    # cache antes de a deteccao acordada entregar hand_mask limpa.
-    hand._seq += 1
-    hand.state = False
-    hand.moved = False
-    pipe.step(contracts.FramePacket(with_stroke, now[0], 22))
-    ink_worker.pump()
-    now[0] += 0.16
-
-    # Agora a deteccao acordada termina sem mao (current_hand_mask = None) e
-    # as passadas limpas seguintes rodam sem nenhum movimento adicional da mao.
-    det.current_hand_mask = None
-    for seq in range(23, 35):
+    # 2 leituras claras do traco novo antes de a mascara de mao cobri-lo
+    # (soma 2 * 0,98 = 1,96 < 2,55: ainda nao confirmado).
+    for seq in (18, 19):
+        hand._seq += 1
+        hand.state = True
+        hand.moved = True
         pipe.step(contracts.FramePacket(with_stroke, now[0], seq))
         ink_worker.pump()
         now[0] += 0.16
     pipe.collect_ink()
-    assert int(np.count_nonzero(pipe.clean_mask)) > base_px
-    # Avanca o relogio para fechar as passadas quietas e entrar em descanso.
-    for seq in range(35, 45):
+    assert int(np.count_nonzero(pipe.clean_mask)) == base_px
+
+    # Detector coloca hand_blob em cache no pipeline (_hand_mask_det) e
+    # submete um warp mascarado que fica pendente na trabalhadora quando a mao
+    # sai — de modo que a 1a passada APOS a saida da mao roda mascarada!
+    det.current_hand_mask = hand_blob
+    pipe._detect_wake.wake()
+    for seq in (20, 21):
+        pipe.step(contracts.FramePacket(with_stroke, now[0], seq))
+        now[0] += 0.04
+    assert pipe._hand_mask_det is not None and np.any(pipe._hand_mask_det)
+    assert ink_worker._pending is not None
+
+    # Mao sai: a 1a passada apos a saida consome o warp mascarado (empurrando
+    # 0,0 na janela do traco novo).
+    passes_before_exit = ink_worker.stats()["passes_total"]
+    hand._seq += 1
+    hand.state = False
+    hand.moved = False
+    now[0] += 0.16
+    pipe.step(contracts.FramePacket(with_stroke, now[0], 22))
+    assert ink_worker.pump() is True
+    assert ink_worker.stats()["passes_total"] == passes_before_exit + 1
+    pipe.collect_ink()
+    assert int(np.count_nonzero(pipe.clean_mask)) == base_px
+
+    # Agora a deteccao acordada termina sem mao (current_hand_mask = None) e
+    # as passadas limpas seguintes rodam sem nenhum movimento adicional da mao.
+    det.current_hand_mask = None
+    for seq in (23, 24, 25, 26):
+        now[0] += 0.16
         pipe.step(contracts.FramePacket(with_stroke, now[0], seq))
         ink_worker.pump()
-        now[0] += 0.5
+    pipe.collect_ink()
+    assert int(np.count_nonzero(pipe.clean_mask)) > base_px
+    # Avanca o relogio para fechar as passadas quietas e entrar em descanso.
+    for seq in range(27, 35):
+        now[0] += 1.05
+        pipe.step(contracts.FramePacket(with_stroke, now[0], seq))
+        ink_worker.pump()
     assert ink_worker.stats()["resting"] is True
 
 
