@@ -46,76 +46,60 @@ class _SettlingInk:
         return prob
 
 
-def _feed(worker, generation, seconds):
-    warp = np.zeros((H, W, 3), dtype=np.uint8)
-    deadline = time.monotonic() + seconds
-    while time.monotonic() < deadline:
+def _pump_for(worker, generation, warp, now, seconds, step=0.01):
+    end = now[0] + seconds
+    while now[0] < end:
         worker.submit(WarpedPage(warp, generation))
-        time.sleep(0.005)
+        worker.pump()
+        now[0] += step
 
 
-def _wait_resting(worker, timeout=5.0):
+def _wait_resting(worker, timeout=2.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if worker.stats()["resting"]:
             return True
-        time.sleep(0.01)
+        time.sleep(0.005)
     return False
 
 
-def _rig(monkeypatch):
+def _sync_rig(monkeypatch):
     monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.02)
     monkeypatch.setattr(worker_mod, "_IDLE_PROBE_SECONDS", 0.05)
     monkeypatch.setattr(worker_mod, "_HAND_REST_STILL_SECONDS", 0.3)
+    now = [1000.0]
     fake = _SettlingInk()
-    worker = worker_mod.PageCleanWorker(fake).start()
+    worker = worker_mod.PageCleanWorker(fake, clock=lambda: now[0])
     generation = worker.new_generation()
-    return fake, worker, generation
+    return fake, worker, generation, now
 
 
-@pytest.mark.slow
 def test_total_rest_with_hand_present_and_still(monkeypatch):
-    fake, worker, generation = _rig(monkeypatch)
-    try:
-        worker.set_hand_presence(True)
-        _feed(worker, generation, 0.25)
-        assert fake.calls >= 4, "aquecimento na cadencia ativa"
+    fake, worker, generation, now = _sync_rig(monkeypatch)
+    warp = np.zeros((H, W, 3), dtype=np.uint8)
+    worker.set_hand_presence(True)
+    _pump_for(worker, generation, warp, now, 0.25)
+    assert fake.calls >= 4, "aquecimento na cadencia ativa"
 
-        # Tinta congelada + mao parada: o descanso total entra
-        # mesmo com a mao no quadro.
-        stop = threading.Event()
+    # Tinta congelada + mao parada: o descanso total entra
+    # mesmo com a mao no quadro.
+    _pump_for(worker, generation, warp, now, 0.35)
+    assert worker.stats()["resting"], "o descanso com a mao presente nao entrou"
+    assert worker.stats()["worker_mode"] == "rest"
+    before = fake.calls
+    _pump_for(worker, generation, warp, now, 0.5)
+    assert fake.calls == before, (
+        f"em descanso com a mao presente, {fake.calls - before} passadas rodaram"
+    )
 
-        def feeder():
-            warp = np.zeros((H, W, 3), dtype=np.uint8)
-            while not stop.is_set():
-                worker.submit(WarpedPage(warp, generation))
-                time.sleep(0.005)
-
-        thread = threading.Thread(target=feeder, daemon=True)
-        thread.start()
-        try:
-            assert _wait_resting(worker), "o descanso com a mao presente nao entrou"
-            assert worker.stats()["worker_mode"] == "rest"
-            before = fake.calls
-            time.sleep(0.5)
-            assert fake.calls == before, (
-                f"em descanso com a mao presente, "
-                f"{fake.calls - before} passadas rodaram"
-            )
-
-            # A mao se mexe: acorda e a cadencia ativa volta.
-            # (A espera fica bem abaixo da janela de quietude
-            # de 0,3 s: o descanso nao pode reengatar antes da
-            # leitura.)
-            worker.set_hand_presence(True, moved=True)
-            time.sleep(0.15)
-            assert fake.calls - before >= 4, "o movimento nao acordou"
-            assert not worker.stats()["resting"]
-        finally:
-            stop.set()
-            thread.join(timeout=2.0)
-    finally:
-        worker.stop()
+    # A mao se mexe: acorda e a cadencia ativa volta.
+    # (A espera fica bem abaixo da janela de quietude
+    # de 0,3 s: o descanso nao pode reengatar antes da
+    # leitura.)
+    worker.set_hand_presence(True, moved=True)
+    _pump_for(worker, generation, warp, now, 0.15)
+    assert fake.calls - before >= 4, "o movimento nao acordou"
+    assert not worker.stats()["resting"]
 
 
 class _GrowingInk:
@@ -140,52 +124,78 @@ class _GrowingInk:
         return prob
 
 
-@pytest.mark.slow
 def test_active_drawing_never_rests_even_without_motion_reports(monkeypatch):
     monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.02)
     monkeypatch.setattr(worker_mod, "_IDLE_PROBE_SECONDS", 0.05)
     monkeypatch.setattr(worker_mod, "_HAND_REST_STILL_SECONDS", 0.3)
+    now = [1000.0]
     fake = _GrowingInk()
-    worker = worker_mod.PageCleanWorker(fake).start()
-    try:
-        generation = worker.new_generation()
-        worker.set_hand_presence(True)
-        warp = np.zeros((H, 240, 3), dtype=np.uint8)
-        # Bem alem da janela de quietude da mao, sem nenhum
-        # reporte de movimento: a saida mudando segura acordado.
-        deadline = time.monotonic() + 1.2
-        while time.monotonic() < deadline:
-            worker.submit(WarpedPage(warp, generation))
-            time.sleep(0.005)
-        assert not worker.stats()["resting"], "descansou no meio do desenho ativo"
-        before = fake.calls
-        deadline = time.monotonic() + 0.3
-        while time.monotonic() < deadline:
-            worker.submit(WarpedPage(warp, generation))
-            time.sleep(0.005)
-        assert fake.calls - before >= 4, "a cadencia ativa caiu desenhando"
-    finally:
-        worker.stop()
+    worker = worker_mod.PageCleanWorker(fake, clock=lambda: now[0])
+    generation = worker.new_generation()
+    worker.set_hand_presence(True)
+    warp = np.zeros((H, 240, 3), dtype=np.uint8)
+    # Bem alem da janela de quietude da mao, sem nenhum
+    # reporte de movimento: a saida mudando segura acordado.
+    _pump_for(worker, generation, warp, now, 1.2)
+    assert not worker.stats()["resting"], "descansou no meio do desenho ativo"
+    before = fake.calls
+    _pump_for(worker, generation, warp, now, 0.3)
+    assert fake.calls - before >= 4, "a cadencia ativa caiu desenhando"
+
+
+def test_motion_reports_block_rest_with_frozen_ink(monkeypatch):
+    fake, worker, generation, now = _sync_rig(monkeypatch)
+    worker.set_hand_presence(True)
+    warp = np.zeros((H, W, 3), dtype=np.uint8)
+    # Tinta congelada, mas a mao segue se mexendo: reportes
+    # de movimento a cada 0,1 s por 1 s inteiro.
+    for _ in range(10):
+        worker.submit(WarpedPage(warp, generation))
+        worker.pump()
+        worker.set_hand_presence(True, moved=True)
+        now[0] += 0.1
+    assert not worker.stats()["resting"], "descansou com a mao em atividade"
+    # Os reportes param: a quietude fecha e o descanso entra.
+    _pump_for(worker, generation, warp, now, 0.4)
+    assert worker.stats()["resting"], "sem movimento, o descanso nao entrou"
 
 
 @pytest.mark.slow
-def test_motion_reports_block_rest_with_frozen_ink(monkeypatch):
-    fake, worker, generation = _rig(monkeypatch)
+def test_total_rest_with_hand_present_wakes_on_real_thread(monkeypatch):
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.005)
+    monkeypatch.setattr(worker_mod, "_IDLE_PROBE_SECONDS", 0.01)
+    monkeypatch.setattr(worker_mod, "_HAND_REST_STILL_SECONDS", 0.04)
+    fake = _SettlingInk()
+    worker = worker_mod.PageCleanWorker(fake).start()
+    generation = worker.new_generation()
+    stop = threading.Event()
+
+    def feeder():
+        warp = np.zeros((H, W, 3), dtype=np.uint8)
+        while not stop.is_set():
+            worker.submit(WarpedPage(warp, generation))
+            time.sleep(0.002)
+
+    thread = threading.Thread(target=feeder, daemon=True)
     try:
         worker.set_hand_presence(True)
-        warp = np.zeros((H, W, 3), dtype=np.uint8)
-        # Tinta congelada, mas a mao segue se mexendo: reportes
-        # de movimento a cada ~0,1 s por 1 s inteiro.
+        thread.start()
+        assert _wait_resting(worker), "o descanso com a mao presente nao entrou"
+        assert worker.stats()["worker_mode"] == "rest"
+        before = fake.calls
+        time.sleep(0.04)
+        assert fake.calls == before
+        worker.set_hand_presence(True, moved=True)
         deadline = time.monotonic() + 1.0
-        while time.monotonic() < deadline:
-            worker.submit(WarpedPage(warp, generation))
-            worker.set_hand_presence(True, moved=True)
-            time.sleep(0.1)
-        assert not worker.stats()["resting"], "descansou com a mao em atividade"
-        # Os reportes param: a quietude fecha e o descanso entra.
-        _feed(worker, generation, 0.2)
-        assert _wait_resting(worker), "sem movimento, o descanso nao entrou"
+        while time.monotonic() < deadline and (
+            fake.calls < before + 2 or worker.stats()["resting"]
+        ):
+            time.sleep(0.005)
+        assert fake.calls >= before + 2
+        assert not worker.stats()["resting"]
     finally:
+        stop.set()
+        thread.join(timeout=2.0)
         worker.stop()
 
 

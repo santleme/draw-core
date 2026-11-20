@@ -50,12 +50,13 @@ class _SettlingInk:
         return prob
 
 
-def _feed(worker, generation, seconds):
+def _pump_for(worker, generation, now, seconds, step=0.01):
     warp = np.zeros((H, W, 3), dtype=np.uint8)
-    deadline = time.monotonic() + seconds
-    while time.monotonic() < deadline:
+    end = now[0] + seconds
+    while now[0] < end:
         worker.submit(WarpedPage(warp, generation))
-        time.sleep(0.005)
+        worker.pump()
+        now[0] += step
 
 
 class _Feeder:
@@ -71,7 +72,7 @@ class _Feeder:
         warp = np.zeros((H, W, 3), dtype=np.uint8)
         while not self._stop:
             self._worker.submit(WarpedPage(warp, self._generation))
-            time.sleep(0.005)
+            time.sleep(0.002)
 
     def __enter__(self):
         self._thread.start()
@@ -82,50 +83,74 @@ class _Feeder:
         self._thread.join(timeout=2.0)
 
 
-def _wait_resting(worker, timeout=5.0):
+def _wait_resting(worker, timeout=2.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if worker.stats()["resting"]:
             return True
-        time.sleep(0.01)
+        time.sleep(0.005)
     return False
 
 
-@pytest.mark.slow
 def test_total_rest_after_settle_without_hand(monkeypatch):
     monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.02)
     monkeypatch.setattr(worker_mod, "_IDLE_PROBE_SECONDS", 0.05)
+    now = [1000.0]
     fake = _SettlingInk()
+    worker = worker_mod.PageCleanWorker(fake, clock=lambda: now[0])
+    generation = worker.new_generation()
+    _pump_for(worker, generation, now, 0.3)
+    assert fake.calls >= 4, "aquecimento na cadencia ativa"
+
+    # A mao sai e a tinta ainda muda: sonda, nao descansa.
+    worker.set_hand_presence(False)
+    before = fake.calls
+    _pump_for(worker, generation, now, 0.35)
+    probing = fake.calls - before
+    assert probing >= 3, f"saida mudando sem mao deveria sondar: {probing}"
+    assert not worker.stats()["resting"]
+
+    # A tinta congela: o voto fecha e o descanso total entra.
+    fake.frozen = True
+    _pump_for(worker, generation, now, 0.35)
+    assert worker.stats()["resting"], "o descanso total nao entrou"
+    assert worker.stats()["worker_mode"] == "rest"
+    before = fake.calls
+    _pump_for(worker, generation, now, 0.4)
+    assert fake.calls == before, (
+        f"em descanso, {fake.calls - before} passadas rodaram sobre a pagina parada"
+    )
+
+    # A mao volta: acorda na hora e a cadencia ativa volta.
+    worker.set_hand_presence(True)
+    _pump_for(worker, generation, now, 0.3)
+    assert fake.calls - before >= 4, "a mao de volta reativa"
+    assert not worker.stats()["resting"]
+
+
+@pytest.mark.slow
+def test_total_rest_without_hand_wakes_on_real_thread(monkeypatch):
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.005)
+    monkeypatch.setattr(worker_mod, "_IDLE_PROBE_SECONDS", 0.01)
+    fake = _SettlingInk()
+    fake.frozen = True
     worker = worker_mod.PageCleanWorker(fake).start()
     try:
         generation = worker.new_generation()
-        _feed(worker, generation, 0.3)
-        assert fake.calls >= 4, "aquecimento na cadencia ativa"
-
-        # A mao sai e a tinta ainda muda: sonda, nao descansa.
         worker.set_hand_presence(False)
-        before = fake.calls
-        _feed(worker, generation, 0.35)
-        probing = fake.calls - before
-        assert probing >= 3, f"saida mudando sem mao deveria sondar: {probing}"
-        assert not worker.stats()["resting"]
-
-        # A tinta congela: o voto fecha e o descanso total entra.
-        fake.frozen = True
         with _Feeder(worker, generation):
             assert _wait_resting(worker), "o descanso total nao entrou"
             assert worker.stats()["worker_mode"] == "rest"
             before = fake.calls
-            time.sleep(0.4)
-            assert fake.calls == before, (
-                f"em descanso, {fake.calls - before} passadas "
-                "rodaram sobre a pagina parada"
-            )
-
-            # A mao volta: acorda na hora e a cadencia ativa volta.
+            time.sleep(0.04)
+            assert fake.calls == before
             worker.set_hand_presence(True)
-            time.sleep(0.3)
-            assert fake.calls - before >= 4, "a mao de volta reativa"
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline and (
+                fake.calls < before + 2 or worker.stats()["resting"]
+            ):
+                time.sleep(0.005)
+            assert fake.calls >= before + 2
             assert not worker.stats()["resting"]
     finally:
         worker.stop()

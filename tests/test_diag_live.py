@@ -1,7 +1,6 @@
 """Ferramenta de diagnóstico ao vivo (lab/diag_live.py): partes puras."""
 
 import json
-import time
 from pathlib import Path
 
 import cv2
@@ -10,6 +9,17 @@ import pytest
 from lab import diag_live
 
 from draw import config
+
+
+class _FakeClock:
+    def __init__(self, start=100.0):
+        self.now = start
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
 
 
 def test_quad_aspect_is_width_over_height():
@@ -173,11 +183,20 @@ class _Capture:
 def test_dead_source_is_bounded_and_the_capture_released():
     """hvcam devolve False em stream caído: sem limite o laço não
     terminava e o resumo nunca saía (review #51)."""
+    clk = _FakeClock()
     cap = _Capture(good=4)  # 1 abre a janela de FPS; 3 viram quadros
     got = []
     with pytest.raises(diag_live.SourceExhausted, match="sem quadro"):
         for frame, _fps in diag_live._frames_from_source(
-            "hvcam://", 6, 0.0, 0.0, stall_s=0.3, opener=lambda _s: cap, fps_burst_s=0.0
+            "hvcam://",
+            6,
+            0.0,
+            0.0,
+            stall_s=0.3,
+            opener=lambda _s: cap,
+            fps_burst_s=0.0,
+            clock=clk,
+            sleep=clk.sleep,
         ):
             got.append(frame)
     assert len(got) == 3
@@ -193,23 +212,47 @@ def test_source_opens_through_the_app_open_capture():
         seen.append(target)
         return _Capture(good=2)
 
+    clk = _FakeClock()
     list(
-        diag_live._frames_from_source("0", 1, 0.0, 0.0, opener=opener, fps_burst_s=0.0)
+        diag_live._frames_from_source(
+            "0", 1, 0.0, 0.0, opener=opener, fps_burst_s=0.0, clock=clk, sleep=clk.sleep
+        )
     )
     list(
         diag_live._frames_from_source(
-            "hvcam://", 1, 0.0, 0.0, opener=opener, fps_burst_s=0.0
+            "hvcam://",
+            1,
+            0.0,
+            0.0,
+            opener=opener,
+            fps_burst_s=0.0,
+            clock=clk,
+            sleep=clk.sleep,
         )
     )
     assert seen == [0, "hvcam://"]  # '0' vira índice; URL segue como texto
 
 
 def test_warmup_zero_still_reports_a_real_fps():
-    cap = _Capture(good=1_000_000)
+    clk = _FakeClock()
+
+    class _Ticking(_Capture):
+        def read(self):
+            clk.sleep(0.005)
+            return super().read()
+
+    cap = _Ticking(good=1_000_000)
     fps = [
         f
         for _frame, f in diag_live._frames_from_source(
-            "0", 3, 0.0, 0.0, opener=lambda _s: cap, fps_burst_s=0.05
+            "0",
+            3,
+            0.0,
+            0.0,
+            opener=lambda _s: cap,
+            fps_burst_s=0.05,
+            clock=clk,
+            sleep=clk.sleep,
         )
     ]
     assert len(fps) == 3 and all(v > 0 for v in fps)
@@ -335,19 +378,20 @@ def test_empty_input_path_is_rejected_and_never_opens_a_camera(
 def test_read_fps_is_not_diluted_by_diagnosis_time():
     """O gerador fica suspenso durante o diagnóstico; o FPS vem de uma
     rajada contínua de leituras, não de leituras ÷ tempo total."""
+    clk = _FakeClock()
 
     class _Slow(_Capture):
         def read(self):
-            time.sleep(0.01)  # ~100 leituras/s
+            clk.sleep(0.01)  # ~100 leituras/s
             return super().read()
 
     cap = _Slow(good=10_000)
     seen = []
     for _frame, fps in diag_live._frames_from_source(
-        "0", 3, 0.0, 0.0, opener=lambda _s: cap
+        "0", 3, 0.0, 0.0, opener=lambda _s: cap, clock=clk, sleep=clk.sleep
     ):
         seen.append(fps)
-        time.sleep(0.4)  # "diagnóstico" demorado entre os quadros
+        clk.sleep(0.4)  # "diagnóstico" demorado entre os quadros
     assert len(seen) == 3 and len(set(seen)) == 1  # medido uma vez
     assert seen[0] > 50  # sem diluir: ~95/s, não ~20/s
 
@@ -414,6 +458,7 @@ def test_unrelated_png_names_do_not_trip_the_guard(tmp_path, fake_models):
 def test_fps_window_opens_at_the_first_good_read():
     """Com --warmup 0 o 1º read dá timeout (> a janela de FPS) e depois a
     câmera entrega normalmente: o FPS não pode ficar 0 (review #51)."""
+    clk = _FakeClock()
 
     class _SlowStart(_Capture):
         started = False
@@ -421,16 +466,24 @@ def test_fps_window_opens_at_the_first_good_read():
         def read(self):
             if not self.started:
                 self.started = True
-                time.sleep(0.2)  # timeout inicial, maior que a janela
+                clk.sleep(0.2)  # timeout inicial, maior que a janela
                 return False, None
-            time.sleep(0.002)
+            clk.sleep(0.002)
             return super().read()
 
     cap = _SlowStart(good=10_000)
     fps = [
         f
         for _frame, f in diag_live._frames_from_source(
-            "0", 2, 0.0, 0.0, stall_s=5.0, opener=lambda _s: cap, fps_burst_s=0.05
+            "0",
+            2,
+            0.0,
+            0.0,
+            stall_s=5.0,
+            opener=lambda _s: cap,
+            fps_burst_s=0.05,
+            clock=clk,
+            sleep=clk.sleep,
         )
     ]
     assert len(fps) == 2 and fps[0] > 50

@@ -204,6 +204,9 @@ def _frames_from_source(
     stall_s=_STALL_TIMEOUT_S,
     opener=None,
     fps_burst_s=_FPS_BURST_S,
+    *,
+    clock=time.monotonic,
+    sleep=time.sleep,
 ):
     """Lê `limit` quadros espaçados da fonte, pelo mesmo open_capture do app.
 
@@ -225,7 +228,7 @@ def _frames_from_source(
             f"fonte {source} não abriu: {getattr(cap, 'open_error', '')}"
         )
     try:
-        t_start = last_ok = time.monotonic()
+        t_start = last_ok = clock()
         reads = 0
         t_first = None  # primeira leitura boa: a janela de FPS começa aqui
         n_first = 0
@@ -233,7 +236,7 @@ def _frames_from_source(
         def read():
             nonlocal reads, last_ok, t_first, n_first
             ok, frame = cap.read()
-            now = time.monotonic()
+            now = clock()
             if ok and frame is not None:
                 reads += 1
                 last_ok = now
@@ -244,7 +247,7 @@ def _frames_from_source(
                 raise SourceExhausted(
                     f"fonte parou de entregar: {now - last_ok:.1f} s sem quadro"
                 )
-            time.sleep(_RETRY_SLEEP_S)
+            sleep(_RETRY_SLEEP_S)
             return None
 
         # Aquecimento (AE/AWB assentam) e janela de FPS: esta só abre na
@@ -253,7 +256,7 @@ def _frames_from_source(
         # de parada segue ativo dentro de read() durante a partida.
         while True:
             read()
-            now = time.monotonic()
+            now = clock()
             if (
                 now - t_start >= warmup_s
                 and t_first is not None
@@ -262,13 +265,13 @@ def _frames_from_source(
                 break
         fps = (reads - n_first) / max(now - t_first, 1e-6)
         got = 0
-        next_t = time.monotonic()
+        next_t = clock()
         while got < limit:
             frame = read()
-            if frame is None or time.monotonic() < next_t:
+            if frame is None or clock() < next_t:
                 continue
             got += 1
-            next_t = time.monotonic() + spacing_s
+            next_t = clock() + spacing_s
             yield frame.copy(), fps
     finally:
         cap.release()

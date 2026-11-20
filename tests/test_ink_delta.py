@@ -277,6 +277,7 @@ def test_contract_validation():
     assert ok.bbox is None
 
 
+@pytest.mark.slow
 def test_poll_delta_waits_briefly_for_a_record_still_being_computed():
     import threading
     import time

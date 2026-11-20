@@ -269,7 +269,7 @@ def test_save_stamp_unico_por_processo():
 
 def test_require_gui_backend_levanta_sem_highgui(monkeypatch):
     monkeypatch.setattr(app_module, "_gui_backend_compiled", lambda: False)
-    with pytest.raises(RuntimeError, match="draw-core\[gui\]"):
+    with pytest.raises(RuntimeError, match=r"draw-core\[gui\]"):
         app_module._require_gui_backend()
 
 

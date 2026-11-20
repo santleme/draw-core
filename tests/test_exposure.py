@@ -104,12 +104,21 @@ def test_sparse_estimate_tracks_the_full_resolution_gain_on_ruled_pages(period):
     linha (ou sempre fora dela). Compara com o p90 de resolução cheia em
     todos os deslocamentos da pauta."""
     h, w = 600, 420
+    img = np.empty((h, w, 3), np.uint8)
+    pos = 0.9 * (h * w - 1)
+    lo_rank = int(np.floor(pos)) + 1
+    hi_rank = int(np.ceil(pos)) + 1
+    frac = pos - np.floor(pos)
     for paper in (80, 110):
         for offset in range(period):
-            img = np.full((h, w, 3), paper, np.uint8)
+            img.fill(paper)
             for y in range(offset, h, period):
                 img[y : y + 2] = 25  # linha de pauta escura de 2 px
             img[200:260, 100:300] = 30  # uma mancha de tinta
-            full = float(np.clip(200.0 / np.percentile(img.mean(axis=2), 90), 1.0, 3.0))
+            cdf = np.cumsum(np.bincount(img[:, :, 0].ravel(), minlength=256))
+            lo_idx = int(np.searchsorted(cdf, lo_rank))
+            hi_idx = int(np.searchsorted(cdf, hi_rank))
+            p90 = lo_idx + frac * (hi_idx - lo_idx)
+            full = float(np.clip(200.0 / p90, 1.0, 3.0))
             sampled = exposure.paper_gain(img)
             assert sampled == pytest.approx(full, rel=0.02), (period, offset, paper)

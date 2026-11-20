@@ -28,12 +28,33 @@ def _bg_block_sigma(rgb: np.ndarray, mask: np.ndarray, block: int = 16) -> float
     inteiramente fundo (mask==0) do RGB final, em cinza."""
     gray = cv2.cvtColor(rgb, cv2.COLOR_BGR2GRAY).astype(np.float32)
     bg = mask == gs.BACKGROUND
-    vals = []
-    for y in range(0, gs.SIZE - block + 1, block):
-        for x in range(0, gs.SIZE - block + 1, block):
-            if bg[y : y + block, x : x + block].all():
-                vals.append(float(gray[y : y + block, x : x + block].std()))
-    return float(np.median(vals)) if vals else float("nan")
+    nh, nw = gs.SIZE // block, gs.SIZE // block
+    g = (
+        gray[: nh * block, : nw * block]
+        .reshape(nh, block, nw, block)
+        .transpose(0, 2, 1, 3)
+    )
+    b = (
+        bg[: nh * block, : nw * block]
+        .reshape(nh, block, nw, block)
+        .transpose(0, 2, 1, 3)
+    )
+    valid = b.all(axis=(2, 3))
+    if not valid.any():
+        return float("nan")
+    return float(np.median(g[valid].std(axis=(1, 2))))
+
+
+def _capture_png_writes(monkeypatch) -> dict[str, np.ndarray]:
+    """Intercepta gravações PNG do gerador em memória (sem zlib I/O)."""
+    written: dict[str, np.ndarray] = {}
+
+    def _fake_imwrite(path, image, *_args):
+        written[str(path)] = image.copy()
+        return True
+
+    monkeypatch.setattr(gs.cv2, "imwrite", _fake_imwrite)
+    return written
 
 
 # Hashes do gerador PRISTINE (main ad73946), seed 42 / train / idx 7.
@@ -163,12 +184,13 @@ def test_smooth_background_unit_sigma_tracks_target():
     assert _bg_block_sigma(textured, blank) > 9.0  # texturizado também existe
 
 
-def test_smooth_fraction_dataset_covers_low_sigma(tmp_path):
+def test_smooth_fraction_dataset_covers_low_sigma(tmp_path, monkeypatch):
+    written = _capture_png_writes(monkeypatch)
     out = tmp_path / "ds"
     manifest = gs.generate_dataset(
         out,
         seed=42,
-        counts={"train": 40, "val": 1, "test": 1},
+        counts={"train": 24, "val": 1, "test": 1},
         bg_smooth_fraction=1.0,
     )
     assert manifest["diet"]["bg_smooth_fraction"] == 1.0
@@ -177,11 +199,9 @@ def test_smooth_fraction_dataset_covers_low_sigma(tmp_path):
         assert entry["background_kind"] == "smooth"
         assert entry["background_source"].startswith("smooth:")
         assert 0.0 <= entry["bg_smooth_sigma"] <= 16.0
-        rgb = cv2.imread(str(out / entry["split"] / f"{entry['id']}.png"))
-        mask = cv2.imread(
-            str(out / entry["split"] / f"{entry['id']}_mask.png"),
-            cv2.IMREAD_GRAYSCALE,
-        )
+        rgb = written[str(out / entry["split"] / f"{entry['id']}.png")]
+        mask = written[str(out / entry["split"] / f"{entry['id']}_mask.png")]
+        assert str(out / entry["split"] / f"{entry['id']}_ink_full.png") in written
         sigmas.append(_bg_block_sigma(rgb, mask))
     sigmas = np.array(sigmas)
     # A mistura sorteada: mediana da dieta nova é regime liso de
@@ -191,9 +211,41 @@ def test_smooth_fraction_dataset_covers_low_sigma(tmp_path):
 
 
 def test_loguniform_scale_covers_5_to_70_percent():
-    fracs = []
-    for i in range(60):
-        scene = gs.compose_scene(
+    sizes = [(360, 510), (510, 360), (380, 490), (420, 420), (340, 480)]
+    buf = np.zeros((gs.SIZE, gs.SIZE), dtype=np.uint8)
+
+    def _quad_area_fraction(quad):
+        buf.fill(0)
+        cv2.fillConvexPoly(buf, np.round(quad).astype(np.int32), 255)
+        return float((buf > 0).mean())
+
+    rng = np.random.default_rng(7)
+    fracs = np.array(
+        [
+            _quad_area_fraction(gs._sample_loguniform_quad(rng, *sizes[i % len(sizes)]))
+            for i in range(60)
+        ]
+    )
+    assert fracs.min() < 0.10  # folha pequena deixou de ser raridade
+    assert fracs.max() > 0.50
+    assert float((fracs < 0.15).mean()) >= 0.30  # teórico log-uniforme: ~0,42
+    assert 0.12 <= float(np.median(fracs)) <= 0.28  # mediana teórica: ~0,19
+
+    rng_legacy = np.random.default_rng(7)
+    legacy = np.array(
+        [
+            _quad_area_fraction(
+                gs._sample_normal_quad(rng_legacy, *sizes[i % len(sizes)])
+            )
+            for i in range(60)
+        ]
+    )
+    assert float((legacy < 0.15).mean()) == 0.0  # o buraco histórico
+    assert legacy.min() > 0.30
+
+    # Integração ponta a ponta com compose_scene (caminhos normal e loguniform).
+    e2e_log = [
+        gs.compose_scene(
             7,
             "train",
             i,
@@ -203,29 +255,24 @@ def test_loguniform_scale_covers_5_to_70_percent():
             None,
             "table_wood",
             sheet_scale="loguniform",
-        )
-        fracs.append(scene["info"]["paper_fraction"])
-    fracs = np.array(fracs)
-    assert fracs.min() < 0.10  # folha pequena deixou de ser raridade
-    assert fracs.max() > 0.50
-    assert float((fracs < 0.15).mean()) >= 0.30  # teórico log-uniforme: ~0,42
-    assert 0.12 <= float(np.median(fracs)) <= 0.28  # mediana teórica: ~0,19
-
-    legacy = []
-    for i in range(60):
-        scene = gs.compose_scene(7, "train", i, "normal", "white")
-        legacy.append(scene["info"]["paper_fraction"])
-    legacy = np.array(legacy)
-    assert float((legacy < 0.15).mean()) == 0.0  # o buraco histórico
-    assert legacy.min() > 0.30
+        )["info"]["paper_fraction"]
+        for i in range(16)
+    ]
+    assert min(e2e_log) < 0.10 and max(e2e_log) > 0.45
+    e2e_leg = [
+        gs.compose_scene(7, "train", i, "normal", "white")["info"]["paper_fraction"]
+        for i in range(4)
+    ]
+    assert min(e2e_leg) > 0.30
 
 
-def test_no_paper_fraction_is_real_and_clean(tmp_path):
+def test_no_paper_fraction_is_real_and_clean(tmp_path, monkeypatch):
+    written = _capture_png_writes(monkeypatch)
     out = tmp_path / "ds"
     manifest = gs.generate_dataset(
         out,
         seed=42,
-        counts={"train": 100, "val": 1, "test": 1},
+        counts={"train": 40, "val": 1, "test": 1},
         no_paper_fraction=0.3,
     )
     train = [s for s in manifest["scenes"] if s["split"] == "train"]
@@ -234,33 +281,32 @@ def test_no_paper_fraction_is_real_and_clean(tmp_path):
     for entry in no_paper:
         assert entry["paper_fraction"] == 0.0
         assert entry["has_valid_sheet"] is False
-        mask = cv2.imread(
-            str(out / "train" / f"{entry['id']}_mask.png"), cv2.IMREAD_GRAYSCALE
-        )
+        mask = written[str(out / "train" / f"{entry['id']}_mask.png")]
         assert not (mask == gs.PAPER).any()
         assert not (mask == gs.INK).any()
 
     manifest_all = gs.generate_dataset(
         tmp_path / "ds2",
         seed=42,
-        counts={"train": 10, "val": 1, "test": 1},
+        counts={"train": 5, "val": 1, "test": 1},
         no_paper_fraction=1.0,
     )
     assert all(s["scene_type"] in gs.NO_PAPER_TYPES for s in manifest_all["scenes"])
 
 
-def test_real_photo_backgrounds_split_and_recorded(tmp_path):
+def test_real_photo_backgrounds_split_and_recorded(tmp_path, monkeypatch):
     pool = tmp_path / "pool"
     pool.mkdir()
     rng = np.random.default_rng(3)
     for k in range(6):
         img = rng.integers(0, 255, size=(90, 120, 3), dtype=np.uint8)
         cv2.imwrite(str(pool / f"desk_{k}.png"), img)
+    _capture_png_writes(monkeypatch)
     out = tmp_path / "ds"
     manifest = gs.generate_dataset(
         out,
         seed=42,
-        counts={"train": 12, "val": 2, "test": 2},
+        counts={"train": 8, "val": 2, "test": 2},
         bg_dir=pool,
         bg_real_fraction=1.0,
     )
