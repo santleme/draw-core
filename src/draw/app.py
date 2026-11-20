@@ -1836,6 +1836,16 @@ def main():
         ),
     )
     parser.add_argument(
+        "--detect-wake",
+        action="store_true",
+        help=(
+            "cadencia adaptativa do detector com sentinela de bordas "
+            "(PipelineConfig.detect_wake): cai para 1 Hz quando a folha "
+            "assenta e acorda no mesmo quadro se a folha mexer. Experimental, "
+            "desligado por padrao"
+        ),
+    )
+    parser.add_argument(
         "--ink-motion-veto",
         action="store_true",
         help=(
@@ -1947,7 +1957,15 @@ def main():
                 "--ink-hysteresis nao combina com --markers (sem tinta no modo marcadores)"
             )
         ink_config = dataclasses.replace(ink_config, hysteresis=True)
-    pipeline_config = PipelineConfig(ink=ink_config, ink_auto_gain=args.ink_gain)
+    if args.detect_wake and args.markers:
+        parser.error(
+            "--detect-wake nao combina com --markers (detector neural desligado)"
+        )
+    pipeline_config = PipelineConfig(
+        ink=ink_config,
+        ink_auto_gain=args.ink_gain,
+        detect_wake=args.detect_wake,
+    )
     if args.stream_port is not None and not args.stream_token_file:
         parser.error("--stream-port exige --stream-token-file")
     if args.markers and (args.stream_port is not None or args.stream_record):

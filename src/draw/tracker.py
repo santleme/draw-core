@@ -696,3 +696,212 @@ class SheetDetectionWorker:
             self._stopped = True
             self._condition.notify_all()
         self._thread.join(timeout=_DETECTION_STOP_TIMEOUT_SECONDS)
+
+
+def _sample_border_profiles(
+    frame, corners, edge_samples, profile_half_px, hand_mask=None
+):
+    """Amostra perfis normais ao longo das 4 arestas do quad (< 0,1 ms).
+
+    Devolve (xs, ys, profiles, valid): xs/ys tem forma (4*edge_samples,
+    2*profile_half_px+1) em coordenadas de pixel, profiles e a intensidade
+    do canal verde centrada por ponto, e valid marca pontos dentro do
+    quadro e fora da mascara de mao.
+    """
+    h, w = frame.shape[:2]
+    pts = np.asarray(corners, dtype=np.float32).reshape(4, 2)
+    ts = np.linspace(0.08, 0.92, edge_samples, dtype=np.float32)
+    offsets = np.arange(-profile_half_px, profile_half_px + 1, dtype=np.float32)
+    xs_list, ys_list = [], []
+    for i in range(4):
+        p0 = pts[i]
+        p1 = pts[(i + 1) % 4]
+        edge = p1 - p0
+        length = float(np.hypot(edge[0], edge[1]))
+        if length < 1.0:
+            normal = np.array([0.0, 0.0], dtype=np.float32)
+        else:
+            normal = np.array([-edge[1] / length, edge[0] / length], dtype=np.float32)
+        centers = p0[None, :] + ts[:, None] * edge[None, :]
+        xs_list.append(centers[:, 0:1] + offsets[None, :] * normal[0])
+        ys_list.append(centers[:, 1:2] + offsets[None, :] * normal[1])
+    xs = np.round(np.vstack(xs_list)).astype(np.int32)
+    ys = np.round(np.vstack(ys_list)).astype(np.int32)
+    in_bounds = (xs >= 1) & (xs < w - 1) & (ys >= 1) & (ys < h - 1)
+    valid = in_bounds.all(axis=1)
+    xs_c = np.clip(xs, 0, w - 1)
+    ys_c = np.clip(ys, 0, h - 1)
+    if hand_mask is not None:
+        mh, mw = hand_mask.shape[:2]
+        if (mh, mw) == (h, w):
+            hxs, hys = xs_c, ys_c
+        else:
+            hxs = np.clip((xs_c * mw) // max(w, 1), 0, mw - 1)
+            hys = np.clip((ys_c * mh) // max(h, 1), 0, mh - 1)
+        valid = valid & ~(hand_mask[hys, hxs] > 0).any(axis=1)
+    channel = frame[ys_c, xs_c, 1] if frame.ndim == 3 else frame[ys_c, xs_c]
+    prof = channel.astype(np.float32)
+    prof -= prof.mean(axis=1, keepdims=True)
+    return xs_c, ys_c, prof, valid
+
+
+class DetectWakeGate:
+    """Cadencia adaptativa do detector com sentinela geometrico (Detect-then-Wake).
+
+    Quando o quad da folha assenta por `settle_detections` deteccoes
+    consecutivas sem salto, o detector cai para a cadencia de verificacao
+    (`settled_interval_s`, padrao 1 Hz), economizando ~75-85% da CPU do
+    draw_seg. A cada quadro intermediario, um sentinela leve (< 0,1 ms)
+    compara perfis normais nas 4 bordas do quad fora da mao contra a
+    referencia da folha assentada; qualquer movimento da folha acorda o
+    detector no proprio quadro, sem esperar o timer de 1 s.
+    """
+
+    def __init__(
+        self,
+        *,
+        settled_interval_s=1.0,
+        settle_detections=3,
+        stable_corner_px=4.0,
+        edge_samples=16,
+        profile_half_px=5,
+        diff_threshold=14.0,
+        wake_fraction=0.25,
+        min_visible_samples=16,
+    ):
+        self.settled_interval_s = float(settled_interval_s)
+        self.settle_detections = int(settle_detections)
+        self.stable_corner_px = float(stable_corner_px)
+        self.edge_samples = int(edge_samples)
+        self.profile_half_px = int(profile_half_px)
+        self.diff_threshold = float(diff_threshold)
+        self.wake_fraction = float(wake_fraction)
+        self.min_visible_samples = int(min_visible_samples)
+        self.skipped_submits = 0
+        self.wake_events = 0
+        self.heartbeat_events = 0
+        self.reset()
+
+    def reset(self):
+        self._settled = False
+        self._stable_count = 0
+        self._last_corners = None
+        self._last_detect_at = None
+        self._last_submit_at = None
+        self._ref_xs = None
+        self._ref_ys = None
+        self._ref_prof = None
+        self._ref_valid = None
+        self._ref_shape = None
+
+    @property
+    def settled(self):
+        return self._settled
+
+    def wake(self):
+        """Sai do estado assentado e volta a cadencia normal imediatamente."""
+        if self._settled:
+            self.wake_events += 1
+        self._settled = False
+        self._stable_count = 0
+        self._ref_prof = None
+        self._ref_valid = None
+
+    def on_detection(
+        self,
+        corners,
+        frame,
+        captured_at,
+        *,
+        hand_mask=None,
+        missed=False,
+        has_pending=False,
+    ):
+        """Atualiza o estado de assentamento com o resultado do rastreador."""
+        if corners is None or missed or has_pending:
+            self.reset()
+            return
+        corners_arr = np.asarray(corners, dtype=np.float32)
+        if (
+            self._last_corners is not None
+            and corner_distance(self._last_corners, corners_arr)
+            <= self.stable_corner_px
+        ):
+            self._stable_count += 1
+        else:
+            self._stable_count = 1
+            self._settled = False
+        self._last_corners = corners_arr.copy()
+        self._last_detect_at = float(captured_at)
+        self._last_submit_at = float(captured_at)
+        if self._stable_count >= self.settle_detections:
+            xs, ys, prof, valid = _sample_border_profiles(
+                frame,
+                corners_arr,
+                self.edge_samples,
+                self.profile_half_px,
+                hand_mask=hand_mask,
+            )
+            if int(np.count_nonzero(valid)) >= self.min_visible_samples:
+                self._ref_xs = xs
+                self._ref_ys = ys
+                self._ref_prof = prof
+                self._ref_valid = valid
+                self._ref_shape = frame.shape[:2]
+                self._settled = True
+            else:
+                self._settled = False
+
+    def _sentinel_triggered(self, frame, hand_mask=None):
+        if self._ref_prof is None or frame.shape[:2] != self._ref_shape:
+            return True
+        xs, ys = self._ref_xs, self._ref_ys
+        valid = self._ref_valid
+        if hand_mask is not None:
+            h, w = frame.shape[:2]
+            mh, mw = hand_mask.shape[:2]
+            if (mh, mw) == (h, w):
+                hxs, hys = xs, ys
+            else:
+                hxs = np.clip((xs * mw) // max(w, 1), 0, mw - 1)
+                hys = np.clip((ys * mh) // max(h, 1), 0, mh - 1)
+            valid = valid & ~(hand_mask[hys, hxs] > 0).any(axis=1)
+        n_valid = int(np.count_nonzero(valid))
+        if n_valid < self.min_visible_samples:
+            return True
+        channel = frame[ys, xs, 1] if frame.ndim == 3 else frame[ys, xs]
+        cur = channel[valid].astype(np.float32)
+        cur -= cur.mean(axis=1, keepdims=True)
+        diffs = np.abs(cur - self._ref_prof[valid]).mean(axis=1)
+        changed = int(np.count_nonzero(diffs > self.diff_threshold))
+        return (changed / n_valid) >= self.wake_fraction
+
+    def should_detect(
+        self,
+        frame,
+        captured_at,
+        *,
+        base_should_detect,
+        hand_mask=None,
+        wake_signal=False,
+    ):
+        """Decide se este quadro dispara o detector neural."""
+        if not self._settled:
+            return bool(base_should_detect)
+        now = float(captured_at)
+        if wake_signal or self._sentinel_triggered(frame, hand_mask=hand_mask):
+            self.wake()
+            self._last_submit_at = now
+            return True
+        last_ref = (
+            self._last_submit_at
+            if self._last_submit_at is not None
+            else self._last_detect_at
+        )
+        if last_ref is None or now - last_ref >= self.settled_interval_s - 1e-9:
+            self.heartbeat_events += 1
+            self._last_submit_at = now
+            return True
+        if base_should_detect:
+            self.skipped_submits += 1
+        return False

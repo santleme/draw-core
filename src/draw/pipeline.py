@@ -171,6 +171,13 @@ class Pipeline:
         self._hand_mask_det = None
 
         self.tracker = tracker.SheetTracker()
+        self._detect_wake = (
+            tracker.DetectWakeGate(
+                settled_interval_s=self._config.detect_wake_interval_s
+            )
+            if self._config.detect_wake
+            else None
+        )
         self.corner_history = deque(maxlen=_INK_CORNER_HISTORY)
         self.ink_session_open = False
         self.accumulated_canvas = None
@@ -444,6 +451,9 @@ class Pipeline:
         # A tinta antiga morreu: a saida ao vivo precisa saber (canvas limpo).
         self._on_ink(contracts.InkPublication(-1, 0, None))
         self.tracker.reset()
+        detect_wake = getattr(self, "_detect_wake", None)
+        if detect_wake is not None:
+            detect_wake.reset()
         self.corner_history.clear()
         self.display_corners = None
         self.display_gray = None
@@ -490,7 +500,18 @@ class Pipeline:
             detected_corners, detected_verdict = None, None
             det_captured_at = None
             ran_detection = False
-        if self.tracker.should_detect(self.frame_number):
+        base_should_detect = self.tracker.should_detect(self.frame_number)
+        if self._detect_wake is not None:
+            should_detect = self._detect_wake.should_detect(
+                frame,
+                packet.captured_at,
+                base_should_detect=base_should_detect,
+                hand_mask=self._hand_mask_det,
+                wake_signal=self.tracker.missed or self.tracker.has_pending,
+            )
+        else:
+            should_detect = base_should_detect
+        if should_detect:
             self.detection_worker.submit(frame, packet.captured_at, self.frame_number)
         if self.detection_worker.error is not None:
             raise self.detection_worker.error
@@ -501,6 +522,15 @@ class Pipeline:
             ran_detection,
             det_captured_at if ran_detection else self._clock(),
         )
+        if ran_detection and self._detect_wake is not None:
+            self._detect_wake.on_detection(
+                self.tracker.corners,
+                frame,
+                det_captured_at,
+                hand_mask=self._hand_mask_det,
+                missed=self.tracker.missed,
+                has_pending=self.tracker.has_pending,
+            )
         if ran_detection:
             tracker_after = self.tracker.diagnostic_state()
             for trace in self.detection_worker.take_traces(self.last_det_seq):
