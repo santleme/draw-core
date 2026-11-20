@@ -404,14 +404,21 @@ class InkStreamPublisher:
                     self._last_captured_us = self._last_anchor = None
                 self._last_shape = mask.shape
                 version = publication.version
-                if captured_at_us is None:
-                    captured_at_us = self._last_captured_us
-                else:
+                if publication.full:
+                    # Descontinuidade (ex.: a trabalhadora zerou a ancora na
+                    # recuperacao de identidade): vale o que a publicacao traz,
+                    # mesmo None — herdar aqui carregaria a ancora velha.
                     self._last_captured_us = captured_at_us
-                if anchor is None:
-                    anchor = self._last_anchor
-                else:
                     self._last_anchor = anchor
+                else:
+                    if captured_at_us is None:
+                        captured_at_us = self._last_captured_us
+                    else:
+                        self._last_captured_us = captured_at_us
+                    if anchor is None:
+                        anchor = self._last_anchor
+                    else:
+                        self._last_anchor = anchor
             self._pending = (
                 self._stream_generation,
                 int(version),

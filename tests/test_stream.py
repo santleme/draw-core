@@ -724,6 +724,9 @@ def test_late_consumer_keeps_anchor_after_a_provisional_only_update():
         canvas = stream.InkCanvas()
         _read_until(sock, canvas, 7)
         sock.close()
+        assert (
+            canvas.ink_version == 8
+        )  # o FULL tardio sai do ultimo estado (sem metadados)
         assert canvas.captured_at_us == 4_500_000
         assert np.allclose(canvas.anchor_corners, _QUAD)
         # outra geracao nao herda a ancora da anterior
@@ -733,6 +736,32 @@ def test_late_consumer_keeps_anchor_after_a_provisional_only_update():
         canvas = stream.InkCanvas()
         _read_until(sock, canvas, 1)
         sock.close()
+        assert canvas.anchor_corners is None and canvas.captured_at_us is None
+    finally:
+        pub.close()
+
+
+def test_full_discontinuity_does_not_inherit_the_old_anchor():
+    # Review #64: a recuperacao de identidade zera a ancora da trabalhadora sem
+    # mudar a geracao; o FULL do reset nao pode carregar a ancora velha.
+    pub = stream.InkStreamPublisher(port=0, token=TOKEN, log=lambda *_: None)
+    try:
+        a = _mask()
+        a[1:3, 1:3] = 255
+        pub.publish(
+            contracts.InkPublication(
+                3, 7, a, captured_at=4.5, anchor_corners=_QUAD, full=True
+            )
+        )
+        b = a.copy()
+        b[10:12, 10:12] = 255
+        pub.publish(contracts.InkPublication(3, 8, b, full=True))  # sem ancora agora
+        time.sleep(0.15)
+        sock = _connect(pub.port)
+        canvas = stream.InkCanvas()
+        _read_until(sock, canvas, 8)
+        sock.close()
+        assert canvas.ink_version == 8
         assert canvas.anchor_corners is None and canvas.captured_at_us is None
     finally:
         pub.close()
