@@ -1079,22 +1079,23 @@ def test_polyline_rect_overlap_matches_scalar_reference():
 
 def test_static_warp_cache_is_byte_identical_across_static_and_optic_phases():
     kwargs = dict(
-        fps=4,
-        stroke_seconds=0.25,
+        fps=8,
+        stroke_seconds=0.375,
         warmup_seconds=0.5,
         settle_seconds=0.5,
         hold_seconds=0.5,
         erase_stroke=-1,
         redraw_text="c",
         erase_seconds=0.25,
-        move=(20, 10, 4),
-        move_seconds=0.25,
+        move=(40, -25, 10),
+        move_seconds=0.375,
         lift=(300, 200),
         return_pose=(-20, 15, 10),
         absent_seconds=0.5,
         lift_seconds=0.25,
         return_seconds=0.25,
         rest_hand_seconds=0.5,
+        motion_blur=True,
         ink_sheen=0.5,
         page_curl=0.4,
     )
@@ -1111,3 +1112,4 @@ def test_static_warp_cache_is_byte_identical_across_static_and_optic_phases():
         for key in ("rgb", "mask", "ink_full"):
             assert np.array_equal(cached.last_scene[key], uncached.last_scene[key])
         assert np.array_equal(cached.page_to_scene, uncached.page_to_scene)
+    assert cached._static_cache is not None

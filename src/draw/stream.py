@@ -15,6 +15,7 @@ handshake de token do PROTOCOL.md.
 
 import os
 import select
+import selectors
 import socket
 import struct
 import threading
@@ -326,6 +327,8 @@ class InkStreamPublisher:
                 self.port = self._server.getsockname()[1]
                 self._server.setblocking(False)
                 self._wake_r, self._wake_w = socket.socketpair()
+                self._wake_w.setblocking(False)
+                self._wake_r.setblocking(False)
                 threads.append(
                     threading.Thread(
                         target=self._accept_loop, name="ink-stream-accept", daemon=True
@@ -444,7 +447,7 @@ class InkStreamPublisher:
         with self._wake_lock:
             if not self._wake_closed and self._wake_w is not None:
                 try:
-                    self._wake_w.sendall(b"\x00")
+                    self._wake_w.send(b"\x00")
                 except OSError:
                     pass
         for thread in self._threads:
@@ -465,30 +468,42 @@ class InkStreamPublisher:
             _safe_close(sink, self._log)
 
     def _accept_loop(self):
-        while not self._closed:
+        with selectors.DefaultSelector() as sel:
             try:
-                readable, _, _ = select.select(
-                    [self._server, self._wake_r], [], [], 0.5
-                )
-            except (OSError, ValueError):
+                sel.register(self._server, selectors.EVENT_READ)
+                sel.register(self._wake_r, selectors.EVENT_READ)
+            except (OSError, ValueError) as exc:
+                if not self._closed:
+                    self._log(f"ink-stream accept encerrado: {exc}")
                 return
-            if self._closed or self._wake_r in readable:
-                return
-            if self._server not in readable:
-                continue
-            try:
-                conn, _addr = self._server.accept()
-            except BlockingIOError:
-                continue
-            except OSError:
-                return
-            conn.setblocking(True)
-            if not self._handshakes.acquire(blocking=False):
-                conn.close()  # handshakes demais em aberto: recusa sem thread
-                continue
-            threading.Thread(
-                target=self._adopt, args=(conn,), name="ink-stream-hello", daemon=True
-            ).start()
+            while not self._closed:
+                try:
+                    events = sel.select(timeout=0.5)
+                except (OSError, ValueError) as exc:
+                    if not self._closed:
+                        self._log(f"ink-stream accept encerrado: {exc}")
+                    return
+                ready = {key.fileobj for key, _ in events}
+                if self._closed or self._wake_r in ready:
+                    return
+                if self._server not in ready:
+                    continue
+                try:
+                    conn, _addr = self._server.accept()
+                except BlockingIOError:
+                    continue
+                except OSError:
+                    return
+                conn.setblocking(True)
+                if not self._handshakes.acquire(blocking=False):
+                    conn.close()  # handshakes demais em aberto: recusa sem thread
+                    continue
+                threading.Thread(
+                    target=self._adopt,
+                    args=(conn,),
+                    name="ink-stream-hello",
+                    daemon=True,
+                ).start()
 
     def _adopt(self, conn):
         # Handshake em thread própria: cliente lento não trava o accept.

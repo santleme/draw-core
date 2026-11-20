@@ -51,7 +51,7 @@ import ipaddress
 import os
 import queue
 import secrets
-import select
+import selectors
 import socket
 import struct
 import sys
@@ -551,13 +551,15 @@ def _accept_loop(
     wake_closed = False
     if stop is not None:
         wake_r, wake_w = socket.socketpair()
+        wake_w.setblocking(False)
+        wake_r.setblocking(False)
 
         def _watch():
             stop.wait()
             with wake_lock:
                 if not wake_closed:
                     try:
-                        wake_w.sendall(b"\x00")
+                        wake_w.send(b"\x00")
                     except OSError:
                         pass
 
@@ -573,55 +575,64 @@ def _accept_loop(
                 except OSError:
                     pass
             raise
-        watch_list = [server, wake_r]
-    else:
-        watch_list = [server]
     try:
-        while True:
-            if stop is not None and stop.is_set():
-                return
+        with selectors.DefaultSelector() as sel:
             try:
-                readable, _, _ = select.select(watch_list, [], [], 0.5)
-            except (OSError, ValueError):
+                sel.register(server, selectors.EVENT_READ)
+                if wake_r is not None:
+                    sel.register(wake_r, selectors.EVENT_READ)
+            except (OSError, ValueError) as exc:
+                if stop is None or not stop.is_set():
+                    log(f"Accept interrompido: {exc}")
                 return
-            if stop is not None and (stop.is_set() or wake_r in readable):
-                return
-            if server not in readable:
-                continue
-            try:
-                conn, addr = server.accept()
-            except BlockingIOError:
-                continue
-            except OSError:
-                return
-            # No Windows (Winsock), socket aceito herda modo nao-bloqueante.
-            conn.setblocking(True)
-            if not authenticate_client(conn, token):
-                log(f"Conexao de {addr[0]} recusada: handshake/token invalido.")
-                conn.close()
-                continue
-            frames = None
-            try:
-                # Dentro do try de proposito: uma factory eagerciada que
-                # levanta CaptureError/OSError ao abrir a camera precisa
-                # cair na mesma recuperacao das falhas de iteracao —
-                # so a sessao morre, o helper volta ao accept.
-                frames = make_frames()
-                sent = _handle_client(conn, frames, start_ns, clock)
-                log(f"Cliente {addr[0]} desconectou apos {sent} frames.")
-            except CaptureError as exc:
-                log(f"Captura falhou para {addr[0]} ({exc}); voltando a escutar.")
-            except (OSError, ConnectionError):
-                log(f"Conexao com {addr[0]} caiu; voltando a escutar.")
-            finally:
-                # Sem isso, um OSError no sendall abandonava o gerador de
-                # captura — o finally dele (stop da thread produtora +
-                # release do VideoCapture) so rodava no GC, e a camera
-                # podia ficar refem ate la.
-                close = getattr(frames, "close", None)
-                if close is not None:
-                    close()
-                conn.close()
+            while True:
+                if stop is not None and stop.is_set():
+                    return
+                try:
+                    events = sel.select(timeout=0.5)
+                except (OSError, ValueError) as exc:
+                    if stop is None or not stop.is_set():
+                        log(f"Accept interrompido: {exc}")
+                    return
+                ready = {key.fileobj for key, _ in events}
+                if stop is not None and (stop.is_set() or wake_r in ready):
+                    return
+                if server not in ready:
+                    continue
+                try:
+                    conn, addr = server.accept()
+                except BlockingIOError:
+                    continue
+                except OSError:
+                    return
+                # No Windows (Winsock), socket aceito herda modo nao-bloqueante.
+                conn.setblocking(True)
+                if not authenticate_client(conn, token):
+                    log(f"Conexao de {addr[0]} recusada: handshake/token invalido.")
+                    conn.close()
+                    continue
+                frames = None
+                try:
+                    # Dentro do try de proposito: uma factory eagerciada que
+                    # levanta CaptureError/OSError ao abrir a camera precisa
+                    # cair na mesma recuperacao das falhas de iteracao —
+                    # so a sessao morre, o helper volta ao accept.
+                    frames = make_frames()
+                    sent = _handle_client(conn, frames, start_ns, clock)
+                    log(f"Cliente {addr[0]} desconectou apos {sent} frames.")
+                except CaptureError as exc:
+                    log(f"Captura falhou para {addr[0]} ({exc}); voltando a escutar.")
+                except (OSError, ConnectionError):
+                    log(f"Conexao com {addr[0]} caiu; voltando a escutar.")
+                finally:
+                    # Sem isso, um OSError no sendall abandonava o gerador de
+                    # captura — o finally dele (stop da thread produtora +
+                    # release do VideoCapture) so rodava no GC, e a camera
+                    # podia ficar refem ate la.
+                    close = getattr(frames, "close", None)
+                    if close is not None:
+                        close()
+                    conn.close()
     finally:
         try:
             server.settimeout(prev_timeout)

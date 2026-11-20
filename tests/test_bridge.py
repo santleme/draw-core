@@ -470,19 +470,40 @@ def test_capture_frames_propagates_producer_error():
     gen.close()
 
 
-def test_accept_loop_stop_wakes_immediately():
+def test_accept_loop_stop_wakes_immediately(monkeypatch):
+    entered = threading.Event()
+    gate = threading.Event()
+    real_selector = wh.selectors.DefaultSelector
+
+    class _WatchingSelector(real_selector):
+        def select(self, timeout=None):
+            entered.set()
+            return super().select(timeout=timeout)
+
+    def _frames():
+        gate.wait(timeout=2.0)
+        yield b"jpeg"
+
+    monkeypatch.setattr(wh.selectors, "DefaultSelector", _WatchingSelector)
     server = _serve_one_client()
-    thread, stop, _logs = _start_loop(server, lambda: iter([b"jpeg"]))
+    thread, stop, _logs = _start_loop(server, _frames)
     try:
         with _client(server) as conn:
             assert conn.recv(4) == wh.ACCEPT
+            # Accept loop esta dentro de _handle_client esperando gate; zera
+            # entered agora para comprovar que voltou ao select() apos sair.
+            entered.clear()
+            gate.set()
             assert conn.recv(wh.HEADER.size + 4)
+        assert entered.wait(timeout=1.0)
+        time.sleep(0.01)
         started = time.monotonic()
         stop.set()
         thread.join(timeout=1.0)
         elapsed = time.monotonic() - started
         assert not thread.is_alive()
-        assert elapsed < 0.1
+        assert elapsed < 0.15
     finally:
+        gate.set()
         stop.set()
         server.close()

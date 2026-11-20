@@ -304,9 +304,11 @@ def test_missing_model_never_imports_mediapipe(tmp_path, monkeypatch):
         hand_module, "_DEFAULT_CANDIDATES", (str(tmp_path / "ausente.task"),)
     )
     real_import = builtins.__import__
+    attempted = []
 
     def guarded_import(name, *args, **kwargs):
         if name == "mediapipe" or name.startswith("mediapipe."):
+            attempted.append(name)
             raise AssertionError("nao deveria importar mediapipe sem arquivo de modelo")
         return real_import(name, *args, **kwargs)
 
@@ -315,3 +317,4 @@ def test_missing_model_never_imports_mediapipe(tmp_path, monkeypatch):
     frame = np.zeros((20, 30, 3), dtype=np.uint8)
     assert masker.mask(frame) is None
     assert masker.presence_signature(frame, timestamp_ms=1000) is None
+    assert attempted == []
