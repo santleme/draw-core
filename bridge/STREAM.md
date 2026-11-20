@@ -86,7 +86,10 @@ Cabeçalho fixo de **32 bytes**, little-endian, `struct.Struct("<4sHBBIIqHHI")`:
   captura -> publicação por `ts_us - captured_at_us`. É o carimbo do quadro da última passada que
   publicou tinta confirmada (inclusive a primeira, de página em branco); uma atualização só do
   provisório herda o último carimbo e a última âncora da geração, para o FULL de um consumidor
-  tardio não perdê-los. `-1`/NaN só até o primeiro dado conhecido da geração. O Draw só pede os
+  tardio não perdê-los. `-1`/NaN só até o primeiro dado conhecido da geração. Exceção: uma
+  publicação `full` (descontinuidade) vale pelo que traz, mesmo sem âncora — a recuperação de
+  identidade zera a âncora sem mudar a geração, e o FULL seguinte sai com NaN em vez de herdar a
+  velha (o consumidor trata NaN como "âncora desconhecida" e mantém só a escala da folha). O Draw só pede os
   metadados do `InkDelta` quando há stream (opt-in); se o delta não ficar pronto em ~5 ms (janela de
   ~1 ms entre publicar e registrar), a publicação sai sem carimbo novo (herda o anterior).
 - Compatibilidade: o escritor só emite v2. Um consumidor v1 conectado ao vivo precisa atualizar

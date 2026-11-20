@@ -710,6 +710,7 @@ def test_late_consumer_keeps_anchor_after_a_provisional_only_update():
     # Review #64: a atualizacao so do provisorio chega sem metadados e nao pode
     # apagar a ancora/captura que o FULL de um consumidor tardio precisa.
     pub = stream.InkStreamPublisher(port=0, token=TOKEN, log=lambda *_: None)
+    calls = _count_dispatches(pub)
     try:
         a = _mask()
         a[1:3, 1:3] = 255
@@ -718,8 +719,9 @@ def test_late_consumer_keeps_anchor_after_a_provisional_only_update():
                 3, 7, a, captured_at=4.5, anchor_corners=_QUAD, full=True
             )
         )
+        _wait_dispatches(calls, 1)
         pub.publish(contracts.InkPublication(3, 8, a))  # sem metadados
-        time.sleep(0.15)
+        _wait_dispatches(calls, 2)
         sock = _connect(pub.port)
         canvas = stream.InkCanvas()
         _read_until(sock, canvas, 7)
@@ -731,7 +733,7 @@ def test_late_consumer_keeps_anchor_after_a_provisional_only_update():
         assert np.allclose(canvas.anchor_corners, _QUAD)
         # outra geracao nao herda a ancora da anterior
         pub.publish(contracts.InkPublication(4, 1, a))
-        time.sleep(0.15)
+        _wait_dispatches(calls, 3)
         sock = _connect(pub.port)
         canvas = stream.InkCanvas()
         _read_until(sock, canvas, 1)
@@ -745,6 +747,7 @@ def test_full_discontinuity_does_not_inherit_the_old_anchor():
     # Review #64: a recuperacao de identidade zera a ancora da trabalhadora sem
     # mudar a geracao; o FULL do reset nao pode carregar a ancora velha.
     pub = stream.InkStreamPublisher(port=0, token=TOKEN, log=lambda *_: None)
+    calls = _count_dispatches(pub)
     try:
         a = _mask()
         a[1:3, 1:3] = 255
@@ -753,10 +756,11 @@ def test_full_discontinuity_does_not_inherit_the_old_anchor():
                 3, 7, a, captured_at=4.5, anchor_corners=_QUAD, full=True
             )
         )
+        _wait_dispatches(calls, 1)
         b = a.copy()
         b[10:12, 10:12] = 255
         pub.publish(contracts.InkPublication(3, 8, b, full=True))  # sem ancora agora
-        time.sleep(0.15)
+        _wait_dispatches(calls, 2)
         sock = _connect(pub.port)
         canvas = stream.InkCanvas()
         _read_until(sock, canvas, 8)
