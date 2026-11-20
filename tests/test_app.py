@@ -189,6 +189,29 @@ def test_check_models_baixa_modelo_ausente_e_valida(monkeypatch, tmp_path, capsy
     assert "PASS: page_clean_unet.onnx confere com o manifesto" in out
 
 
+def test_provision_official_models_isolates_failures_and_handles_explicit_official_paths(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(manifest_module, "DEFAULT_MODELS_DIR", tmp_path)
+    requested = []
+
+    def fake_ensure(names):
+        requested.extend(names)
+        if names == ["draw_seg_v3_dyn.onnx"]:
+            raise RuntimeError("falha no sheet")
+        return []
+
+    monkeypatch.setattr(manifest_module, "ensure_models", fake_ensure)
+    explicit_official_ink = str(tmp_path / "page_clean_unet.onnx")
+    custom_hand = str(tmp_path / "outro_dir" / "hand_landmarker.task")
+    app_module._provision_official_models(
+        neural_model=None,
+        page_clean_model=explicit_official_ink,
+        hand_model=custom_hand,
+    )
+    assert requested == ["page_clean_unet.onnx", "draw_seg_v3_dyn.onnx"]
+
+
 def test_check_models_falha_em_limiar_invalido(monkeypatch, tmp_path, capsys):
     """Binário confere mas runtime_threshold quebrado: FAIL, não PASS."""
     model = tmp_path / "page_clean_unet.onnx"

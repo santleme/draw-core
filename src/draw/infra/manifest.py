@@ -275,14 +275,20 @@ def _manifest_release_url(manifest_path):
     return DEFAULT_RELEASE_URL
 
 
-def _validate_download_target(models_dir, name):
-    """Garante que a chave do manifesto não escapa da pasta de modelos."""
-    folder = Path(models_dir).resolve()
+def _validate_lexical_name(name):
+    """Rejeita nomes absolutos ou com '..' antes de qualquer acesso a disco."""
     rel = Path(name)
-    if rel.is_absolute() or ".." in rel.parts:
+    if not str(name).strip() or rel.is_absolute() or ".." in rel.parts:
         raise RuntimeError(
             f"nome de modelo inválido no manifesto para download: {name!r}"
         )
+    return rel
+
+
+def _validate_download_target(models_dir, name):
+    """Garante que o destino de escrita não escapa da pasta de modelos."""
+    rel = _validate_lexical_name(name)
+    folder = Path(models_dir).resolve()
     target = (folder / rel).resolve()
     try:
         target.relative_to(folder)
@@ -331,15 +337,17 @@ def download_model(
     asset_name = Path(name).name
     url = f"{base_url}/{urllib.parse.quote(asset_name)}"
     opener = urllib.request.urlopen if urlopen is None else urlopen
-    target.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(
-        prefix=f".{target.name}.", suffix=".part", dir=str(target.parent)
-    )
-    tmp_path = Path(tmp_name)
+    fd = None
+    tmp_path = None
     digest = hashlib.sha256()
     total = 0
     try:
         try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp_name = tempfile.mkstemp(
+                prefix=f".{target.name}.", suffix=".part", dir=str(target.parent)
+            )
+            tmp_path = Path(tmp_name)
             request = urllib.request.Request(
                 url, headers={"User-Agent": "draw-core/0.1"}
             )
@@ -370,14 +378,19 @@ def download_model(
             raise RuntimeError(
                 f"sha256 divergente no download de {name}: {actual_sha} != {expected_sha}"
             )
-        os.replace(tmp_path, target)
+        try:
+            os.replace(tmp_path, target)
+        except OSError as error:
+            raise RuntimeError(
+                f"falha ao publicar {name} em {target}: {error}"
+            ) from error
     finally:
         if fd is not None:
             try:
                 os.close(fd)
             except OSError:
                 pass
-        if tmp_path.exists():
+        if tmp_path is not None and tmp_path.exists():
             try:
                 tmp_path.unlink()
             except OSError:
@@ -396,9 +409,10 @@ def ensure_models(
     """Garante que os modelos registrados em assets/manifest.json estão em models/.
 
     Só baixa o que está AUSente em `models_dir`; arquivos já presentes em
-    disco não são sobrescritos (a verificação subsequente decide se
-    conferem ou se falham no modo estrito). Devolve a lista de Paths
-    baixados nesta chamada.
+    disco (inclusive symlinks válidos para um cache externo) não são
+    sobrescritos (a verificação subsequente decide se conferem ou se
+    falham no modo estrito). Devolve a lista de Paths baixados nesta
+    chamada.
     """
     resolved_manifest, models = load_manifest(manifest_path)
     if not models:
@@ -411,9 +425,11 @@ def ensure_models(
         entry = models.get(name)
         if entry is None:
             continue
-        target = _validate_download_target(folder, name)
-        if target.exists():
+        rel = _validate_lexical_name(name)
+        lexical_target = folder / rel
+        if lexical_target.exists():
             continue
+        target = _validate_download_target(folder, name)
         print(
             f"Baixando {name} ({entry.get('bytes', '?')} bytes) da Release oficial..."
         )

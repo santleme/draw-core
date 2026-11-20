@@ -401,3 +401,70 @@ def test_ensure_models_downloads_only_missing_files(tmp_path):
     assert len(calls) == 1
     assert (tmp_path / "models" / "novo.onnx").read_bytes() == missing_payload
     assert existing.read_bytes() == b"ja-existe"
+
+
+def test_ensure_models_accepts_existing_external_symlink_without_rejecting(tmp_path):
+    cache_dir = tmp_path / "external_cache"
+    external_sheet = _model(cache_dir, "draw_seg_v3_dyn.onnx", b"sheet-weights")
+    models_dir = tmp_path / "models"
+    models_dir.mkdir(parents=True, exist_ok=True)
+    (models_dir / "draw_seg_v3_dyn.onnx").symlink_to(external_sheet)
+
+    ink_payload = b"ink-weights"
+    manifest_path = _write_manifest(
+        tmp_path,
+        {
+            "draw_seg_v3_dyn.onnx": _entry(external_sheet),
+            "page_clean_unet.onnx": {
+                "sha256": hashlib.sha256(ink_payload).hexdigest(),
+                "bytes": len(ink_payload),
+            },
+        },
+    )
+
+    downloaded = manifest.ensure_models(
+        models_dir=models_dir,
+        manifest_path=manifest_path,
+        urlopen=lambda req, timeout=None: _FakeHttpResponse(ink_payload),
+    )
+    assert [p.name for p in downloaded] == ["page_clean_unet.onnx"]
+    assert (models_dir / "page_clean_unet.onnx").read_bytes() == ink_payload
+
+
+def test_download_model_translates_mkstemp_and_replace_oserror_to_runtime_error(
+    tmp_path, monkeypatch
+):
+    payload = b"pesos"
+    entry = {
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "bytes": len(payload),
+    }
+
+    def boom_mkstemp(*a, **kw):
+        raise PermissionError("read-only filesystem")
+
+    monkeypatch.setattr(manifest.tempfile, "mkstemp", boom_mkstemp)
+    with pytest.raises(RuntimeError, match="read-only filesystem") as exc_info:
+        manifest.download_model(
+            "hand_landmarker.task",
+            entry,
+            models_dir=tmp_path,
+            urlopen=lambda req, timeout=None: _FakeHttpResponse(payload),
+        )
+    assert isinstance(exc_info.value.__cause__, PermissionError)
+
+    monkeypatch.undo()
+
+    def boom_replace(src, dst):
+        raise PermissionError("cannot replace target")
+
+    monkeypatch.setattr(manifest.os, "replace", boom_replace)
+    with pytest.raises(RuntimeError, match="cannot replace target") as exc_info2:
+        manifest.download_model(
+            "hand_landmarker.task",
+            entry,
+            models_dir=tmp_path,
+            urlopen=lambda req, timeout=None: _FakeHttpResponse(payload),
+        )
+    assert isinstance(exc_info2.value.__cause__, PermissionError)
+    assert list(tmp_path.iterdir()) == []

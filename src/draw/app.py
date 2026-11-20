@@ -1116,6 +1116,37 @@ def _ignore_ink(_publication):
     pass
 
 
+def _is_official_model_target(requested, official_name):
+    """True quando `requested` e None ou aponta para models/<official_name>."""
+    if requested is None:
+        return True
+    official = manifest_module.DEFAULT_MODELS_DIR / official_name
+    req_path = Path(requested)
+    try:
+        return os.path.abspath(req_path) == os.path.abspath(official)
+    except OSError:
+        return False
+
+
+def _provision_official_models(neural_model, page_clean_model, hand_model):
+    """Baixa individualmente cada modelo oficial ausente pedido pela sessao.
+
+    Falha no download de um modelo opcional (ex.: folha ou mao) nao aborta
+    a tentativa de baixar o modelo obrigatorio de tinta (`page_clean_unet.onnx`).
+    """
+    for requested, official_name in (
+        (page_clean_model, "page_clean_unet.onnx"),
+        (neural_model, "draw_seg_v3_dyn.onnx"),
+        (hand_model, "hand_landmarker.task"),
+    ):
+        if not _is_official_model_target(requested, official_name):
+            continue
+        try:
+            manifest_module.ensure_models([official_name])
+        except RuntimeError as error:
+            print(f"Aviso: download automatico de {official_name} falhou ({error}).")
+
+
 def run(
     source=0,
     save_dir="captures",
@@ -1150,18 +1181,7 @@ def run(
     ink_stream = None
     try:
         if not markers_mode:
-            wanted_defaults = []
-            if neural_model is None:
-                wanted_defaults.append("draw_seg_v3_dyn.onnx")
-            if page_clean_model is None:
-                wanted_defaults.append("page_clean_unet.onnx")
-            if hand_model is None:
-                wanted_defaults.append("hand_landmarker.task")
-            if wanted_defaults:
-                try:
-                    manifest_module.ensure_models(wanted_defaults)
-                except RuntimeError as error:
-                    print(f"Aviso: download automatico de modelos falhou ({error}).")
+            _provision_official_models(neural_model, page_clean_model, hand_model)
         neural_detector = None
         if neural_model is None and not markers_mode and _DEFAULT_SHEET_MODEL.exists():
             neural_model = str(_DEFAULT_SHEET_MODEL)
