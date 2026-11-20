@@ -9,7 +9,7 @@ import numpy as np
 
 from .. import config as paper_config
 from ..contracts import InkDelta, InkDisplaySnapshot, InkSnapshot
-from . import accumulator, identity, registration, ruling
+from . import accumulator, identity, motion, registration, ruling
 from . import anchor as anchor_mod
 from .config import InkConfig
 
@@ -198,6 +198,19 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         # Filtro de pauta (InkConfig.ruling_removal, opt-in): modelo em cache
         # por folha; zerado quando a geracao vira (outra folha, outro quad).
         self._ruling = ruling.RulingFilter() if self._config.ruling_removal else None
+        # Veto por movimento residual (InkConfig.motion_veto, opt-in):
+        # ver draw.ink.motion.
+        self._motion = (
+            motion.MotionGate(
+                self._config.motion_veto_px, self._config.motion_settle_passes
+            )
+            if self._config.motion_veto
+            else None
+        )
+        self._motion_generation = None
+        self._motion_vetoes_total = 0
+        self._motion_corrections_total = 0
+        self._motion_fail_open_total = 0
         self._ruling_generation = None
         # Relogio monotonico injetavel: o padrao e o do processo;
         # replays com pump() passam o relogio da cena.
@@ -1061,6 +1074,52 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 (None if registration_corners is None else registration_corners.copy()),
                 None if corners is None else corners.copy(),
             )
+            motion_decision = None
+            if (
+                self._motion is not None
+                and not recovering
+                and anchor is not None
+                and registration_corners is not None
+            ):
+                # Estado do portao so nesta thread: geracao nova zera
+                # a referencia aqui, nao em new_generation (outra
+                # thread, no meio de uma medida).
+                if self._motion_generation != generation:
+                    self._motion.reset()
+                    self._motion_generation = generation
+                motion_matrix = registration._registration_matrix(
+                    anchor, registration_corners, prob.shape
+                )
+                if registration._registration_is_identity(motion_matrix):
+                    motion_matrix = None
+                motion_shift = self._motion.measure(
+                    warped, motion_matrix, visible, anchor
+                )
+                motion_decision, motion_undo = self._motion.decide(motion_shift)
+                reg_info["motion_residual_px"] = (
+                    None
+                    if motion_shift is None
+                    else float(np.hypot(motion_shift[0], motion_shift[1]))
+                )
+                reg_info["motion_half_max_px"] = (
+                    None if motion_shift is None else float(motion_shift[2])
+                )
+                reg_info["motion_decision"] = motion_decision
+                if motion_decision == "correct":
+                    # Folha parada fora do lugar: a evidencia volta
+                    # para a grade da ancora pela translacao medida.
+                    dx, dy = motion_undo
+                    registered_prob = motion.translate(registered_prob, -dx, -dy)
+                    if registered_visible is not None:
+                        registered_visible = (
+                            motion.translate(
+                                registered_visible.astype(np.uint8),
+                                -dx,
+                                -dy,
+                                nearest=True,
+                            )
+                            > 0
+                        )
             if coverage is not None and coverage.shape == prob.shape:
                 # Gate de re-confirmacao (cobertura de folha do loop): onde
                 # o warp nao e folha, so a tinta que a ancora JA
@@ -1461,11 +1520,21 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             else:
                 prob = registered_prob
                 visible = registered_visible
+            # Veto de movimento so vale na passada registrada: a 1a
+            # passada e a de identidade votam na propria geometria.
+            motion_abstain = motion_decision == "veto" and prob is registered_prob
+            if motion_abstain:
+                self._motion_vetoes_total += 1
+            elif motion_decision == "correct" and prob is registered_prob:
+                self._motion_corrections_total += 1
+            elif motion_decision == "fail_open" and prob is registered_prob:
+                self._motion_fail_open_total += 1
             pass_voted = not (
                 identity_switch_pending
                 or (identity_deferred and identity_timed_out)
                 or arbitration_abstain
                 or follow_abstain
+                or motion_abstain
             )
             if identity_switch_pending or (identity_deferred and identity_timed_out):
                 visible = np.zeros(prob.shape, dtype=bool)
@@ -1479,6 +1548,10 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 # na ancora velha, ela depositaria a copia
                 # deslocada que a re-ancoragem existe para
                 # nao fabricar.
+                visible = np.zeros(prob.shape, dtype=bool)
+            if motion_abstain:
+                # A folha anda sob um quad parado: registrada, esta
+                # passada carimbaria a copia deslocada da tinta.
                 visible = np.zeros(prob.shape, dtype=bool)
             if not pass_voted:
                 # Passada abstida nao deposita: o registro fica
@@ -1626,6 +1699,9 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 "canvas_px": self._confirmed_px,
                 "provisional_px": self._provisional_px,
                 "retracted_px_total": self._retracted_px_total,
+                "motion_vetoes_total": self._motion_vetoes_total,
+                "motion_corrections_total": self._motion_corrections_total,
+                "motion_fail_open_total": self._motion_fail_open_total,
                 "worker_mode": (
                     "rest"
                     if self._at_rest()
