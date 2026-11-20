@@ -85,6 +85,14 @@ class InkConfig:
     # (medido so em replay).
     motion_veto: bool = False
     motion_veto_px: float = 1.0
+    # Intervalo minimo entre inicios de passada da tinta com mao ativa
+    # (s). None = o piso de draw.ink.worker._PAGE_CLEAN_INTERVAL_SECONDS
+    # (0,25 s). Simulado em 2026-11-20 (Ryzen 7700X, draw_seg a 6 Hz em
+    # quadros reais, tinta INT8 de pagina inteira em 4 threads, sem a mao
+    # do MediaPipe): 0,25 s -> 4,0 passadas/s em 2,3 nucleos; 0,15 s ->
+    # 6,7/s em 3,1; 0,10 s -> 9,9/s em 4,3 (o fp32 em mosaico de hoje, a
+    # 0,25 s: 3,9/s em 4,9). Opt-in ate a validacao ao vivo com a mao.
+    pass_interval_s: float | None = None
 
     def __post_init__(self):
         if not 0.0 < self.t_low < self.t_high <= 1.0:
@@ -96,6 +104,10 @@ class InkConfig:
             raise ValueError("provisional_min_px deve ser >= 1")
         if not self.motion_veto_px > 0.0:
             raise ValueError("motion_veto_px deve ser > 0")
+        if self.pass_interval_s is not None and not 0.0 < self.pass_interval_s <= 5.0:
+            raise ValueError(
+                f"pass_interval_s fora de (0, 5] s: {self.pass_interval_s!r}"
+            )
 
     @classmethod
     def strict_vote(cls, level, **overrides):

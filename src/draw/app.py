@@ -1836,6 +1836,17 @@ def main():
         ),
     )
     parser.add_argument(
+        "--ink-interval",
+        type=float,
+        default=None,
+        metavar="SEGUNDOS",
+        help=(
+            "intervalo minimo entre passadas da tinta com a mao ativa "
+            "(InkConfig.pass_interval_s; padrao 0,25). Com o page_clean INT8, "
+            "0,15 mediu 6,7 passadas/s em ~3 nucleos (simulado, sem a mao)"
+        ),
+    )
+    parser.add_argument(
         "--ink-ruling",
         action="store_true",
         help=(
@@ -1894,6 +1905,17 @@ def main():
             )
         try:
             ink_config = InkConfig.strict_vote(args.ink_vote)
+        except ValueError as error:
+            parser.error(str(error))
+    if args.ink_interval is not None:
+        if args.markers:
+            parser.error(
+                "--ink-interval nao combina com --markers (sem tinta no modo marcadores)"
+            )
+        try:
+            ink_config = dataclasses.replace(
+                ink_config, pass_interval_s=args.ink_interval
+            )
         except ValueError as error:
             parser.error(str(error))
     if args.ink_ruling:

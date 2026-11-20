@@ -586,6 +586,8 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             and self._still_passes >= _NO_HAND_REST_AFTER_STILL_PASSES
         ):
             return _IDLE_PROBE_SECONDS
+        if self._config.pass_interval_s is not None:
+            return self._config.pass_interval_s
         return _PAGE_CLEAN_INTERVAL_SECONDS
 
     def telemetry_snapshot(self):
