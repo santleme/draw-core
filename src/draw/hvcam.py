@@ -23,6 +23,9 @@ LatestFrameCapture usa na telemetria.
 import ctypes
 import errno
 import os
+import selectors
+import socket
+import time
 from urllib.parse import urlparse
 
 import cv2
@@ -33,7 +36,11 @@ import numpy as np
 DEFAULT_PORT = 8765
 
 _TIMEOUT_MS = 1000
+_LISTEN_TIMEOUT_MS = 5000
 _MAX_PAYLOAD = 64 * 1024 * 1024
+# Portas AF_VSOCK sao uint32; 0xFFFFFFFF e VMADDR_PORT_ANY (reservado).
+_VSOCK_PORT_MAX = 0xFFFFFFFF - 1
+_TCP_PORT_MAX = 65535
 
 
 class HvFrameHeader(ctypes.Structure):
@@ -51,25 +58,17 @@ class HvFrameHeader(ctypes.Structure):
     ]
 
 
-def _load():
+def _candidates():
     here = os.path.dirname(os.path.abspath(__file__))
-    for cand in (
+    return (
         os.path.join(here, "libhvcam.so"),
         os.path.join(here, "..", "..", "build", "libhvcam.so"),
-        os.path.expanduser("~/hvcam/build/libhvcam.so"),
+        os.path.join(here, "..", "..", "..", "hvcam", "build", "libhvcam.so"),
         "libhvcam.so",
-    ):
-        try:
-            lib = ctypes.CDLL(cand)
-            break
-        except OSError:
-            continue
-    else:
-        raise OSError(
-            "libhvcam.so nao encontrada — ela vem do build do "
-            "santleme/hvcam (cmake --build build); exporte "
-            "LD_LIBRARY_PATH apontando para o diretorio dela"
-        )
+    )
+
+
+def _configure_lib(lib):
     lib.hvcam_connect.argtypes = [ctypes.c_uint32]
     lib.hvcam_connect.restype = ctypes.c_int
     # Older builds can still use direct vsock/TCP. Reverse mode needs the
@@ -94,15 +93,108 @@ def _load():
     return lib
 
 
+def _load(require_listen=False):
+    saw_legacy = False
+    for cand in _candidates():
+        try:
+            lib = ctypes.CDLL(cand)
+        except OSError:
+            continue
+        _configure_lib(lib)
+        if require_listen and getattr(lib, "hvcam_listen", None) is None:
+            saw_legacy = True
+            continue
+        return lib
+    if saw_legacy:
+        raise OSError(
+            "libhvcam.so sem hvcam_listen; reconstrua a biblioteca "
+            "com a versao atual de santleme/hvcam"
+        )
+    raise OSError(
+        "libhvcam.so nao encontrada — ela vem do build do "
+        "santleme/hvcam (cmake --build build); exporte "
+        "LD_LIBRARY_PATH apontando para o diretorio dela"
+    )
+
+
 _LIB = None
 
 
-def _lib():
-    """Carga lazy: o import deste modulo nao exige libhvcam.so."""
+def _lib(require_listen=False):
+    """Carga lazy: o import deste modulo nao exige libhvcam.so.
+
+    Quando `require_listen=True`, ignora candidatos antigos sem
+    `hvcam_listen` para que um build antigo no caminho nao mascare um
+    build novo capaz de modo reverso.
+    """
     global _LIB
     if _LIB is None:
-        _LIB = _load()
+        _LIB = _load(require_listen=require_listen)
+        return _LIB
+    if require_listen and getattr(_LIB, "hvcam_listen", None) is None:
+        if isinstance(_LIB, ctypes.CDLL):
+            _LIB = _load(require_listen=True)
+            return _LIB
+        raise OSError(
+            "libhvcam.so sem hvcam_listen; reconstrua a biblioteca "
+            "com a versao atual de santleme/hvcam"
+        )
     return _LIB
+
+
+def _listen_vsock_bounded(
+    port,
+    timeout_ms=_LISTEN_TIMEOUT_MS,
+    *,
+    socket_factory=socket.socket,
+    selector_factory=selectors.DefaultSelector,
+    clock=time.monotonic,
+):
+    """Escuta em AF_VSOCK com prazo de accept e exige peer CID do host (2).
+
+    `hvcam_listen` da libhvcam C chama `accept()` bloqueante sem prazo e
+    sem checar o CID de origem; aqui o listener fecha no timeout com
+    `-ETIMEDOUT` (para nao travar o startup nem o `--check`) e descarta
+    conexoes que nao venham de `VMADDR_CID_HOST`.
+    """
+    if timeout_ms is not None and timeout_ms <= 0:
+        return -errno.ETIMEDOUT
+    af_vsock = getattr(socket, "AF_VSOCK", 40)
+    cid_any = getattr(socket, "VMADDR_CID_ANY", 0xFFFFFFFF)
+    cid_host = getattr(socket, "VMADDR_CID_HOST", 2)
+    try:
+        listener = socket_factory(af_vsock, socket.SOCK_STREAM)
+    except OSError as error:
+        return -(error.errno or errno.EIO)
+    try:
+        listener.setblocking(False)
+        listener.bind((cid_any, int(port)))
+        listener.listen(1)
+        deadline = None if timeout_ms is None else clock() + (timeout_ms / 1000.0)
+        with selector_factory() as selector:
+            selector.register(listener, selectors.EVENT_READ)
+            while True:
+                remaining = None if deadline is None else deadline - clock()
+                if remaining is not None and remaining <= 0:
+                    return -errno.ETIMEDOUT
+                if not selector.select(remaining):
+                    return -errno.ETIMEDOUT
+                try:
+                    conn, peer = listener.accept()
+                except BlockingIOError:
+                    continue
+                peer_cid = (
+                    peer[0] if isinstance(peer, tuple) and len(peer) >= 1 else None
+                )
+                if peer_cid != cid_host:
+                    conn.close()
+                    continue
+                conn.setblocking(True)
+                return conn.detach()
+    except OSError as error:
+        return -(error.errno or errno.EIO)
+    finally:
+        listener.close()
 
 
 class Camera:
@@ -113,10 +205,19 @@ class Camera:
     repartida no ':' — que quebrava IPv6 (`[::1]` -> "::1:8765").
     """
 
-    def __init__(self, port=DEFAULT_PORT, host=None, listen=False):
-        lib = _lib()
+    def __init__(
+        self,
+        port=DEFAULT_PORT,
+        host=None,
+        listen=False,
+        timeout_ms=_LISTEN_TIMEOUT_MS,
+    ):
         if host is not None and listen:
             raise ValueError("hvcam: listen mode cannot use a TCP host")
+        if listen and not 1 <= int(port) <= _VSOCK_PORT_MAX:
+            raise ValueError(f"porta hvcam invalida: {port!r}")
+        lib = _lib(require_listen=listen)
+        self._lib = lib
         if host is not None:
             self.fd = lib.hvcam_connect_tcp(host.encode(), port)
         elif listen:
@@ -126,25 +227,35 @@ class Camera:
                     "libhvcam.so sem hvcam_listen; reconstrua a biblioteca "
                     "com a versao atual de santleme/hvcam"
                 )
-            self.fd = listen_fn(port)
+            if isinstance(lib, ctypes.CDLL):
+                self.fd = _listen_vsock_bounded(port, timeout_ms)
+            else:
+                self.fd = listen_fn(port)
         else:
             self.fd = lib.hvcam_connect(port)
         if self.fd < 0:
             operation = "listen" if listen else "connect"
             detail = f"hvcam: {operation} failed ({self.fd})"
-            if not listen and self.fd == -errno.ETIMEDOUT:
-                reverse_source = (
-                    "hvcam+reverse://"
-                    if port == DEFAULT_PORT
-                    else f"hvcam+reverse://:{port}"
-                )
-                detail += (
-                    "; timeout: hvcam-host.exe nao respondeu. No Windows, "
-                    f"inicie hvcam-host.exe --reverse --port {port} e use "
-                    f"--source {reverse_source} no Draw, ou registre o "
-                    "servico uma vez como administrador com "
-                    f"hvcam-host.exe --register-vsock --port {port}"
-                )
+            if self.fd == -errno.ETIMEDOUT:
+                if listen:
+                    detail += (
+                        "; timeout: hvcam-host.exe --reverse nao conectou a "
+                        f"tempo na porta {port}. No Windows, inicie "
+                        f"hvcam-host.exe --reverse --port {port}"
+                    )
+                else:
+                    reverse_source = (
+                        "hvcam+reverse://"
+                        if port == DEFAULT_PORT
+                        else f"hvcam+reverse://:{port}"
+                    )
+                    detail += (
+                        "; timeout: hvcam-host.exe nao respondeu. No Windows, "
+                        f"inicie hvcam-host.exe --reverse --port {port} e use "
+                        f"--source {reverse_source} no Draw, ou registre o "
+                        "servico uma vez como administrador com "
+                        f"hvcam-host.exe --register-vsock --port {port}"
+                    )
             raise OSError(detail)
         self._buf = (ctypes.c_ubyte * _MAX_PAYLOAD)()
         self._hdr = HvFrameHeader()
@@ -157,7 +268,8 @@ class Camera:
         timeout vencer (TimeoutError). O ndarray e uma view sobre o
         buffer persistente — to_bgr() ja materializa a imagem.
         """
-        n = _lib().hvcam_grab_next(
+        lib = getattr(self, "_lib", None) or _lib()
+        n = lib.hvcam_grab_next(
             self.fd,
             ctypes.byref(self._hdr),
             self._buf,
@@ -233,7 +345,8 @@ class Camera:
 
     def close(self):
         if self.fd >= 0:
-            _lib().hvcam_close(self.fd)
+            lib = getattr(self, "_lib", None) or _lib()
+            lib.hvcam_close(self.fd)
             self.fd = -1
 
     def __enter__(self):
@@ -256,28 +369,45 @@ def parse_hvcam_endpoint(source):
 
     `hvcam://` e `hvcam://:porta` falam vsock com o host Windows da
     propria maquina; `hvcam+reverse://[:porta]` escuta por uma conexao
-    iniciada pelo hvcam-host. Vsock nao tem hostname. `hvcam+tcp://host[:porta]`
-    usa o fallback TCP.
+    iniciada pelo hvcam-host. Vsock nao tem hostname e aceita portas de
+    32 bits (1..2^32-2; 0xFFFFFFFF e VMADDR_PORT_ANY).
+    `hvcam+tcp://host[:porta]` usa o fallback TCP (1..65535).
     """
     text = source.strip()
     parsed = urlparse(text)
-    port = parsed.port if parsed.port is not None else DEFAULT_PORT
-    if port < 1:
-        raise ValueError(f"porta hvcam invalida: {source!r}")
-    if parsed.scheme.lower() == "hvcam+tcp":
+    scheme = parsed.scheme.lower()
+    if scheme == "hvcam+tcp":
+        try:
+            port = parsed.port if parsed.port is not None else DEFAULT_PORT
+        except ValueError as error:
+            raise ValueError(f"porta hvcam invalida: {source!r}") from error
+        if not 1 <= port <= _TCP_PORT_MAX:
+            raise ValueError(f"porta hvcam invalida: {source!r}")
         if not parsed.hostname:
             raise ValueError(f"hvcam+tcp sem host: {source!r}")
         return parsed.hostname, port
-    if parsed.scheme.lower() == "hvcam+reverse" and parsed.hostname:
+
+    host_part, sep, port_text = parsed.netloc.partition(":")
+    if host_part:
+        hostname = parsed.hostname or host_part
+        if scheme == "hvcam+reverse":
+            raise ValueError(
+                f"hvcam+reverse nao aceita host ({hostname!r}); "
+                "use hvcam:// para conexao direta"
+            )
+        shown_port = port_text if (sep and port_text) else DEFAULT_PORT
         raise ValueError(
-            f"hvcam+reverse nao aceita host ({parsed.hostname!r}); "
-            "use hvcam:// para conexao direta"
+            f"vsock nao tem host ({hostname!r}); para TCP use "
+            f"hvcam+tcp://{hostname}:{shown_port}"
         )
-    if parsed.hostname:
-        raise ValueError(
-            f"vsock nao tem host ({parsed.hostname!r}); para TCP use "
-            f"hvcam+tcp://{parsed.hostname}:{port}"
-        )
+    if not sep:
+        port = DEFAULT_PORT
+    else:
+        if not port_text or not port_text.isascii() or not port_text.isdigit():
+            raise ValueError(f"porta hvcam invalida: {source!r}")
+        port = int(port_text, 10)
+    if not 1 <= port <= _VSOCK_PORT_MAX:
+        raise ValueError(f"porta hvcam invalida: {source!r}")
     return None, port
 
 
@@ -290,9 +420,16 @@ class HvcamCapture:
     A camera_factory injeta um Camera fake nos testes.
     """
 
-    def __init__(self, source, timeout_ms=_TIMEOUT_MS, camera_factory=None):
+    def __init__(
+        self,
+        source,
+        timeout_ms=_TIMEOUT_MS,
+        camera_factory=None,
+        connect_timeout_ms=None,
+    ):
         self.source = str(source).strip()
         self._timeout_ms = timeout_ms
+        self._connect_timeout_ms = connect_timeout_ms
         self._cam = None
         self._opened = False
         self.last_frame_id = None
@@ -316,7 +453,12 @@ class HvcamCapture:
             if host is not None:
                 self._cam = camera_factory(host=host, port=port)
             elif scheme == "hvcam+reverse":
-                self._cam = camera_factory(port=port, listen=True)
+                listen_kwargs = {"port": port, "listen": True}
+                if self._connect_timeout_ms is not None:
+                    listen_kwargs["timeout_ms"] = self._connect_timeout_ms
+                elif self._timeout_ms != _TIMEOUT_MS:
+                    listen_kwargs["timeout_ms"] = self._timeout_ms
+                self._cam = camera_factory(**listen_kwargs)
             else:
                 self._cam = camera_factory(port=port)
         except OSError as error:
