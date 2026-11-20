@@ -23,7 +23,6 @@ LatestFrameCapture usa na telemetria.
 import ctypes
 import errno
 import os
-import pwd
 import selectors
 import socket
 import time
@@ -68,15 +67,17 @@ def _candidates():
     paths = [
         os.path.join(here, "libhvcam.so"),
         os.path.join(here, "..", "..", "build", "libhvcam.so"),
+        "libhvcam.so",
         os.path.join(here, "..", "..", "..", "hvcam", "build", "libhvcam.so"),
     ]
     try:
+        import pwd
+
         home_dir = pwd.getpwuid(os.getuid()).pw_dir
-    except (AttributeError, KeyError, OSError):
+    except (ImportError, AttributeError, KeyError, OSError):
         home_dir = None
     if home_dir:
         paths.append(os.path.join(home_dir, "hvcam", "build", "libhvcam.so"))
-    paths.append("libhvcam.so")
     return tuple(paths)
 
 
