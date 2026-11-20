@@ -462,7 +462,9 @@ def _check_models():
     Sem manifesto (o caso de um clone novo), imprime o aviso e
     devolve True: nada a verificar nao e falha. Um .onnx/.task em
     models/ sem entrada no manifesto e FAIL no modo estrito (padrao)
-    e AVISO com DRAW_MODEL_STRICT=0.
+    e AVISO com DRAW_MODEL_STRICT=0. Se algum modelo registrado estiver
+    ausente em models/, tenta baixa-lo da Release oficial antes de
+    conferir.
     """
     manifest_path, models = manifest_module.load_manifest()
     ok = True
@@ -482,6 +484,19 @@ def _check_models():
         return ok
     for name in sorted(models):
         path = manifest_module.DEFAULT_MODELS_DIR / name
+        if not path.exists():
+            try:
+                manifest_module.ensure_models(
+                    [name],
+                    models_dir=manifest_module.DEFAULT_MODELS_DIR,
+                    manifest_path=manifest_path,
+                )
+            except RuntimeError as error:
+                print(
+                    f"AVISO: {name} esta no manifesto e nao esta em models/ "
+                    f"({error}). Baixe os modelos oficiais pela Release do repositorio."
+                )
+                continue
         if not path.exists():
             print(
                 f"AVISO: {name} esta no manifesto e nao esta em models/. "
@@ -1134,6 +1149,19 @@ def run(
     session_report = None
     ink_stream = None
     try:
+        if not markers_mode:
+            wanted_defaults = []
+            if neural_model is None:
+                wanted_defaults.append("draw_seg_v3_dyn.onnx")
+            if page_clean_model is None:
+                wanted_defaults.append("page_clean_unet.onnx")
+            if hand_model is None:
+                wanted_defaults.append("hand_landmarker.task")
+            if wanted_defaults:
+                try:
+                    manifest_module.ensure_models(wanted_defaults)
+                except RuntimeError as error:
+                    print(f"Aviso: download automatico de modelos falhou ({error}).")
         neural_detector = None
         if neural_model is None and not markers_mode and _DEFAULT_SHEET_MODEL.exists():
             neural_model = str(_DEFAULT_SHEET_MODEL)

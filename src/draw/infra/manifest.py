@@ -48,6 +48,10 @@ um manifesto corrompido nunca vira "sem verificação".
 import hashlib
 import os
 import re
+import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 from .safe_io import InputLimitError, read_json
@@ -58,11 +62,16 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 # versionados).
 DEFAULT_MANIFEST_PATH = _REPO_ROOT / "assets" / "manifest.json"
 DEFAULT_MODELS_DIR = _REPO_ROOT / "models"
+DEFAULT_RELEASE_URL = (
+    "https://github.com/santleme/draw-core/releases/download/models-v3"
+)
 _ENV_STRICT_VAR = "DRAW_MODEL_STRICT"
 _RELAXED_VALUES = ("0", "false", "no", "off")
 _SCHEMA = 1
 _CHUNK = 1 << 20
 _MAX_MANIFEST_BYTES = 1 << 20
+_MAX_MODEL_DOWNLOAD_BYTES = 128 << 20
+_DOWNLOAD_TIMEOUT_S = 60
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 MODEL_SUFFIXES = (".onnx", ".task")
 
@@ -247,3 +256,174 @@ def verify_model(model_path, manifest_path=None, strict=None):
     )
     _refuse_or_warn(message, strict)
     return {key: value for key, value in entry.items() if key not in CALIBRATION_KEYS}
+
+
+def _manifest_release_url(manifest_path):
+    """Lê release_url do manifesto, caindo para DEFAULT_RELEASE_URL."""
+    path = Path(manifest_path) if manifest_path is not None else DEFAULT_MANIFEST_PATH
+    if not path.exists():
+        return DEFAULT_RELEASE_URL
+    try:
+        data = read_json(path, max_bytes=_MAX_MANIFEST_BYTES)
+    except InputLimitError:
+        return DEFAULT_RELEASE_URL
+    if not isinstance(data, dict):
+        return DEFAULT_RELEASE_URL
+    raw = data.get("release_url")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip().rstrip("/")
+    return DEFAULT_RELEASE_URL
+
+
+def _validate_download_target(models_dir, name):
+    """Garante que a chave do manifesto não escapa da pasta de modelos."""
+    folder = Path(models_dir).resolve()
+    rel = Path(name)
+    if rel.is_absolute() or ".." in rel.parts:
+        raise RuntimeError(
+            f"nome de modelo inválido no manifesto para download: {name!r}"
+        )
+    target = (folder / rel).resolve()
+    try:
+        target.relative_to(folder)
+    except ValueError as error:
+        raise RuntimeError(f"caminho de modelo fora de {folder}: {name!r}") from error
+    return target
+
+
+def download_model(
+    name,
+    entry,
+    *,
+    models_dir=None,
+    release_url=None,
+    urlopen=None,
+    timeout=_DOWNLOAD_TIMEOUT_S,
+):
+    """Baixa um modelo da Release oficial, confere bytes + sha256 e grava atômico.
+
+    Nunca publica arquivo parcial ou com hash divergente: o download vai
+    para um temporário na mesma pasta e só substitui o destino se o
+    tamanho e o sha256 baterem exatamente com `entry`.
+    """
+    folder = Path(models_dir) if models_dir is not None else DEFAULT_MODELS_DIR
+    target = _validate_download_target(folder, name)
+    expected_sha = str(entry.get("sha256", "")).strip().lower()
+    if not _SHA256_RE.match(expected_sha):
+        raise RuntimeError(f"entrada {name!r} sem sha256 válido para download")
+    expected_bytes = entry.get("bytes")
+    if expected_bytes is not None and (
+        isinstance(expected_bytes, bool)
+        or not isinstance(expected_bytes, int)
+        or expected_bytes <= 0
+        or expected_bytes > _MAX_MODEL_DOWNLOAD_BYTES
+    ):
+        raise RuntimeError(
+            f"entrada {name!r} com 'bytes' fora do limite de download: {expected_bytes!r}"
+        )
+    max_bytes = (
+        expected_bytes if isinstance(expected_bytes, int) else _MAX_MODEL_DOWNLOAD_BYTES
+    )
+    base_url = (release_url or DEFAULT_RELEASE_URL).strip().rstrip("/")
+    parsed = urllib.parse.urlparse(base_url)
+    if parsed.scheme != "https" or not parsed.netloc:
+        raise RuntimeError(f"release_url precisa ser https://: {base_url!r}")
+    asset_name = Path(name).name
+    url = f"{base_url}/{urllib.parse.quote(asset_name)}"
+    opener = urllib.request.urlopen if urlopen is None else urlopen
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{target.name}.", suffix=".part", dir=str(target.parent)
+    )
+    tmp_path = Path(tmp_name)
+    digest = hashlib.sha256()
+    total = 0
+    try:
+        try:
+            request = urllib.request.Request(
+                url, headers={"User-Agent": "draw-core/0.1"}
+            )
+            with (
+                opener(request, timeout=timeout) as response,
+                os.fdopen(fd, "wb") as handle,
+            ):
+                fd = None
+                while True:
+                    chunk = response.read(_CHUNK)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise RuntimeError(
+                            f"download de {name} excedeu {max_bytes} bytes ({url})"
+                        )
+                    digest.update(chunk)
+                    handle.write(chunk)
+        except (urllib.error.URLError, OSError) as error:
+            raise RuntimeError(f"falha ao baixar {name} de {url}: {error}") from error
+        if isinstance(expected_bytes, int) and total != expected_bytes:
+            raise RuntimeError(
+                f"download de {name} truncado: {total} bytes != {expected_bytes} esperados"
+            )
+        actual_sha = digest.hexdigest()
+        if actual_sha != expected_sha:
+            raise RuntimeError(
+                f"sha256 divergente no download de {name}: {actual_sha} != {expected_sha}"
+            )
+        os.replace(tmp_path, target)
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+    return target
+
+
+def ensure_models(
+    names=None,
+    *,
+    models_dir=None,
+    manifest_path=None,
+    release_url=None,
+    urlopen=None,
+):
+    """Garante que os modelos registrados em assets/manifest.json estão em models/.
+
+    Só baixa o que está AUSente em `models_dir`; arquivos já presentes em
+    disco não são sobrescritos (a verificação subsequente decide se
+    conferem ou se falham no modo estrito). Devolve a lista de Paths
+    baixados nesta chamada.
+    """
+    resolved_manifest, models = load_manifest(manifest_path)
+    if not models:
+        return []
+    folder = Path(models_dir) if models_dir is not None else DEFAULT_MODELS_DIR
+    wanted = sorted(models) if names is None else list(names)
+    base_url = release_url or _manifest_release_url(resolved_manifest)
+    downloaded = []
+    for name in wanted:
+        entry = models.get(name)
+        if entry is None:
+            continue
+        target = _validate_download_target(folder, name)
+        if target.exists():
+            continue
+        print(
+            f"Baixando {name} ({entry.get('bytes', '?')} bytes) da Release oficial..."
+        )
+        download_model(
+            name,
+            entry,
+            models_dir=folder,
+            release_url=base_url,
+            urlopen=urlopen,
+        )
+        print(f"Modelo {name} salvo e verificado (sha256 confere).")
+        downloaded.append(target)
+    return downloaded

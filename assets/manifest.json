@@ -30,5 +30,6 @@
     }
   },
   "notes": "Integrity (sha256 and byte size) is verified at load. Model binaries are not stored in git; they are distributed via GitHub Release.",
+  "release_url": "https://github.com/santleme/draw-core/releases/download/models-v3",
   "schema": 1
 }

@@ -274,3 +274,130 @@ def test_relaxed_mismatch_drops_calibration(tmp_path, capsys):
         assert key not in got
     # A entrada do manifesto em si não é mutada.
     assert manifest.load_manifest(path)[1]["m.onnx"]["runtime_threshold"] == 0.79
+
+
+class _FakeHttpResponse:
+    def __init__(self, payload: bytes):
+        self._payload = payload
+        self._offset = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self, size=-1):
+        if self._offset >= len(self._payload):
+            return b""
+        if size is None or size < 0:
+            chunk = self._payload[self._offset :]
+            self._offset = len(self._payload)
+            return chunk
+        chunk = self._payload[self._offset : self._offset + size]
+        self._offset += len(chunk)
+        return chunk
+
+
+def test_download_model_verifies_sha256_and_size_and_writes_atomically(tmp_path):
+    payload = b"pesos-oficiais-v3"
+    entry = {
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "bytes": len(payload),
+    }
+    seen_urls = []
+
+    def fake_urlopen(request, timeout=None):
+        seen_urls.append((request.full_url, timeout))
+        return _FakeHttpResponse(payload)
+
+    target = manifest.download_model(
+        "page_clean_unet.onnx",
+        entry,
+        models_dir=tmp_path,
+        release_url="https://example.com/releases/download/models-v3",
+        urlopen=fake_urlopen,
+    )
+    assert target == (tmp_path / "page_clean_unet.onnx").resolve()
+    assert target.read_bytes() == payload
+    assert seen_urls == [
+        (
+            "https://example.com/releases/download/models-v3/page_clean_unet.onnx",
+            manifest._DOWNLOAD_TIMEOUT_S,
+        )
+    ]
+
+
+def test_download_model_rejects_hash_mismatch_and_leaves_no_file(tmp_path):
+    payload = b"pesos-corrompidos"
+    entry = {
+        "sha256": "0" * 64,
+        "bytes": len(payload),
+    }
+    with pytest.raises(RuntimeError, match="sha256 divergente"):
+        manifest.download_model(
+            "page_clean_unet.onnx",
+            entry,
+            models_dir=tmp_path,
+            urlopen=lambda req, timeout=None: _FakeHttpResponse(payload),
+        )
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_download_model_rejects_oversized_stream_and_cleans_up(tmp_path):
+    payload = b"x" * 32
+    entry = {
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "bytes": 10,
+    }
+    with pytest.raises(RuntimeError, match="excedeu 10 bytes"):
+        manifest.download_model(
+            "page_clean_unet.onnx",
+            entry,
+            models_dir=tmp_path,
+            urlopen=lambda req, timeout=None: _FakeHttpResponse(payload),
+        )
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_download_model_rejects_path_traversal_and_non_https(tmp_path):
+    entry = {"sha256": "0" * 64, "bytes": 4}
+    with pytest.raises(RuntimeError, match="inválido"):
+        manifest.download_model("../escape.onnx", entry, models_dir=tmp_path)
+    with pytest.raises(RuntimeError, match="https://"):
+        manifest.download_model(
+            "m.onnx",
+            entry,
+            models_dir=tmp_path,
+            release_url="http://example.com/models",
+        )
+
+
+def test_ensure_models_downloads_only_missing_files(tmp_path):
+    existing = _model(tmp_path / "models", "ok.onnx", b"ja-existe")
+    missing_payload = b"novo-modelo"
+    manifest_path = _write_manifest(
+        tmp_path,
+        {
+            "ok.onnx": _entry(existing),
+            "novo.onnx": {
+                "sha256": hashlib.sha256(missing_payload).hexdigest(),
+                "bytes": len(missing_payload),
+            },
+        },
+    )
+    calls = []
+
+    def fake_urlopen(request, timeout=None):
+        calls.append(request.full_url)
+        return _FakeHttpResponse(missing_payload)
+
+    downloaded = manifest.ensure_models(
+        models_dir=tmp_path / "models",
+        manifest_path=manifest_path,
+        urlopen=fake_urlopen,
+    )
+    assert [p.name for p in downloaded] == ["novo.onnx"]
+    assert len(calls) == 1
+    assert (tmp_path / "models" / "novo.onnx").read_bytes() == missing_payload
+    assert existing.read_bytes() == b"ja-existe"

@@ -7,9 +7,11 @@ See [`docs/MIGRATION_SPEC.md`](docs/MIGRATION_SPEC.md) for structure and plan.
 
 ## Run the live app
 
-Place the model binaries verified by [`assets/manifest.json`](assets/manifest.json)
-(`draw_seg_v3_dyn.onnx`, `page_clean_unet.onnx`, and optionally
-`hand_landmarker.task`) in `models/`. Because the base runtime depends on
+On first run (`draw` or `draw --check`), any missing official model binary in
+`models/` (`draw_seg_v3_dyn.onnx`, `page_clean_unet.onnx`,
+`hand_landmarker.task`) is automatically downloaded from the `models-v3` GitHub
+Release and verified against [`assets/manifest.json`](assets/manifest.json)
+(byte size + SHA-256) before loading. Because the base runtime depends on
 `opencv-contrib-python-headless`, replace it with the GUI wheel in your
 virtualenv before opening the live window:
 
