@@ -361,13 +361,32 @@ class InkPublication:
     generation e version identificam a publicação (a geração da trabalhadora
     e a versão dentro dela); confirmed é a máscara 2D uint8 somente-leitura,
     ou None para "canvas limpo" (troca de câmera: a tinta antiga morreu).
+    captured_at (monotônico, s), anchor_corners (quad (4, 2) da âncora) e
+    full (descontinuidade: tinta removida/migrada ou âncora movida) vêm do
+    InkDelta da mesma passada; None/False quando não se pediu a metadados ou
+    a publicação não trouxe tinta nova.
     """
 
     generation: int
     version: int
     confirmed: np.ndarray | None = None
+    captured_at: float | None = None
+    anchor_corners: np.ndarray | None = None
+    full: bool = False
 
     def __post_init__(self):
+        if self.captured_at is not None and not (
+            isinstance(self.captured_at, (int, float)) and np.isfinite(self.captured_at)
+        ):
+            raise ValueError(
+                f"captured_at precisa ser float finito: {self.captured_at!r}"
+            )
+        if self.anchor_corners is not None:
+            object.__setattr__(
+                self,
+                "anchor_corners",
+                _corners_float32(self.anchor_corners, "anchor_corners"),
+            )
         mask = self.confirmed
         if mask is None:
             return

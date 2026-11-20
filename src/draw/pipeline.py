@@ -130,6 +130,7 @@ class Pipeline:
         on_format_suggestion=_ignore,
         on_acquisition=_ignore,
         on_ink=_ignore,
+        ink_meta=False,
         save_page_snapshot=_ignore,
         clock=time.monotonic,
         warp_sheet=paper.warp_sheet,
@@ -149,6 +150,7 @@ class Pipeline:
         self._on_format_suggestion = on_format_suggestion
         self._on_acquisition = on_acquisition
         self._on_ink = on_ink
+        self._ink_meta = bool(ink_meta)
         self._save_page_snapshot = save_page_snapshot
         self._clock = clock
         self._warp_sheet = warp_sheet
@@ -384,6 +386,38 @@ class Pipeline:
                     captured_at=captured_at,
                 )
             )
+
+    # So o stream pede os metadados do InkDelta (ink_meta): sem consumidor o
+    # laco nao paga o poll_delta. A versao confirmada do delta e outra do que
+    # a de exibicao (poll_display sobe tambem com mudanca so do provisorio).
+    _ink_meta = False
+    _delta_version = -1
+
+    def _ink_publication(self, got):
+        captured_at = anchor = None
+        full = False
+        if self._ink_meta:
+            poll_delta = getattr(self.ink_worker, "poll_delta", None)
+            delta = (
+                None
+                if poll_delta is None
+                else poll_delta(self.clean_generation, self._delta_version, wait=0.005)
+            )
+            if delta is not None:
+                self._delta_version = delta.version
+                captured_at, anchor, full = (
+                    delta.captured_at,
+                    delta.anchor_corners,
+                    delta.full,
+                )
+        return contracts.InkPublication(
+            self.clean_generation,
+            got.version,
+            got.confirmed,
+            captured_at=captured_at,
+            anchor_corners=anchor,
+            full=full,
+        )
 
     def reset_source(self, since):
         """Fronteira de fonte: a camera nova comeca uma pagina nova.
@@ -655,11 +689,7 @@ class Pipeline:
             self.clean_provisional_mask = got.provisional
             # Tomada de saida (bridge/STREAM.md): so a camada confirmada;
             # o publicador nunca bloqueia (latest-wins).
-            self._on_ink(
-                contracts.InkPublication(
-                    self.clean_generation, got.version, got.confirmed
-                )
-            )
+            self._on_ink(self._ink_publication(got))
             self.accumulated_canvas = self._render_display(
                 self.clean_mask,
                 self.clean_provisional_mask,

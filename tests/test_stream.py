@@ -491,3 +491,215 @@ def test_close_reports_recording_flush_failure(tmp_path):
     sink.close = boom
     pub.close()
     assert any("falha ao fechar" in m for m in messages)
+
+
+# ------------------------------------------------ v2: captura, ancora e FULL
+
+_QUAD = np.array([[1, 2], [31, 3], [30, 41], [2, 40]], np.float32)
+
+
+def test_v2_full_and_delta_carry_capture_stamp_and_anchor():
+    a, b = _mask(), _mask()
+    b[2:5, 3:7] = 255
+    data = stream.pack_full(1, 1, 10, a, (210.0, 297.0), 123_456, _QUAD)
+    data += stream.pack_delta(1, 2, 20, b, stream.diff_box(a, b), 654_321)
+    recs = list(stream.iter_records(io.BytesIO(data).read))
+    assert [r.proto for r in recs] == [2, 2]
+    canvas = stream.InkCanvas()
+    canvas.apply(recs[0])
+    assert canvas.captured_at_us == 123_456
+    assert np.allclose(canvas.anchor_corners, _QUAD)
+    canvas.apply(recs[1])
+    assert canvas.captured_at_us == 654_321
+    assert np.array_equal(canvas.mask, b)
+
+
+def test_v2_without_capture_stamp_or_anchor_reads_as_none():
+    data = stream.pack_full(1, 1, 10, _mask(), (210.0, 297.0))
+    canvas, _ = _canvas_from(data)
+    assert canvas.captured_at_us is None and canvas.anchor_corners is None
+
+
+def test_v1_recordings_are_still_readable():
+    mask = _mask(fill=255)
+    payload = struct.pack("<ff", 210.0, 297.0) + zlib_compress(mask)
+    header = stream.HEADER.pack(
+        stream.MAGIC, 1, stream.KIND_FULL, 0, 3, 5, 99, 30, 40, len(payload)
+    )
+    canvas, _ = _canvas_from(header + payload)
+    assert canvas.paper_mm == (210.0, 297.0)
+    assert canvas.captured_at_us is None and canvas.anchor_corners is None
+    assert (canvas.mask == 255).all() and canvas.generation == 3
+
+
+def zlib_compress(mask):
+    import zlib
+
+    return zlib.compress(np.ascontiguousarray(mask).tobytes(), 1)
+
+
+def _kinds(path):
+    return [(r.kind, r.proto) for r in stream.records_from_file(path)]
+
+
+@needs_private_files
+def test_publication_metadata_reaches_the_wire(tmp_path):
+    path = tmp_path / "rec.dral"
+    mask = _mask()
+    mask[1:3, 1:3] = 255
+    pub = stream.InkStreamPublisher(port=None, record_path=str(path))
+    pub.publish(
+        contracts.InkPublication(1, 1, mask, captured_at=12.5, anchor_corners=_QUAD)
+    )
+    pub.close()
+    canvas = stream.InkCanvas()
+    for rec in stream.records_from_file(path):
+        canvas.apply(rec)
+    assert canvas.captured_at_us == 12_500_000
+    assert np.allclose(canvas.anchor_corners, _QUAD)
+
+
+@needs_private_files
+def test_full_flag_forces_a_full_even_with_identical_mask(tmp_path):
+    path = tmp_path / "rec.dral"
+    mask = _mask()
+    mask[1:3, 1:3] = 255
+    pub = stream.InkStreamPublisher(port=None, record_path=str(path))
+    calls = _count_dispatches(pub)
+    pub.publish(contracts.InkPublication(1, 1, mask))
+    _wait_dispatches(calls, 1)
+    pub.publish(contracts.InkPublication(1, 2, mask))  # igual: nao gera registro
+    _wait_dispatches(calls, 2)
+    pub.publish(contracts.InkPublication(1, 3, mask, full=True))  # re-ancorou
+    _wait_dispatches(calls, 3)
+    pub.close()
+    assert [k for k, _ in _kinds(path)] == [stream.KIND_FULL, stream.KIND_FULL]
+
+
+def _count_dispatches(pub):
+    """Conta despachos concluidos (o arquivo gravado e bufferizado ate o close)."""
+    calls = []
+    real = pub._dispatch
+
+    def counted(*args):
+        real(*args)
+        calls.append(1)
+
+    pub._dispatch = counted
+    return calls
+
+
+def _wait_dispatches(calls, n, timeout=3.0):
+    deadline = time.monotonic() + timeout
+    while len(calls) < n and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert len(calls) >= n, "o publicador nao despachou"
+
+
+@needs_private_files
+def test_delta_over_half_the_page_becomes_full(tmp_path):
+    path = tmp_path / "rec.dral"
+    small = _mask()
+    small[0:2, 0:2] = 255
+    big = small.copy()
+    big[:, 0:20] = 255  # 2/3 da largura da pagina
+    tiny = big.copy()
+    tiny[30:33, 25:28] = 255
+    pub = stream.InkStreamPublisher(port=None, record_path=str(path))
+    calls = _count_dispatches(pub)
+    for version, m in enumerate((small, big, tiny), start=1):
+        pub.publish(contracts.InkPublication(1, version, m))
+        _wait_dispatches(calls, version)
+    pub.close()
+    assert [k for k, _ in _kinds(path)] == [
+        stream.KIND_FULL,
+        stream.KIND_FULL,  # bbox grande -> FULL
+        stream.KIND_DELTA,  # mudanca pequena segue DELTA
+    ]
+
+
+def test_latest_wins_keeps_the_full_request_of_a_replaced_publication():
+    seen = []
+    gate = threading.Event()
+    import os
+    import tempfile
+
+    fd, path = tempfile.mkstemp()
+    os.close(fd)
+    try:
+        pub = stream.InkStreamPublisher(port=None, record_path=path)
+        real = pub._dispatch
+
+        def slow(*args):
+            seen.append(args)
+            if len(seen) == 1:
+                gate.wait(2.0)
+            return real(*args)
+
+        pub._dispatch = slow
+        mask = _mask()
+        pub.publish(contracts.InkPublication(1, 1, mask))  # bloqueia no 1o dispatch
+        deadline = time.monotonic() + 2.0
+        while not seen and time.monotonic() < deadline:
+            time.sleep(0.005)
+        b = mask.copy()
+        b[0, 0] = 255
+        c = mask.copy()
+        c[1, 1] = 255
+        pub.publish(contracts.InkPublication(1, 2, b, full=True))
+        pub.publish(contracts.InkPublication(1, 3, c))  # substitui a anterior
+        gate.set()
+        pub.close()
+        assert seen[-1][-1] is True  # force_full sobreviveu a substituicao
+        assert seen[-1][1] == 3
+    finally:
+        os.unlink(path)
+
+
+def test_pipeline_ink_publication_takes_meta_only_when_asked():
+    from draw import pipeline as pipeline_module
+
+    class Delta:
+        version = 7
+        captured_at = 3.25
+        anchor_corners = _QUAD
+        full = True
+
+    class Worker:
+        calls = []
+
+        def poll_delta(self, generation, after, wait=0.0):
+            self.calls.append((generation, after, wait))
+            return Delta()
+
+    class Got:
+        version = 4
+        confirmed = _mask(fill=255)
+
+    pipe = pipeline_module.Pipeline.__new__(pipeline_module.Pipeline)
+    pipe.ink_worker = Worker()
+    pipe.clean_generation = 2
+
+    pub = pipe._ink_publication(Got())  # sem ink_meta: nao paga o poll_delta
+    assert pub.captured_at is None and not pub.full and Worker.calls == []
+
+    pipe._ink_meta = True
+    pub = pipe._ink_publication(Got())
+    assert (pub.captured_at, pub.full) == (3.25, True)
+    assert np.allclose(pub.anchor_corners, _QUAD)
+    assert Worker.calls == [(2, -1, 0.005)]
+    assert pipe._delta_version == 7  # a versao confirmada propria do delta
+    pipe._ink_publication(Got())
+    assert Worker.calls[-1] == (2, 7, 0.005)
+
+    pipe.ink_worker = object()  # trabalhadora sem poll_delta: sem metadados
+    assert pipe._ink_publication(Got()).captured_at is None
+
+
+def test_ink_publication_validates_metadata():
+    with pytest.raises(ValueError):
+        contracts.InkPublication(1, 1, _mask(), captured_at=float("nan"))
+    with pytest.raises(ValueError):
+        contracts.InkPublication(1, 1, _mask(), anchor_corners=np.zeros((3, 2)))
+    pub = contracts.InkPublication(1, 1, _mask(), captured_at=1, anchor_corners=_QUAD)
+    assert pub.captured_at == 1 and pub.anchor_corners.dtype == np.float32

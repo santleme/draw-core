@@ -682,9 +682,10 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         )
         with self._condition:
             self._delta_ring.append(record)
+            self._condition.notify_all()
         self._delta_prev = (generation, now, anchor)
 
-    def poll_delta(self, generation, after_version):
+    def poll_delta(self, generation, after_version, wait=0.0):
         """InkDelta com o que a tinta confirmada ganhou depois de
         after_version, ou None se nao ha publicacao nova da geracao
         (ou o delta dela ainda esta sendo calculado: tente de novo).
@@ -697,9 +698,20 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         removed_px soma as remocoes registradas no historico (limite
         inferior quando o historico foi truncado). Nao muda cadencia
         nem o voto: le registros que a passada ja produziu; o trabalho
-        sobre mascaras roda fora do lock.
+        sobre mascaras roda fora do lock. wait (s, 0 = nao espera) cobre a
+        janela entre a publicacao e o registro do delta (~1 ms): espera no
+        maximo isso pelo registro da versao ja publicada.
         """
         with self._condition:
+            if wait > 0 and self._published is not None:
+                latest_now = self._published[1]
+                self._condition.wait_for(
+                    lambda: any(
+                        r[0] == generation and r[1] >= latest_now
+                        for r in self._delta_ring
+                    ),
+                    timeout=wait,
+                )
             published = self._published
             if (
                 published is None

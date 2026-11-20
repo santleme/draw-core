@@ -275,3 +275,36 @@ def test_contract_validation():
         InkDelta(bbox=None, mask=np.zeros((2, 2), np.uint8), **base)
     ok = InkDelta(bbox=None, mask=np.zeros((0, 0), np.uint8), **base)
     assert ok.bbox is None
+
+
+def test_poll_delta_waits_briefly_for_a_record_still_being_computed():
+    import threading
+    import time
+
+    rig = _Rig()
+    worker, gen = rig.worker, rig.generation
+    canvas, _ = _strokes()
+    _publish(worker, gen, 1, canvas, 0.1)
+    worker._version = 2
+    worker._published = (gen, 2, canvas)  # publicado; o registro vem ja ja
+
+    assert worker.poll_delta(gen, 1) is None  # sem espera: tenta de novo depois
+
+    def late():
+        time.sleep(0.03)
+        worker._record_delta(gen, 2, canvas, 0.2, None)
+
+    thread = threading.Thread(target=late)
+    thread.start()
+    started = time.perf_counter()
+    delta = worker.poll_delta(gen, 1, wait=1.0)
+    elapsed = time.perf_counter() - started
+    thread.join()
+    assert delta is not None and delta.version == 2
+    assert elapsed < 0.5  # acordou pelo registro, nao pelo prazo
+    # sem registro nenhum, a espera respeita o prazo
+    worker._version = 3
+    worker._published = (gen, 3, canvas)
+    started = time.perf_counter()
+    assert worker.poll_delta(gen, 2, wait=0.05) is None
+    assert time.perf_counter() - started < 0.5

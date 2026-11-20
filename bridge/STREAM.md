@@ -48,18 +48,20 @@ Cabeçalho fixo de **32 bytes**, little-endian, `struct.Struct("<4sHBBIIqHHI")`:
 | Offset | Size | Campo | Valor |
 |-------:|-----:|-------|-------|
 | 0  | 4 | `magic` | `DRAL` |
-| 4  | 2 | `version` | 1 |
+| 4  | 2 | `version` | 2 (o leitor ainda aceita 1: gravações antigas) |
 | 6  | 1 | `kind` | 1 = FULL, 2 = DELTA |
 | 7  | 1 | `reserved` | 0 |
 | 8  | 4 | `generation` | geração da folha; sobe a cada página nova |
 | 12 | 4 | `ink_version` | versão da publicação dentro da geração |
-| 16 | 8 | `ts_us` | relógio monotônico do Draw na **publicação** (não é carimbo de captura) |
+| 16 | 8 | `ts_us` | relógio monotônico do Draw na **publicação** (o carimbo de **captura** vai no payload, v2) |
 | 24 | 2 | `width` | largura da grade da página, px |
 | 26 | 2 | `height` | altura da grade, px |
 | 28 | 4 | `payload_len` | `1..16 MiB` |
 
-- **FULL**: payload = `<ff` (largura_mm, altura_mm da folha) + `zlib(máscara h*w uint8)`.
-- **DELTA**: payload = `<HHHH` (x, y, w, h) + `zlib(sub-retângulo h*w)`. Só
+- **FULL**: payload = `<ffq8f` (largura_mm, altura_mm da folha, `captured_at_us`, 4 cantos x,y do quad
+  da âncora) + `zlib(máscara h*w uint8)`. `captured_at_us = -1` e cantos `NaN` = sem dado.
+  (v1: só `<ff`.)
+- **DELTA**: payload = `<HHHHq` (x, y, w, h, `captured_at_us`) + `zlib(sub-retângulo h*w)`. Só
   vale sobre um FULL anterior da **mesma geração e mesma forma**; senão é erro
   de protocolo.
 - `generation` no fio é do publicador e monotônica: sobe a cada geração nova da
@@ -74,7 +76,15 @@ Cabeçalho fixo de **32 bytes**, little-endian, `struct.Struct("<4sHBBIIqHHI")`:
   **dentro** da trabalhadora (conteúdo diferente na mesma geração) não tem
   evento hoje; sai como DELTA (o canvas fica correto, mas a fronteira de
   página não é sinalizada).
-- Publicação idêntica à anterior não gera registro.
+- Publicação idêntica à anterior não gera registro, **exceto** quando o `InkDelta.full` da
+  passada pede descontinuidade (tinta removida/migrada ou âncora movida): sai um FULL mesmo com
+  máscara igual, porque a tinta mudou de lugar na câmera. O pedido sobrevive a uma publicação
+  substituída antes de sair (latest-wins).
+- Um DELTA cujo retângulo passa de 50% da página sai como FULL: nos clipes reais a bbox cobre
+  91-97% e o DELTA economiza 2-5% (FULL em zlib: 37-55 KiB, 1,8 ms).
+- `captured_at_us` usa o **mesmo relógio** do `ts_us` (monotônico do Draw): o consumidor mede
+  captura -> publicação por `ts_us - captured_at_us`. Só vem em publicações que trouxeram tinta
+  nova; nas demais é `-1`. O Draw só pede os metadados do `InkDelta` quando há stream (opt-in).
 
 O receptor valida magic, versão, tipo, `payload_len`, dimensões (<= 8192 px por
 lado, <= 40 MP) **antes** de alocar, e limita a descompressão ao tamanho
@@ -90,5 +100,6 @@ retângulo alterado (útil para vetorizar só a região suja).
 
 ## Fora da v1
 
-Provisória (só a confirmada sai), pose/cantos, carimbos de tempo por traço,
+Provisória (só a confirmada sai), carimbos de tempo por traço (o `captured_at_us` é por
+publicação),
 posição de ponta de caneta, canal de controle consumidor -> Draw.

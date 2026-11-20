@@ -27,15 +27,27 @@ import numpy as np
 from .protocol import ProtocolError, _read_exact, resolve_token, server_handshake
 
 MAGIC = b"DRAL"
-VERSION = 1
+# v2 acrescenta o carimbo de captura (e a ancora, no FULL); o leitor ainda
+# aceita v1 (gravacoes antigas), o escritor so emite v2.
+VERSION = 2
+READABLE_VERSIONS = (1, 2)
+# Sem carimbo de captura no fio.
+NO_CAPTURE_TS = -1
+# Um DELTA cujo retangulo passa dessa fracao da pagina vira FULL: nos clipes
+# reais a bbox cobre 91-97% da pagina e o DELTA economiza 2-5%.
+FULL_FRACTION = 0.5
 # magic, versão, tipo, reservado, geração, versão da tinta, ts_us,
 # largura, altura, payload_len.
 HEADER = struct.Struct("<4sHBBIIqHHI")
 HEADER_SIZE = HEADER.size  # 32 bytes
 KIND_FULL = 1  # payload: <ff (largura_mm, altura_mm) + zlib(máscara h*w)
 KIND_DELTA = 2  # payload: <HHHH (x, y, w, h) + zlib(sub-retângulo h*w)
+# v2: FULL <ffq8f (mm, captured_at_us, 4 cantos x,y da ancora; NaN = sem) e
+# DELTA <HHHHq (retangulo, captured_at_us).
 _FULL_PREFIX = struct.Struct("<ff")
 _DELTA_PREFIX = struct.Struct("<HHHH")
+_FULL_PREFIX_V2 = struct.Struct("<ffq8f")
+_DELTA_PREFIX_V2 = struct.Struct("<HHHHq")
 MAX_PAYLOAD_LEN = 16 << 20
 MAX_SIDE = 8192
 MAX_PIXELS = 40_000_000
@@ -59,6 +71,7 @@ class InkRecord:
     width: int
     height: int
     payload: bytes
+    proto: int = VERSION
 
 
 def _pack(kind, generation, ink_version, ts_us, width, height, payload):
@@ -79,18 +92,30 @@ def _pack(kind, generation, ink_version, ts_us, width, height, payload):
     )
 
 
-def pack_full(generation, ink_version, ts_us, mask, paper_mm):
+def pack_full(
+    generation, ink_version, ts_us, mask, paper_mm, captured_at_us=None, anchor=None
+):
     height, width = mask.shape
-    payload = _FULL_PREFIX.pack(*paper_mm) + zlib.compress(
-        np.ascontiguousarray(mask).tobytes(), 1
+    corners = (
+        (float("nan"),) * 8
+        if anchor is None
+        else tuple(float(v) for v in np.asarray(anchor, np.float32).reshape(8))
     )
+    prefix = _FULL_PREFIX_V2.pack(
+        *paper_mm,
+        NO_CAPTURE_TS if captured_at_us is None else int(captured_at_us),
+        *corners,
+    )
+    payload = prefix + zlib.compress(np.ascontiguousarray(mask).tobytes(), 1)
     return _pack(KIND_FULL, generation, ink_version, ts_us, width, height, payload)
 
 
-def pack_delta(generation, ink_version, ts_us, mask, box):
+def pack_delta(generation, ink_version, ts_us, mask, box, captured_at_us=None):
     x, y, w, h = box
     sub = np.ascontiguousarray(mask[y : y + h, x : x + w])
-    payload = _DELTA_PREFIX.pack(x, y, w, h) + zlib.compress(sub.tobytes(), 1)
+    payload = _DELTA_PREFIX_V2.pack(
+        x, y, w, h, NO_CAPTURE_TS if captured_at_us is None else int(captured_at_us)
+    ) + zlib.compress(sub.tobytes(), 1)
     height, width = mask.shape
     return _pack(KIND_DELTA, generation, ink_version, ts_us, width, height, payload)
 
@@ -120,7 +145,7 @@ def iter_records(read, max_payload=MAX_PAYLOAD_LEN):
         magic, version, kind, _res, gen, ink_ver, ts_us, w, h, length = HEADER.unpack(
             header
         )
-        if magic != MAGIC or version != VERSION:
+        if magic != MAGIC or version not in READABLE_VERSIONS:
             raise ProtocolError(
                 f"registro DRAL invalido: magic={magic!r} versao={version}"
             )
@@ -133,7 +158,7 @@ def iter_records(read, max_payload=MAX_PAYLOAD_LEN):
         payload = _read_exact(read, length)
         if payload is None:
             raise ProtocolError("fluxo truncado: registro sem payload")
-        yield InkRecord(kind, gen, ink_ver, ts_us, w, h, payload)
+        yield InkRecord(kind, gen, ink_ver, ts_us, w, h, payload, version)
 
 
 def records_from_file(path, max_payload=MAX_PAYLOAD_LEN):
@@ -163,14 +188,29 @@ class InkCanvas:
         self.generation = None
         self.ink_version = None
         self.paper_mm = None
+        # Do registro v2: carimbo de captura (us, relogio monotonico do Draw)
+        # e quad da ancora (4, 2); None quando o fio nao traz.
+        self.captured_at_us = None
+        self.anchor_corners = None
 
     def apply(self, rec):
         """Aplica um registro; devolve o retângulo (x, y, w, h) alterado."""
+        v2 = rec.proto >= 2
         if rec.kind == KIND_FULL:
-            if len(rec.payload) < _FULL_PREFIX.size:
+            prefix = _FULL_PREFIX_V2 if v2 else _FULL_PREFIX
+            if len(rec.payload) < prefix.size:
                 raise ProtocolError("registro FULL truncado")
-            self.paper_mm = _FULL_PREFIX.unpack_from(rec.payload)
-            raw = _inflate(rec.payload[_FULL_PREFIX.size :], rec.width * rec.height)
+            fields = prefix.unpack_from(rec.payload)
+            self.paper_mm = fields[:2]
+            if v2:
+                self.captured_at_us = None if fields[2] == NO_CAPTURE_TS else fields[2]
+                corners = np.array(fields[3:], np.float32)
+                self.anchor_corners = (
+                    None if np.isnan(corners).any() else corners.reshape(4, 2)
+                )
+            else:
+                self.captured_at_us = self.anchor_corners = None
+            raw = _inflate(rec.payload[prefix.size :], rec.width * rec.height)
             self.mask = (
                 np.frombuffer(raw, np.uint8).reshape(rec.height, rec.width).copy()
             )
@@ -182,12 +222,16 @@ class InkCanvas:
                 or self.mask.shape != (rec.height, rec.width)
             ):
                 raise ProtocolError("DELTA sem FULL anterior da mesma geracao")
-            if len(rec.payload) < _DELTA_PREFIX.size:
+            prefix = _DELTA_PREFIX_V2 if v2 else _DELTA_PREFIX
+            if len(rec.payload) < prefix.size:
                 raise ProtocolError("registro DELTA truncado")
-            x, y, w, h = _DELTA_PREFIX.unpack_from(rec.payload)
+            fields = prefix.unpack_from(rec.payload)
+            x, y, w, h = fields[:4]
             if w == 0 or h == 0 or x + w > rec.width or y + h > rec.height:
                 raise ProtocolError("retangulo do DELTA fora da pagina")
-            raw = _inflate(rec.payload[_DELTA_PREFIX.size :], w * h)
+            if v2:
+                self.captured_at_us = None if fields[4] == NO_CAPTURE_TS else fields[4]
+            raw = _inflate(rec.payload[prefix.size :], w * h)
             self.mask[y : y + h, x : x + w] = np.frombuffer(raw, np.uint8).reshape(h, w)
             box = (x, y, w, h)
         self.generation = rec.generation
@@ -321,7 +365,24 @@ class InkStreamPublisher:
         """
         ts_us = int(self._clock() * 1_000_000)
         mask = publication.confirmed
+        # Mesmo relogio do Draw (FramePacket.captured_at e monotonico): o
+        # consumidor mede captura -> publicacao por ts_us - captured_at_us.
+        captured_at_us = (
+            None
+            if publication.captured_at is None
+            else int(publication.captured_at * 1_000_000)
+        )
+        anchor = (
+            None
+            if publication.anchor_corners is None
+            else tuple(float(v) for v in publication.anchor_corners.reshape(8))
+        )
         with self._cond:
+            # latest-wins nao pode perder o pedido de FULL de uma publicacao
+            # que foi substituida antes de sair.
+            force_full = bool(publication.full) or (
+                self._pending is not None and self._pending[6]
+            )
             if mask is None:
                 if self._last_shape is None:
                     return  # nunca publicou: nada a limpar
@@ -336,7 +397,15 @@ class InkStreamPublisher:
                     self._stream_generation += 1
                 self._last_shape = mask.shape
                 version = publication.version
-            self._pending = (self._stream_generation, int(version), ts_us, mask)
+            self._pending = (
+                self._stream_generation,
+                int(version),
+                ts_us,
+                mask,
+                captured_at_us,
+                anchor,
+                force_full,
+            )
             self._cond.notify()
 
     def close(self):
@@ -429,7 +498,7 @@ class InkStreamPublisher:
                 self._prune_dead()
                 if not self._sinks_wanting_full(last):
                     continue
-                item = last
+                item = (*last[:6], False)  # quem chegou recebe FULL de qualquer jeito
             last = item
             try:
                 self._dispatch(*item)
@@ -444,13 +513,24 @@ class InkStreamPublisher:
         with self._sinks_lock:
             return any(sink.mask is None for sink in self._sinks)
 
-    def _dispatch(self, generation, ink_version, ts_us, mask):
+    def _dispatch(
+        self, generation, ink_version, ts_us, mask, captured_at_us, anchor, force_full
+    ):
         with self._sinks_lock:
             sinks = list(self._sinks)
         dead = []
         for sink in sinks:
             try:
-                data = self._encode_for(sink, generation, ink_version, ts_us, mask)
+                data = self._encode_for(
+                    sink,
+                    generation,
+                    ink_version,
+                    ts_us,
+                    mask,
+                    captured_at_us,
+                    anchor,
+                    force_full,
+                )
                 if data:
                     sink.write(data)
             except (OSError, ValueError):
@@ -462,19 +542,42 @@ class InkStreamPublisher:
                 _safe_close(sink)
             self._log("Stream de tinta: destino removido (conexao ou disco).")
 
-    def _encode_for(self, sink, generation, ink_version, ts_us, mask):
+    def _encode_for(
+        self,
+        sink,
+        generation,
+        ink_version,
+        ts_us,
+        mask,
+        captured_at_us=None,
+        anchor=None,
+        force_full=False,
+    ):
         full = (
-            sink.mask is None
+            force_full
+            or sink.mask is None
             or sink.generation != generation
             or sink.mask.shape != mask.shape
         )
-        if full:
-            data = pack_full(generation, ink_version, ts_us, mask, self._paper_mm)
-        else:
+        box = None
+        if not full:
             box = diff_box(sink.mask, mask)
             if box is None:
                 return None
-            data = pack_delta(generation, ink_version, ts_us, mask, box)
+            # bbox quase da pagina: o DELTA nao economiza e o FULL e mais simples.
+            full = box[2] * box[3] > FULL_FRACTION * mask.size
+        if full:
+            data = pack_full(
+                generation,
+                ink_version,
+                ts_us,
+                mask,
+                self._paper_mm,
+                captured_at_us,
+                anchor,
+            )
+        else:
+            data = pack_delta(generation, ink_version, ts_us, mask, box, captured_at_us)
         sink.mask = mask
         sink.generation = generation
         return data

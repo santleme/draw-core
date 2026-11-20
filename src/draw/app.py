@@ -1382,6 +1382,7 @@ def run(
                 ),
                 on_acquisition=emit_acquisition,
                 on_ink=ink_stream.publish if ink_stream is not None else _ignore_ink,
+                ink_meta=ink_stream is not None,
                 save_page_snapshot=save_page_snapshot,
                 config=pipeline_config,
             )
