@@ -221,14 +221,32 @@ class MotionGate:
         )
         return _texture(small), hidden == 0
 
+    def _textured_blocks(self, texture, vis):
+        h, w = texture.shape
+        count = 0
+        for y in range(0, h - _BLOCK + 1, _BLOCK):
+            for x in range(0, w - _BLOCK + 1, _BLOCK):
+                part = np.s_[y : y + _BLOCK, x : x + _BLOCK]
+                if vis[part].mean() < _BLOCK_MIN_VISIBLE:
+                    continue
+                small_eig, big_eig = _structure(
+                    np.array(texture[part], dtype=np.float32, order="C")
+                )
+                if (
+                    small_eig >= _TEXTURE_MIN
+                    and small_eig >= _TEXTURE_MIN_RATIO * big_eig
+                ):
+                    count += 1
+        return count
+
     def measure(self, warped, matrix, visible, anchor):
         """Motion desta passada contra a referencia, ou None sem juizo.
 
         warped e a pagina retificada (BGR ou cinza, 0-255: o portao de
         textura e calibrado nessa escala); matrix leva o warp desta
         passada para a grade da ancora (None = sem registro); visible e
-        a visibilidade DESTE warp. A primeira
-        passada medida de uma ancora vira a referencia (registrada);
+        a visibilidade DESTE warp. A primeira passada com blocos de
+        textura bastantes de uma ancora vira a referencia (registrada);
         ancora diferente da guardada recomeca.
         """
         anchor = None if anchor is None else np.asarray(anchor, dtype=np.float32)
@@ -240,6 +258,8 @@ class MotionGate:
             self.reset()
         texture, vis = self._prepare(warped, matrix, visible)
         if self._reference is None:
+            if self._textured_blocks(texture, vis) < _MIN_BLOCKS:
+                return None
             self._reference, self._reference_visible = texture, vis
             self._reference_anchor = anchor
             return None

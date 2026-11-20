@@ -535,6 +535,8 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 self._still_passes = 0
             if present is not None and (moved or present != self._hand_state):
                 self._hand_motion_at = self._clock()
+                if moved and self._config.pass_interval_s is not None:
+                    self._quiet_passes = 0
             self._hand_state = present
             self._condition.notify_all()
 
