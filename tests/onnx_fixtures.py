@@ -128,7 +128,9 @@ def four_class_model(path, input_name="image", size=64, extra_output=False):
     )
 
 
-def page_clean_model(path, patch=64, dynamic_batch=True, output_scale=1):
+def page_clean_model(
+    path, patch=64, dynamic_batch=True, output_scale=1, dynamic_side=False
+):
     """U-Net didático página->limpa: devolve um logit por pixel.
 
     O logit é proporcional à luminância do bloco (tinta escura =
@@ -161,16 +163,20 @@ def page_clean_model(path, patch=64, dynamic_batch=True, output_scale=1):
             )
         ]
     batch = "N" if dynamic_batch else 1
+    # dynamic_side: o arquivo de pagina inteira (altura e largura
+    # dinamicas na entrada e na saida).
+    side_in = ["H", "W"] if dynamic_side else [patch, patch]
+    side_out = ["Ho", "Wo"] if dynamic_side else [out, out]
     return _build(
         nodes,
         [
             helper.make_tensor_value_info(
-                "image", TensorProto.FLOAT, [batch, 3, patch, patch]
+                "image", TensorProto.FLOAT, [batch, 3, *side_in]
             )
         ],
         [
             helper.make_tensor_value_info(
-                "logits", TensorProto.FLOAT, [batch, 1, out, out]
+                "logits", TensorProto.FLOAT, [batch, 1, *side_out]
             )
         ],
         initializers,

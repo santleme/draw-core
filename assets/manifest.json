@@ -13,19 +13,19 @@
       "sha256": "fbc2a30080c3c557093b5ddfc334698132eb341044ccee322ccf8bcf3607cde1"
     },
     "page_clean_unet.onnx": {
-      "approved_by": "ciclo selflearn round-v2 (kernel Kaggle guzzbr/draw-selflearn-round-2, 2xT4, 2026-11-18): warm start do round-v1 (3c996284), 600 steps UniMatch sobre 1692 rotuladas (312 CGHD com polaridade corrigida no load) + 2444 nao-rotuladas. Regua selada pós-treino (eval ONNX local, verify=None): holdout-v1 notebook macro IoU 0,8700 vs 0,8476 do incumbente no seu ponto operacional (+0,022, sem regressao; thin-recall 0,8654 vs 0,8230); holdout-v2 CGHD macro IoU 0,3838 vs 0,3380 (+0,046, precision 0,8175 vs 0,7061). Gate FP 5e-4 satisfeito em t=0,97 (fp 0,0425%). ONNX validado vs checkpoint torch (max_abs_diff 2,1e-6). PROMOTE nos criterios da regua. Incumbente (3c996284) preservado em page_clean_unet.onnx.round-v1-3c996284.bak e MANIFEST anterior em MANIFEST.json.pre-round-v2.bak; reversao = restaurar os dois arquivos.",
-      "bytes": 1955856,
-      "date": "2026-11-18",
-      "sha256": "22a883f53419e162a8e1a25b76db61b1c736fbb1d0c182cbeb28002d8ec40e7c",
+      "approved_by": "round-v2 INT8 de pagina inteira (lab/quantize_page_clean.py, 2026-11-20): os pesos do round-v2 (22a883f5, models-v2) em QDQ estatico — pesos QInt8 por canal, ativacoes QUInt8, calibracao MinMax em 20 paginas retificadas dos bench-clips (gravacoes proprias, disjuntas do holdout-v1 e das paginas em branco: nenhum hash em comum, similaridade max 0,46) — com altura/largura dinamicas: o page_clean roda a pagina inteira numa chamada (padding ate multiplo de 8), sem mosaico de 256. Regua selada (eval local, verify=None, t=0,97): holdout-v1 macro IoU 0,8803 vs 0,8700 do incumbente fp32 em mosaico (+0,010; P 0,9492 vs 0,9498, R 0,9265 vs 0,9148, traco fino 0,9228 vs 0,9105); FP em mesa vazia 0,0362% vs 0,0425% (gate 5e-4). Passada 92 ms vs 223 ms (Ryzen 7700X, 4 threads); bench_ink nos 4 bench-clips (ganho+pauta+histerese): canvas +-1%, CPU por segundo de cena -43%. Incumbente fp32 (22a883f5) segue na release models-v2; reversao = restaurar o arquivo e esta entrada.",
+      "bytes": 525390,
+      "date": "2026-11-20",
+      "sha256": "d9d3737aeb9645d575d778a6c47d89e53b6b54bb8fc25fc5079abc6fe9d60e2d",
       "runtime_threshold": 0.97,
       "calibration": {
-        "date": "2026-11-18",
-        "iou": 0.8835,
-        "thin_stroke_recall": 0.9159,
-        "empty_desk_fp_rate": 0.000425,
-        "n_pages": 30,
+        "date": "2026-11-20",
+        "iou": 0.8803,
+        "thin_stroke_recall": 0.9228,
+        "empty_desk_fp_rate": 0.000362,
+        "n_pages": 36,
         "n_empty_desk_frames": 11,
-        "chosen": "t=0.97 e o menor limiar que satisfaz o gate FP <= 5e-4 no corpus de calibracao + 11 paginas em branco (o melhor-IoU t=0.96 dava fp 0.0535% > limite); a U-Net round-v2 tem calibracao de probabilidade mais alta que a v1, cujo ponto era 0.85"
+        "chosen": "Metricas deste bloco medidas no holdout-v1 (36 paginas, macro por sessao) + 11 paginas em branco — nao no corpus de calibracao de 30 paginas do round-v2 (iou 0,8835 la), entao nao compare os dois numeros. t=0.97 mantido do round-v2 para nao deslocar o ponto de operacao na troca de runtime (curva nos clipes reais: fracao > 0,97 muda 2,4%, > 0,90 muda 0,7%). Pela regra do menor limiar que passa o gate FP <= 5e-4, este binario aceitaria t=0.96 (IoU 0,8844, FP 0,0437%): fica para uma troca de limiar propria."
       }
     }
   },

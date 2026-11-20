@@ -9,6 +9,11 @@ só acumula a união das máscaras. Régua do treino (Kaggle, kernel
 guzzbr/draw-page-clean-train-v0): IoU 0,80 com limiar 0,7 sobre
 48 páginas held-out sintéticas, contra 0,18 do limiar de luminância.
 
+Inferência de página inteira quando o arquivo declara lado dinâmico
+(ver _PAGE_MULTIPLE): uma chamada, padding mínimo até o múltiplo do
+stride da U-Net e recorte exato na volta. O arquivo de lado fixo
+segue o mosaico abaixo.
+
 Inferência por mosaico de 256×256 sem sobreposição, o mesmo
 protocolo da avaliação do treino: a página é cortada em blocos de
 256, a borda incompleta é preenchida com zeros, e os logits voltam
@@ -49,6 +54,16 @@ from pathlib import Path
 import numpy as np
 
 _PATCH = 256
+# Pagina inteira: o arquivo que declara altura e largura dinamicas na
+# entrada e na saida roda a pagina numa chamada so, sem mosaico. A
+# U-Net do page_clean tem 3 MaxPool 2x2, entao o lado da entrada
+# precisa ser multiplo de 8: a pagina ganha zeros embaixo e a direita
+# ate o multiplo (850 -> 856) e a saida volta recortada no tamanho
+# exato. Medido em 2026-11-20 (draw-lab/bench-3b/RESULTADO.md):
+# sem a costura entre blocos e sem os 28% de padding do mosaico, o
+# holdout-v1 sobe de IoU 0,8700 para 0,8813 (fp32) e o FP em mesa
+# vazia cai de 0,0426% para 0,0372%.
+_PAGE_MULTIPLE = 8
 # Blocos por chamada de session.run. O padrão é a página inteira
 # numa chamada (o arquivo com lote dinâmico aceita e é a passada
 # mais barata); batch_size no construtor permite lotes menores.
@@ -160,15 +175,20 @@ def _disable_spin(options):
     options.add_session_config_entry("session.inter_op.allow_spinning", "0")
 
 
-def _output_patch_size(session):
-    """Lado do bloco na saída do modelo, e se o lote é dinâmico.
+def _inference_layout(session):
+    """("page", None) para o arquivo de pagina inteira, ou ("tiles",
+    lote_dinamico) para o mosaico de 256.
 
-    O modelo do treino devolve o mesmo 256 do bloco. Um export que
-    devolvesse outra resolução era aceito até a primeira escrita
+    Pagina inteira e o arquivo que declara altura e largura dinamicas
+    na entrada; a saida entao tambem precisa te-las (o tamanho volta
+    conferido a cada passada). Senao vale o contrato do mosaico: o
+    modelo do treino devolve o mesmo 256 do bloco. Um export que
+    devolvesse outra resolucao era aceito ate a primeira escrita
     (ValueError de broadcast dentro da thread de tinta, que morria
-    calada); aqui o contrato é lido na carga e a divergência vira
+    calada); aqui o contrato e lido na carga e a divergencia vira
     erro nomeado.
     """
+    input_shape = list(session.get_inputs()[0].shape)
     output = session.get_outputs()[0]
     shape = list(output.shape)
     if len(shape) != 4:
@@ -176,6 +196,13 @@ def _output_patch_size(session):
             "a saída do modelo pagina->limpa precisa ser [N, 1, H, W]; "
             f"o arquivo declara {shape}"
         )
+    if len(input_shape) == 4 and not any(isinstance(d, int) for d in input_shape[2:]):
+        if any(isinstance(d, int) for d in shape[2:]):
+            raise RuntimeError(
+                "o modelo pagina->limpa de pagina inteira precisa de saida "
+                f"com lado dinamico como a entrada; o arquivo declara {shape}"
+            )
+        return "page", None
     height, width = shape[2], shape[3]
     if not (
         isinstance(height, int) and isinstance(width, int) and height > 0 and width > 0
@@ -194,10 +221,8 @@ def _output_patch_size(session):
             f"a saída do modelo pagina->limpa precisa ser {_PATCH}x{_PATCH} "
             f"(o mesmo lado do bloco); o arquivo declara {height}x{width}"
         )
-    input_shape = list(session.get_inputs()[0].shape)
     batch = input_shape[0] if input_shape else 1
-    dynamic_batch = not isinstance(batch, int)
-    return height, dynamic_batch
+    return "tiles", not isinstance(batch, int)
 
 
 def _batch_size(requested, tiles, dynamic_batch):
@@ -217,7 +242,8 @@ def _batch_size(requested, tiles, dynamic_batch):
 
 
 class PageCleanInk:
-    """Máscara de tinta da página retificada, por mosaico de 256.
+    """Máscara de tinta da página retificada: página inteira (arquivo
+    de lado dinâmico) ou mosaico de 256 (arquivo de lado fixo).
 
     O mosaico é montado uma vez (lista de recortes com o
     preenchimento das bordas) e mandado ao session.run em lotes: o
@@ -254,6 +280,7 @@ class PageCleanInk:
         self._session = None
         self._input_name = None
         self._dynamic_batch = False
+        self._layout = None
 
     def load(self):
         """Carrega a sessão ONNX. Retorna True; erro sobe explícito."""
@@ -263,7 +290,8 @@ class PageCleanInk:
         if self._threshold_arg is None:
             self.threshold = resolve_threshold(entry)
         self._input_name = self._session.get_inputs()[0].name
-        self._dynamic_batch = _output_patch_size(self._session)[1]
+        self._layout, dynamic_batch = _inference_layout(self._session)
+        self._dynamic_batch = bool(dynamic_batch)
         return True
 
     def _tiles(self, warped_bgr):
@@ -305,6 +333,8 @@ class PageCleanInk:
         """
         if self._session is None:
             self.load()
+        if self._layout == "page":
+            return self._page_prob(warped_bgr)
         h, w, tiles = self._tiles(warped_bgr)
         logits = np.zeros((h, w), dtype=np.float32)
         step = _batch_size(self.batch_size, len(tiles), self._dynamic_batch)
@@ -316,6 +346,27 @@ class PageCleanInk:
                 ww = min(_PATCH, w - x)
                 logits[y : y + hh, x : x + ww] = out[index, 0, :hh, :ww]
         return 1.0 / (1.0 + np.exp(-logits))
+
+    def _page_prob(self, warped_bgr):
+        """Pagina inteira numa chamada: zeros ate o multiplo do stride,
+        saida recortada no tamanho exato do warp."""
+        h, w = warped_bgr.shape[:2]
+        ph, pw = h + (-h % _PAGE_MULTIPLE), w + (-w % _PAGE_MULTIPLE)
+        tensor = np.zeros((1, 3, ph, pw), dtype=np.float32)
+        np.divide(
+            warped_bgr.transpose(2, 0, 1),
+            255.0,
+            out=tensor[0, :, :h, :w],
+            casting="unsafe",
+        )
+        out = self._session.run(None, {self._input_name: tensor})[0]
+        if out.shape != (1, 1, ph, pw):
+            raise RuntimeError(
+                "a saída do modelo pagina->limpa de pagina inteira precisa "
+                f"ter o tamanho da entrada (1, 1, {ph}, {pw}); "
+                f"veio {tuple(out.shape)}"
+            )
+        return 1.0 / (1.0 + np.exp(-out[0, 0, :h, :w]))
 
     def ink_mask(self, warped_bgr):
         """Máscara uint8 0/255 da tinta, no tamanho do warp de entrada."""

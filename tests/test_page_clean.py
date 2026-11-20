@@ -230,3 +230,97 @@ def test_live_vote_threshold_is_decoupled_from_mask_threshold():
     assert worker._accumulator.threshold == InkConfig().seen_threshold == 0.7
     tuned = worker_mod.PageCleanWorker(_Ink(), config=InkConfig(seen_threshold=0.6))
     assert tuned._accumulator.threshold == 0.6
+
+
+# --- pagina inteira (arquivo de lado dinamico) ------------------------------
+
+
+def _textured(shape, seed=11):
+    """Pagina com conteudo por pixel: desalinhamento de 1 px muda a saida."""
+    rng = np.random.default_rng(seed)
+    return rng.integers(0, 256, (*shape, 3), dtype=np.uint8)
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [(1200, 850), (850, 1200), (853, 1201), (8, 8)],
+    ids=["retrato", "paisagem", "lados-impares", "minima"],
+)
+def test_full_page_equals_mosaic_in_both_orientations(tmp_path, shape):
+    # Modelo por pixel: a pagina inteira tem de reproduzir o mosaico
+    # pixel a pixel. Padding no lugar errado ou recorte deslocado
+    # mudaria a saida (o conteudo e ruido por pixel).
+    full = page_clean.PageCleanInk(
+        onnx_fixtures.page_clean_model(tmp_path / "full.onnx", dynamic_side=True),
+        verify=None,
+    )
+    tiled = page_clean.PageCleanInk(
+        onnx_fixtures.page_clean_model(tmp_path / "tiled.onnx", patch=256),
+        verify=None,
+    )
+    full.load()
+    tiled.load()
+    assert full._layout == "page" and tiled._layout == "tiles"
+    page = _textured(shape)
+    a = full.ink_prob(page)
+    assert a.shape == shape
+    assert np.array_equal(a, tiled.ink_prob(page))
+
+
+@pytest.mark.parametrize(
+    ("shape", "padded"),
+    [
+        ((1200, 850), (1200, 856)),
+        ((850, 1200), (856, 1200)),
+        ((1201, 853), (1208, 856)),
+    ],
+)
+def test_full_page_pads_only_to_the_stride_multiple(tmp_path, shape, padded):
+    ink = page_clean.PageCleanInk(
+        onnx_fixtures.page_clean_model(tmp_path / "full.onnx", dynamic_side=True),
+        verify=None,
+    )
+    ink.load()
+    seen = []
+    real_run = ink._session.run
+
+    class _Spy:
+        def run(self, names, feeds):
+            seen.append(next(iter(feeds.values())).shape)
+            return real_run(names, feeds)
+
+    ink._session = _Spy()
+    ink.ink_prob(_textured(shape))
+    assert seen == [(1, 3, *padded)], "uma chamada so, padding minimo embaixo/direita"
+
+
+def test_full_page_output_must_keep_the_input_size(tmp_path):
+    path = onnx_fixtures.page_clean_model(
+        tmp_path / "half.onnx", patch=256, output_scale=2, dynamic_side=True
+    )
+    ink = page_clean.PageCleanInk(path, verify=None)
+    ink.load()
+    with pytest.raises(RuntimeError, match="tamanho da entrada"):
+        ink.ink_prob(_textured((120, 80)))
+
+
+def test_dynamic_input_with_fixed_output_is_refused_at_load(tmp_path):
+    import onnx
+    from onnx import TensorProto, helper
+
+    graph = helper.make_graph(
+        [helper.make_node("ReduceMean", ["image"], ["logits"], axes=[1], keepdims=1)],
+        "draw-test-mixed",
+        [helper.make_tensor_value_info("image", TensorProto.FLOAT, ["N", 3, "H", "W"])],
+        [
+            helper.make_tensor_value_info(
+                "logits", TensorProto.FLOAT, ["N", 1, 256, 256]
+            )
+        ],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+    model.ir_version = 8
+    onnx.save(model, str(tmp_path / "mixed.onnx"))
+    ink = page_clean.PageCleanInk(tmp_path / "mixed.onnx", verify=None)
+    with pytest.raises(RuntimeError, match="lado dinamico"):
+        ink.load()
