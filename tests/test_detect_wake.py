@@ -240,6 +240,174 @@ def test_pipeline_opt_in_skips_when_settled_and_wakes_on_move():
     assert pipe._detect_wake.wake_events == 1
 
 
+def test_settled_tracking_keeps_feeding_ink_and_hand_presence():
+    # Regressao (review #69): com detect_wake assentado em 1 Hz, a tinta e
+    # a presenca de mao nao podem cair para 1 Hz — seguem recebendo quadros
+    # na cadencia ativa (--ink-interval 0,15 s) sobre o quad assentado.
+    from draw.ink.config import InkConfig
+
+    class _DummyDet:
+        error = None
+
+        def __init__(self):
+            self.submits = 0
+            self._seq = 0
+            self._pending = None
+
+        def submit(self, frame, captured_at, frame_index=None):
+            self.submits += 1
+            self._seq += 1
+            self._pending = contracts.DetectionResult(
+                sequence=self._seq,
+                corners=BASE_CORNERS.copy(),
+                verdict="paper",
+                captured_at=captured_at,
+                detect_ms=10.0,
+            )
+
+        def poll(self, after_seq):
+            if self._pending is not None and self._pending.sequence > after_seq:
+                return self._pending
+            return None
+
+        def take_traces(self, upto_result_seq=None):
+            return []
+
+    class _CountingInk:
+        error = None
+
+        def __init__(self):
+            self.submits = 0
+
+        def new_generation(self, preserve_identity=False):
+            return 1
+
+        def submit(self, *_a, **_kw):
+            self.submits += 1
+
+        def set_hand_presence(self, *_a, **_kw):
+            return None
+
+        def poll_display(self, *_a, **_kw):
+            return None
+
+    class _CountingHand:
+        error = None
+
+        def __init__(self):
+            self.submits = 0
+
+        def submit(self, *_a, **_kw):
+            self.submits += 1
+
+        def poll(self, *_a, **_kw):
+            return None
+
+    now = [100.0]
+    det = _DummyDet()
+    ink = _CountingInk()
+    hand = _CountingHand()
+    pipe = pipeline.Pipeline(
+        detection_worker=det,
+        ink_worker=ink,
+        hand_presence_worker=hand,
+        config=PipelineConfig(
+            ink=InkConfig(pass_interval_s=0.15),
+            detect_wake=True,
+            detect_wake_interval_s=1.0,
+        ),
+        clock=lambda: now[0],
+    )
+    still = _sheet_frame(BASE_CORNERS)
+    # 60 quadros (2,0 s a 30 fps): detector cai para ~5 chamadas, mas tinta
+    # e mao seguem recebendo >= 10 quadros (>= 5 Hz).
+    for seq in range(60):
+        pipe.step(contracts.FramePacket(still, now[0], seq))
+        now[0] += 1.0 / 30.0
+    assert pipe._detect_wake.settled
+    assert det.submits <= 6
+    assert ink.submits >= 10
+    assert hand.submits >= 10
+
+
+def test_inflight_move_during_third_detection_wakes_immediately():
+    # Regressao (review #69): se a folha mexer enquanto a 3a deteccao estavel
+    # esta em voo, a referencia do sentinela precisa vir do quadro submetido
+    # (nao do quadro ja movido), para acordar imediatamente no quadro seguinte.
+    class _DelayedDet:
+        error = None
+
+        def __init__(self):
+            self.submits = 0
+            self._seq = 0
+            self._queue = []
+
+        def submit(self, frame, captured_at, frame_index=None):
+            self.submits += 1
+            self._seq += 1
+            self._queue.append(
+                contracts.DetectionResult(
+                    sequence=self._seq,
+                    corners=BASE_CORNERS.copy(),
+                    verdict="paper",
+                    captured_at=captured_at,
+                    detect_ms=10.0,
+                )
+            )
+
+        def poll(self, after_seq):
+            if self._queue and self._queue[0].sequence > after_seq:
+                return self._queue.pop(0)
+            return None
+
+        def take_traces(self, upto_result_seq=None):
+            return []
+
+    class _DummyInk:
+        error = None
+
+        def new_generation(self, preserve_identity=False):
+            return 1
+
+        def submit(self, *_a, **_kw):
+            return None
+
+        def set_hand_presence(self, *_a, **_kw):
+            return None
+
+        def poll_display(self, *_a, **_kw):
+            return None
+
+    now = [100.0]
+    det = _DelayedDet()
+    pipe = pipeline.Pipeline(
+        detection_worker=det,
+        ink_worker=_DummyInk(),
+        config=PipelineConfig(detect_wake=True, detect_wake_interval_s=1.0),
+        clock=lambda: now[0],
+    )
+    still = _sheet_frame(BASE_CORNERS)
+    moved = _sheet_frame(BASE_CORNERS + np.float32([12.0, 0.0]))
+
+    # Roda quadros estaticos ate o exato quadro em que a 3a deteccao e submetida
+    seq = 0
+    while det.submits < 3:
+        pipe.step(contracts.FramePacket(still, now[0], seq))
+        now[0] += 1.0 / 30.0
+        seq += 1
+    assert not pipe._detect_wake.settled
+    # No quadro seguinte a 3a deteccao chega, mas a folha JA mexeu nesse quadro:
+    # a referencia guardada deve ser a do quadro submetido (still), nao moved.
+    pipe.step(contracts.FramePacket(moved, now[0], seq))
+    now[0] += 1.0 / 30.0
+    assert pipe._detect_wake.settled
+    submits_before = det.submits
+    # No quadro seguinte, sentinela compara moved vs still e acorda ja!
+    pipe.step(contracts.FramePacket(moved, now[0], seq + 1))
+    assert det.submits == submits_before + 1
+    assert not pipe._detect_wake.settled
+
+
 def test_cli_flag_and_config_validation(monkeypatch):
     with pytest.raises(ValueError):
         PipelineConfig(detect_wake_interval_s=0.0)

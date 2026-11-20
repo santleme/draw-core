@@ -178,6 +178,8 @@ class Pipeline:
             if self._config.detect_wake
             else None
         )
+        self._detect_wake_frames = deque(maxlen=4) if self._config.detect_wake else None
+        self._last_ink_submit_at = None
         self.corner_history = deque(maxlen=_INK_CORNER_HISTORY)
         self.ink_session_open = False
         self.accumulated_canvas = None
@@ -285,8 +287,15 @@ class Pipeline:
         entre passadas re-projeta a tinta assentada e cada
         alinhamento confirma a sua copia.
         """
-        if self._config.skip_stale and (
-            self.tracker._frames_since_seen > _STALE_PASS_MIN_FRAMES
+        settled_wake = (
+            self._detect_wake is not None
+            and self._detect_wake.settled
+            and not self.tracker.missed
+        )
+        if (
+            self._config.skip_stale
+            and not settled_wake
+            and self.tracker._frames_since_seen > _STALE_PASS_MIN_FRAMES
         ):
             # skip_stale: os cantos retidos sao de graça —
             # frames_since_seen passou do piso da queda sem
@@ -454,6 +463,10 @@ class Pipeline:
         detect_wake = getattr(self, "_detect_wake", None)
         if detect_wake is not None:
             detect_wake.reset()
+        detect_wake_frames = getattr(self, "_detect_wake_frames", None)
+        if detect_wake_frames is not None:
+            detect_wake_frames.clear()
+        self._last_ink_submit_at = None
         self.corner_history.clear()
         self.display_corners = None
         self.display_gray = None
@@ -512,6 +525,8 @@ class Pipeline:
         else:
             should_detect = base_should_detect
         if should_detect:
+            if self._detect_wake_frames is not None:
+                self._detect_wake_frames.append((packet.captured_at, frame))
             self.detection_worker.submit(frame, packet.captured_at, self.frame_number)
         if self.detection_worker.error is not None:
             raise self.detection_worker.error
@@ -523,9 +538,15 @@ class Pipeline:
             det_captured_at if ran_detection else self._clock(),
         )
         if ran_detection and self._detect_wake is not None:
+            ref_frame = frame
+            if self._detect_wake_frames is not None and det_captured_at is not None:
+                for ts, submitted in reversed(self._detect_wake_frames):
+                    if abs(ts - det_captured_at) < 1e-6:
+                        ref_frame = submitted
+                        break
             self._detect_wake.on_detection(
                 self.tracker.corners,
-                frame,
+                ref_frame,
                 det_captured_at,
                 hand_mask=self._hand_mask_det,
                 missed=self.tracker.missed,
@@ -691,9 +712,40 @@ class Pipeline:
             ink_corners = np.median(np.stack(self.corner_history), axis=0).astype(
                 np.float32
             )
+            self._last_ink_submit_at = packet.captured_at
             self._warp_and_submit_ink(
                 frame, ink_corners, captured_at=packet.captured_at
             )
+        elif (
+            self._detect_wake is not None
+            and self._detect_wake.settled
+            and self.tracker.corners is not None
+            and self.ink_session_open
+            and self.corner_history
+        ):
+            # Com detect_wake assentado, o detector dorme a 1 Hz mas a
+            # tinta e a presenca de mao seguem alimentadas na cadencia
+            # normal sobre o quad assentado.
+            settled_due = base_should_detect
+            ink_interval = self._config.ink.pass_interval_s
+            if (
+                not settled_due
+                and ink_interval is not None
+                and self._last_ink_submit_at is not None
+            ):
+                settled_due = (
+                    packet.captured_at - self._last_ink_submit_at >= ink_interval - 1e-9
+                )
+            if settled_due:
+                if self.hand_presence_worker is not None:
+                    self.hand_presence_worker.submit(frame, packet.captured_at * 1000.0)
+                ink_corners = np.median(np.stack(self.corner_history), axis=0).astype(
+                    np.float32
+                )
+                self._last_ink_submit_at = packet.captured_at
+                self._warp_and_submit_ink(
+                    frame, ink_corners, captured_at=packet.captured_at
+                )
 
         return self.collect_ink()
 
