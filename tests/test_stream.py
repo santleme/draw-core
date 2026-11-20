@@ -18,6 +18,12 @@ from draw.protocol import (
 TOKEN = "t" * 32
 
 
+needs_private_files = pytest.mark.skipif(
+    not stream._PRIVATE_FILES,
+    reason="gravacao privada exige os.fchmod (nao no Windows nativo)",
+)
+
+
 def _pub(pub, generation, version, mask):
     pub.publish(contracts.InkPublication(generation, version, mask))
 
@@ -136,6 +142,7 @@ def _read_until(sock, canvas, version):
             return
 
 
+@needs_private_files
 def test_publisher_socket_and_record_reconstruct_same_canvas(tmp_path):
     rec_path = tmp_path / "s.drawink"
     pub = stream.InkStreamPublisher(
@@ -267,6 +274,7 @@ def test_zlib_garbage_and_trailing_bytes_are_protocol_errors():
             _canvas_from(data + payload)
 
 
+@needs_private_files
 def test_record_only_needs_no_token_and_keeps_final_ink(tmp_path):
     path = tmp_path / "r.drawink"
     pub = stream.InkStreamPublisher(port=None, record_path=path, log=lambda *_: None)
@@ -289,6 +297,7 @@ def test_nothing_to_publish_is_refused():
         stream.InkStreamPublisher(port=None)
 
 
+@needs_private_files
 def test_recording_is_private(tmp_path):
     import os
     import stat
@@ -305,6 +314,7 @@ def test_recording_is_private(tmp_path):
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
+@needs_private_files
 def test_failing_recording_does_not_stop_live_stream(tmp_path):
     pub = stream.InkStreamPublisher(
         port=0, token=TOKEN, record_path=tmp_path / "f.drawink", log=lambda *_: None
@@ -467,6 +477,7 @@ def test_recording_refused_without_private_files(monkeypatch, tmp_path):
     assert not path.exists()
 
 
+@needs_private_files
 def test_close_reports_recording_flush_failure(tmp_path):
     messages = []
     pub = stream.InkStreamPublisher(
