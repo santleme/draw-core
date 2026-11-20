@@ -234,6 +234,11 @@ class HandMasker:
                 return True
             if self._unavailable:
                 return False
+            path = _resolve_model_path(self._requested_path)
+            if path is None or not Path(path).exists():
+                self._unavailable = True
+                self._warn_once()
+                return False
             try:
                 import mediapipe as mp
             except Exception:
@@ -269,6 +274,10 @@ class HandMasker:
             if self._video_landmarker is not None:
                 return True
             if self._video_unavailable:
+                return False
+            path = _resolve_model_path(self._requested_path)
+            if path is None or not Path(path).exists():
+                self._video_unavailable = True
                 return False
             try:
                 import mediapipe as mp

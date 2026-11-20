@@ -295,3 +295,23 @@ def test_landmarker_created_after_close_is_disposed(monkeypatch, tmp_path):
     # ja marcou o masker indisponivel.
     assert len(created) == 1
     assert created[0].closed == 1
+
+
+def test_missing_model_never_imports_mediapipe(tmp_path, monkeypatch):
+    import builtins
+
+    monkeypatch.setattr(
+        hand_module, "_DEFAULT_CANDIDATES", (str(tmp_path / "ausente.task"),)
+    )
+    real_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        if name == "mediapipe" or name.startswith("mediapipe."):
+            raise AssertionError("nao deveria importar mediapipe sem arquivo de modelo")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+    masker = hand_module.HandMasker(verify=None)
+    frame = np.zeros((20, 30, 3), dtype=np.uint8)
+    assert masker.mask(frame) is None
+    assert masker.presence_signature(frame, timestamp_ms=1000) is None

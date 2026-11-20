@@ -468,3 +468,21 @@ def test_capture_frames_propagates_producer_error():
     with pytest.raises(wh.CaptureError, match="indisponivel"):
         next(gen)
     gen.close()
+
+
+def test_accept_loop_stop_wakes_immediately():
+    server = _serve_one_client()
+    thread, stop, _logs = _start_loop(server, lambda: iter([b"jpeg"]))
+    try:
+        with _client(server) as conn:
+            assert conn.recv(4) == wh.ACCEPT
+            assert conn.recv(wh.HEADER.size + 4)
+        started = time.monotonic()
+        stop.set()
+        thread.join(timeout=1.0)
+        elapsed = time.monotonic() - started
+        assert not thread.is_alive()
+        assert elapsed < 0.1
+    finally:
+        stop.set()
+        server.close()

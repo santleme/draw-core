@@ -316,14 +316,16 @@ class InkStreamPublisher:
         self._last_anchor = None
         self._server = None
         self.port = None
+        self._wake_r = self._wake_w = None
+        self._wake_lock = threading.Lock()
+        self._wake_closed = False
         threads = []
         try:
             if port is not None:
                 self._server = socket.create_server((host, port))
                 self.port = self._server.getsockname()[1]
-                # accept() com prazo: fechar o socket de outra thread nao o
-                # destrava.
-                self._server.settimeout(0.2)
+                self._server.setblocking(False)
+                self._wake_r, self._wake_w = socket.socketpair()
                 threads.append(
                     threading.Thread(
                         target=self._accept_loop, name="ink-stream-accept", daemon=True
@@ -332,8 +334,12 @@ class InkStreamPublisher:
             if record_path is not None:
                 self._sinks.append(self._open_record(record_path))
         except BaseException:
-            if self._server is not None:
-                self._server.close()
+            for sock in (self._wake_w, self._wake_r, self._server):
+                if sock is not None:
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
             raise
         threads.append(
             threading.Thread(
@@ -435,13 +441,23 @@ class InkStreamPublisher:
         with self._cond:
             self._closed = True
             self._cond.notify()
-        if self._server is not None:
-            try:
-                self._server.close()
-            except OSError:
-                pass
+        with self._wake_lock:
+            if not self._wake_closed and self._wake_w is not None:
+                try:
+                    self._wake_w.sendall(b"\x00")
+                except OSError:
+                    pass
         for thread in self._threads:
             thread.join(timeout=SEND_TIMEOUT_S + 1)
+        with self._wake_lock:
+            self._wake_closed = True
+            for sock in (self._wake_w, self._wake_r, self._server):
+                if sock is not None:
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
+            self._wake_w = self._wake_r = self._server = None
         with self._sinks_lock:
             sinks, self._sinks = self._sinks, []
         for sink in sinks:
@@ -451,11 +467,22 @@ class InkStreamPublisher:
     def _accept_loop(self):
         while not self._closed:
             try:
+                readable, _, _ = select.select(
+                    [self._server, self._wake_r], [], [], 0.5
+                )
+            except (OSError, ValueError):
+                return
+            if self._closed or self._wake_r in readable:
+                return
+            if self._server not in readable:
+                continue
+            try:
                 conn, _addr = self._server.accept()
-            except TimeoutError:
+            except BlockingIOError:
                 continue
             except OSError:
                 return
+            conn.setblocking(True)
             if not self._handshakes.acquire(blocking=False):
                 conn.close()  # handshakes demais em aberto: recusa sem thread
                 continue

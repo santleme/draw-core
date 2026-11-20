@@ -769,3 +769,13 @@ def test_full_discontinuity_does_not_inherit_the_old_anchor():
         assert canvas.anchor_corners is None and canvas.captured_at_us is None
     finally:
         pub.close()
+
+
+def test_close_wakes_accept_loop_immediately():
+    pub = stream.InkStreamPublisher(port=0, token=TOKEN, log=lambda *_: None)
+    started = time.monotonic()
+    pub.close()
+    elapsed = time.monotonic() - started
+    assert elapsed < 0.1
+    assert not any(t.is_alive() for t in pub._threads)
+    pub.close()  # segunda chamada e no-op seguro

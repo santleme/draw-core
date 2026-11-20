@@ -51,6 +51,8 @@ import ipaddress
 import os
 import queue
 import secrets
+import select
+import socket
 import struct
 import sys
 import threading
@@ -537,43 +539,107 @@ def _accept_loop(
     reaberta por cliente (make_frames() a cada conexao) — nenhum
     estado de captura e compartilhado entre clientes. O `stop`
     opcional (threading.Event) da uma saida cooperativa, checada
-    entre accepts — usada por testes e por um desligamento limpo.
+    entre accepts (e acorda imediatamente via socketpair) — usada por
+    testes e por um desligamento limpo.
     """
+    if stop is not None and stop.is_set():
+        return
+    prev_timeout = server.gettimeout()
+    server.setblocking(False)
+    wake_r = wake_w = watcher = None
+    wake_lock = threading.Lock()
+    wake_closed = False
     if stop is not None:
-        server.settimeout(0.25)
-    while True:
-        if stop is not None and stop.is_set():
-            return
+        wake_r, wake_w = socket.socketpair()
+
+        def _watch():
+            stop.wait()
+            with wake_lock:
+                if not wake_closed:
+                    try:
+                        wake_w.sendall(b"\x00")
+                    except OSError:
+                        pass
+
+        watcher = threading.Thread(
+            target=_watch, name="helper-accept-wake", daemon=True
+        )
         try:
-            conn, addr = server.accept()
-        except TimeoutError:
-            continue
-        if not authenticate_client(conn, token):
-            log(f"Conexao de {addr[0]} recusada: handshake/token invalido.")
-            conn.close()
-            continue
-        frames = None
+            watcher.start()
+        except BaseException:
+            for sock in (wake_w, wake_r):
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+            raise
+        watch_list = [server, wake_r]
+    else:
+        watch_list = [server]
+    try:
+        while True:
+            if stop is not None and stop.is_set():
+                return
+            try:
+                readable, _, _ = select.select(watch_list, [], [], 0.5)
+            except (OSError, ValueError):
+                return
+            if stop is not None and (stop.is_set() or wake_r in readable):
+                return
+            if server not in readable:
+                continue
+            try:
+                conn, addr = server.accept()
+            except BlockingIOError:
+                continue
+            except OSError:
+                return
+            # No Windows (Winsock), socket aceito herda modo nao-bloqueante.
+            conn.setblocking(True)
+            if not authenticate_client(conn, token):
+                log(f"Conexao de {addr[0]} recusada: handshake/token invalido.")
+                conn.close()
+                continue
+            frames = None
+            try:
+                # Dentro do try de proposito: uma factory eagerciada que
+                # levanta CaptureError/OSError ao abrir a camera precisa
+                # cair na mesma recuperacao das falhas de iteracao —
+                # so a sessao morre, o helper volta ao accept.
+                frames = make_frames()
+                sent = _handle_client(conn, frames, start_ns, clock)
+                log(f"Cliente {addr[0]} desconectou apos {sent} frames.")
+            except CaptureError as exc:
+                log(f"Captura falhou para {addr[0]} ({exc}); voltando a escutar.")
+            except (OSError, ConnectionError):
+                log(f"Conexao com {addr[0]} caiu; voltando a escutar.")
+            finally:
+                # Sem isso, um OSError no sendall abandonava o gerador de
+                # captura — o finally dele (stop da thread produtora +
+                # release do VideoCapture) so rodava no GC, e a camera
+                # podia ficar refem ate la.
+                close = getattr(frames, "close", None)
+                if close is not None:
+                    close()
+                conn.close()
+    finally:
         try:
-            # Dentro do try de proposito: uma factory eagerciada que
-            # levanta CaptureError/OSError ao abrir a camera precisa
-            # cair na mesma recuperacao das falhas de iteracao —
-            # so a sessao morre, o helper volta ao accept.
-            frames = make_frames()
-            sent = _handle_client(conn, frames, start_ns, clock)
-            log(f"Cliente {addr[0]} desconectou apos {sent} frames.")
-        except CaptureError as exc:
-            log(f"Captura falhou para {addr[0]} ({exc}); voltando a escutar.")
-        except (OSError, ConnectionError):
-            log(f"Conexao com {addr[0]} caiu; voltando a escutar.")
-        finally:
-            # Sem isso, um OSError no sendall abandonava o gerador de
-            # captura — o finally dele (stop da thread produtora +
-            # release do VideoCapture) so rodava no GC, e a camera
-            # podia ficar refem ate la.
-            close = getattr(frames, "close", None)
-            if close is not None:
-                close()
-            conn.close()
+            server.settimeout(prev_timeout)
+        except OSError:
+            pass
+        if wake_w is not None:
+            with wake_lock:
+                wake_closed = True
+                try:
+                    wake_w.close()
+                except OSError:
+                    pass
+            try:
+                wake_r.close()
+            except OSError:
+                pass
+            if stop.is_set():
+                watcher.join(timeout=1.0)
 
 
 def serve(
@@ -597,8 +663,6 @@ def serve(
     de comando) injetarem fonte, fabrica de captura, relogio e uma
     saida cooperativa.
     """
-    import socket
-
     bind_host = resolve_bind_host(host, allow_all_interfaces)
     token = resolve_token(token)
     set_dpi_awareness()

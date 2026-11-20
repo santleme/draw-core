@@ -143,6 +143,8 @@ class SyntheticCapture:
         self.quad -= np.maximum(self.quad.max(axis=0) - (gs.SIZE - 24), 0)
         self._quad_now = self.quad.copy()
         self._ink = np.zeros((self.ph, self.pw), np.uint8)
+        self._page_rev = 0
+        self._static_cache = None
         self._page_corners = np.float32(
             [[0, 0], [self.pw, 0], [self.pw, self.ph], [0, self.ph]]
         )
@@ -484,6 +486,7 @@ class SyntheticCapture:
     def release(self):
         self._opened = False
         self.last_scene = None
+        self._static_cache = None
 
     def _current_phase(self):
         index = int(np.searchsorted(self._phase_ends, self._position, side="right"))
@@ -495,19 +498,21 @@ class SyntheticCapture:
         completed = min(len(specs), max(0, local + 1) // self.frames_per_stroke)
         while phase["applied"] < completed:
             gs._apply_stroke(self._paper, self._ink, specs[phase["applied"]])
+            self._page_rev += 1
             self._completed += 1
             phase["applied"] += 1
-        paper, ink = self._paper.copy(), self._ink.copy()
         pen = None
         remainder = max(0, local + 1) % self.frames_per_stroke
         if completed < len(specs) and remainder:
+            paper, ink = self._paper.copy(), self._ink.copy()
             kind, color, thick, points = specs[completed]
             count = max(2, math.ceil(len(points) * remainder / self.frames_per_stroke))
             gs._apply_stroke(paper, ink, (kind, color, thick, points[:count]))
             pen = points[count - 1]
-        elif completed:
+            return paper, ink, pen, True
+        if completed:
             pen = specs[completed - 1][3][-1]
-        return paper, ink, pen
+        return self._paper, self._ink, pen, False
 
     def _step_erase(self, phase, local):
         """Varredura de borracha: devolve o papel original sob a faixa já
@@ -518,6 +523,7 @@ class SyntheticCapture:
         if front > x:
             self._paper[y : y + h, x:front] = self._paper_pristine[y : y + h, x:front]
             self._ink[y : y + h, x:front] = 0
+            self._page_rev += 1
         eraser_page = (min(front, x + w - 1), y + h // 2)
         return eraser_page
 
@@ -564,15 +570,14 @@ class SyntheticCapture:
                 time.sleep(delay)
         phase = self._current_phase()
         local = self._position - phase["start"]
-        paper, ink = self._paper.copy(), self._ink.copy()
+        paper, ink, is_partial = self._paper, self._ink, False
         pen = None
         eraser_page = None
         palm_page = None
         if phase["kind"] == "write":
-            paper, ink, pen = self._step_write(phase, local)
+            paper, ink, pen, is_partial = self._step_write(phase, local)
         elif phase["kind"] == "erase":
             eraser_page = self._step_erase(phase, local)
-            paper, ink = self._paper.copy(), self._ink.copy()
         elif phase["kind"] == "move":
             self._step_move(phase, local)
             palm_page = phase.get("grab_at")
@@ -588,105 +593,159 @@ class SyntheticCapture:
             palm_page = phase["sweep_from"] + t * (
                 phase["sweep_to"] - phase["sweep_from"]
             )
-        self.page_to_scene = cv2.getPerspectiveTransform(
-            self._page_corners, self._quad_now
-        )
         quad = self._quad_now
-        if self._curl is not None:
-            paper_render = np.clip(
-                paper.astype(np.float32) * self._curl_shade[..., None], 0, 255
-            ).astype(np.uint8)
-            s2p = sim_isp.scene_to_page_map(
-                np.linalg.inv(self.page_to_scene), self.pw, self.ph, self._curl
-            )
-            rgb_w, paper_mask, ink_w, paper_cov, ink_cov = sim_isp.warp_paper_mapped(
-                paper_render, ink, s2p[0], s2p[1]
-            )
-        else:
-            rgb_w, paper_mask, ink_w, paper_cov, ink_cov = gs._warp_paper(
-                paper, ink, quad
-            )
         quad_delta = self._quad_now - self._prev_quad
         self._prev_quad = self._quad_now.copy()
         page_vx, page_vy = _quad_step_velocity(quad_delta)
-        if self._motion_blur:
-            # A folha em movimento borra na direção do gesto; as
-            # coberturas borram junto — a franja de movimento vira
-            # rótulo ambíguo (ignore), como na mesa real.
-            rgb_w = sim_isp.blur_along(rgb_w, page_vx, page_vy)
-            paper_cov = sim_isp.blur_along(paper_cov, page_vx, page_vy)
-            ink_cov = sim_isp.blur_along(ink_cov, page_vx, page_vy)
-        if self._sheen_center is not None:
-            sim_isp.ink_sheen(
-                rgb_w,
+        page_blurred = self._motion_blur and (
+            sim_isp.motion_kernel(page_vx, page_vy) is not None
+        )
+        cache_key = (
+            None if (is_partial or page_blurred) else (self._page_rev, quad.tobytes())
+        )
+        if (
+            cache_key is not None
+            and self._static_cache is not None
+            and self._static_cache[0] == cache_key
+        ):
+            (
+                _,
+                cached_pts,
+                base_rgb,
+                base_mask,
                 ink_w,
-                self._sheen_center,
-                (float(self._light_dir[0]), float(self._light_dir[1])),
-                self._sheen_width,
-                self._ink_sheen,
+                paper_cov,
+                ink_cov,
+                cached_final_mask,
+            ) = self._static_cache
+            self.page_to_scene = cached_pts.copy()
+        else:
+            self.page_to_scene = cv2.getPerspectiveTransform(
+                self._page_corners, self._quad_now
             )
-        rgb = self._background.copy()
-        on_paper = paper_mask > 0
-        rgb[on_paper] = rgb_w[on_paper]
-        mask = np.zeros_like(paper_mask)
-        mask[on_paper] = gs.PAPER
-        mask[(ink_w > 0) & on_paper] = gs.INK
-        hand_cov = np.zeros_like(paper_cov)
-
-        def sprite_motion(key, cx, cy):
-            prev = self._prev_sprite.get(key)
-            self._prev_sprite[key] = (cx, cy, self._position)
-            if prev is None or prev[2] != self._position - 1:
-                return 0.0, 0.0
-            return float(cx - prev[0]), float(cy - prev[1])
-
-        def paste_sprite(key, sprite, cx, cy):
-            rgb_s, mask_s, cov_s = sprite
-            vx, vy = sprite_motion(key, cx, cy)
-            if self._hand_shadow:
-                sim_isp.cast_shadow(
-                    rgb,
-                    cov_s,
-                    cx,
-                    cy,
-                    self._shadow_offset,
-                    self._shadow_sigma,
-                    self._shadow_strength,
+            if self._curl is not None:
+                paper_render = np.clip(
+                    paper.astype(np.float32) * self._curl_shade[..., None], 0, 255
+                ).astype(np.uint8)
+                s2p = sim_isp.scene_to_page_map(
+                    np.linalg.inv(self.page_to_scene), self.pw, self.ph, self._curl
                 )
-            if self._motion_blur and math.hypot(vx, vy) >= 2:
-                rgb_s = sim_isp.blur_along(rgb_s, vx, vy)
-                mask_s = sim_isp.blur_along(mask_s, vx, vy)
-                cov_s = sim_isp.blur_along(cov_s, vx, vy)
-            gs._paste_hand(rgb, mask, rgb_s, mask_s, cx, cy)
-            gs._paste_coverage(hand_cov, cov_s, cx, cy)
+                rgb_w, paper_mask, ink_w, paper_cov, ink_cov = (
+                    sim_isp.warp_paper_mapped(paper_render, ink, s2p[0], s2p[1])
+                )
+            else:
+                rgb_w, paper_mask, ink_w, paper_cov, ink_cov = gs._warp_paper(
+                    paper, ink, quad
+                )
+            if page_blurred:
+                # A folha em movimento borra na direção do gesto; as
+                # coberturas borram junto — a franja de movimento vira
+                # rótulo ambíguo (ignore), como na mesa real.
+                rgb_w = sim_isp.blur_along(rgb_w, page_vx, page_vy)
+                paper_cov = sim_isp.blur_along(paper_cov, page_vx, page_vy)
+                ink_cov = sim_isp.blur_along(ink_cov, page_vx, page_vy)
+            if self._sheen_center is not None:
+                sim_isp.ink_sheen(
+                    rgb_w,
+                    ink_w,
+                    self._sheen_center,
+                    (float(self._light_dir[0]), float(self._light_dir[1])),
+                    self._sheen_width,
+                    self._ink_sheen,
+                )
+            base_rgb = self._background.copy()
+            on_paper = paper_mask > 0
+            base_rgb[on_paper] = rgb_w[on_paper]
+            base_mask = np.zeros_like(paper_mask)
+            base_mask[on_paper] = gs.PAPER
+            base_mask[(ink_w > 0) & on_paper] = gs.INK
+            cached_final_mask = None
+            if cache_key is not None:
+                self._static_cache = [
+                    cache_key,
+                    self.page_to_scene.copy(),
+                    base_rgb,
+                    base_mask,
+                    ink_w,
+                    paper_cov,
+                    ink_cov,
+                    None,
+                ]
 
-        if eraser_page is not None and self._eraser is not None:
-            location = cv2.perspectiveTransform(
-                np.float32(eraser_page).reshape(1, 1, 2), self.page_to_scene
-            )[0, 0]
-            cx, cy = (int(v) for v in location)
-            paste_sprite("eraser", self._eraser, cx, cy)
-            if self._hand is not None:
-                paste_sprite("hand_eraser", self._hand, cx, cy - 60)
-        elif self._hand is not None and pen is not None:
-            location = cv2.perspectiveTransform(
-                np.float32(pen).reshape(1, 1, 2), self.page_to_scene
-            )[0, 0]
-            cx, cy = (int(v) for v in location)
-            paste_sprite("hand_pen", self._hand, cx, cy)
-        if palm_page is not None and self._palm is not None:
-            location = cv2.perspectiveTransform(
-                np.float32(palm_page).reshape(1, 1, 2), self.page_to_scene
-            )[0, 0]
-            cx, cy = (int(v) for v in location)
-            paste_sprite("palm", self._palm, cx, cy)
-        mask, _ = gs._ambiguity_ignore(mask, paper_cov, ink_cov, hand_cov)
+        has_sprite = (
+            (eraser_page is not None and self._eraser is not None)
+            or (self._hand is not None and pen is not None)
+            or (palm_page is not None and self._palm is not None)
+        )
+        if has_sprite:
+            rgb = base_rgb.copy()
+            mask = base_mask.copy()
+            hand_cov = np.zeros_like(paper_cov)
+
+            def sprite_motion(key, cx, cy):
+                prev = self._prev_sprite.get(key)
+                self._prev_sprite[key] = (cx, cy, self._position)
+                if prev is None or prev[2] != self._position - 1:
+                    return 0.0, 0.0
+                return float(cx - prev[0]), float(cy - prev[1])
+
+            def paste_sprite(key, sprite, cx, cy):
+                rgb_s, mask_s, cov_s = sprite
+                vx, vy = sprite_motion(key, cx, cy)
+                if self._hand_shadow:
+                    sim_isp.cast_shadow(
+                        rgb,
+                        cov_s,
+                        cx,
+                        cy,
+                        self._shadow_offset,
+                        self._shadow_sigma,
+                        self._shadow_strength,
+                    )
+                if self._motion_blur and math.hypot(vx, vy) >= 2:
+                    rgb_s = sim_isp.blur_along(rgb_s, vx, vy)
+                    mask_s = sim_isp.blur_along(mask_s, vx, vy)
+                    cov_s = sim_isp.blur_along(cov_s, vx, vy)
+                gs._paste_hand(rgb, mask, rgb_s, mask_s, cx, cy)
+                gs._paste_coverage(hand_cov, cov_s, cx, cy)
+
+            if eraser_page is not None and self._eraser is not None:
+                location = cv2.perspectiveTransform(
+                    np.float32(eraser_page).reshape(1, 1, 2), self.page_to_scene
+                )[0, 0]
+                cx, cy = (int(v) for v in location)
+                paste_sprite("eraser", self._eraser, cx, cy)
+                if self._hand is not None:
+                    paste_sprite("hand_eraser", self._hand, cx, cy - 60)
+            elif self._hand is not None and pen is not None:
+                location = cv2.perspectiveTransform(
+                    np.float32(pen).reshape(1, 1, 2), self.page_to_scene
+                )[0, 0]
+                cx, cy = (int(v) for v in location)
+                paste_sprite("hand_pen", self._hand, cx, cy)
+            if palm_page is not None and self._palm is not None:
+                location = cv2.perspectiveTransform(
+                    np.float32(palm_page).reshape(1, 1, 2), self.page_to_scene
+                )[0, 0]
+                cx, cy = (int(v) for v in location)
+                paste_sprite("palm", self._palm, cx, cy)
+            mask, _ = gs._ambiguity_ignore(mask, paper_cov, ink_cov, hand_cov)
+        else:
+            rgb = base_rgb
+            if cached_final_mask is not None:
+                mask = cached_final_mask.copy()
+            else:
+                mask, _ = gs._ambiguity_ignore(
+                    base_mask, paper_cov, ink_cov, np.zeros_like(paper_cov)
+                )
+                if cache_key is not None and self._static_cache is not None:
+                    self._static_cache[7] = mask.copy()
         # O ground truth é geométrico, anterior ao ruído e à oclusão.
         if self._isp is not None:
             rgb = self._isp.process(rgb)
         else:
             rgb = gs._sequence_photometric(self._rng, rgb, 1.0)
-        self.last_scene = {"rgb": rgb, "mask": mask, "ink_full": ink_w}
+        self.last_scene = {"rgb": rgb, "mask": mask, "ink_full": ink_w.copy()}
         self._quads_history.append(quad.copy())
         self._position += 1
         return True, rgb
@@ -895,17 +954,6 @@ def _rigid_pose_lerp(quad_from, quad_to, t):
     return (vec_from * scale) @ rot.T + center
 
 
-def _point_segment_distance(point, a, b):
-    """Distância do ponto ao segmento a-b (px de página)."""
-    ab = b - a
-    denom = float(ab @ ab)
-    if denom == 0:
-        return float(np.hypot(*(point - a)))
-    t = max(0.0, min(1.0, float(((point - a) @ ab) / denom)))
-    closest = a + t * ab
-    return float(np.hypot(*(point - closest)))
-
-
 def _polyline_rect_overlap(points, rect, thickness=0) -> bool:
     """O traço toca o retângulo de página (x, y, w, h)?
 
@@ -915,14 +963,12 @@ def _polyline_rect_overlap(points, rect, thickness=0) -> bool:
     do retângulo já basta; fora, o traço toca quando a distância
     de qualquer ponto ou canto do retângulo à linha central cabe
     na metade da espessura."""
+    if len(points) == 0:
+        return False
     x, y, w, h = rect
-    inside = (
-        (points[:, 0] >= x)
-        & (points[:, 0] < x + w)
-        & (points[:, 1] >= y)
-        & (points[:, 1] < y + h)
-    )
-    if inside.any():
+    px = points[:, 0]
+    py = points[:, 1]
+    if ((px >= x) & (px < x + w) & (py >= y) & (py < y + h)).any():
         return True
     if thickness <= 0:
         return False
@@ -932,16 +978,33 @@ def _polyline_rect_overlap(points, rect, thickness=0) -> bool:
     # marcava como apagado traco que so encostava na borda que NAO
     # foi apagada.
     x1, y1 = x + w - 1, y + h - 1
-    dx = np.maximum.reduce([x - points[:, 0], points[:, 0] - x1, np.zeros(len(points))])
-    dy = np.maximum.reduce([y - points[:, 1], points[:, 1] - y1, np.zeros(len(points))])
+    pts = np.asarray(points, dtype=np.float64)
+    px, py = pts[:, 0], pts[:, 1]
+    dx = np.maximum(np.maximum(x - px, px - x1), 0.0)
+    dy = np.maximum(np.maximum(y - py, py - y1), 0.0)
     if (np.hypot(dx, dy) <= radius).any():
         return True
-    corners = np.float32([[x, y], [x1, y], [x1, y1], [x, y1]])
-    for a, b in zip(points[:-1], points[1:], strict=False):
-        for corner in corners:
-            if _point_segment_distance(corner, a, b) <= radius:
-                return True
-    return False
+    if len(pts) < 2:
+        return False
+    if (
+        px.max() < x - radius
+        or px.min() > x1 + radius
+        or py.max() < y - radius
+        or py.min() > y1 + radius
+    ):
+        return False
+    a = pts[:-1]
+    b = pts[1:]
+    ab = b - a
+    denom = ab[:, 0] * ab[:, 0] + ab[:, 1] * ab[:, 1]
+    corners = np.array([[x, y], [x1, y], [x1, y1], [x, y1]], dtype=np.float64)
+    ac = corners[:, None, :] - a[None, :, :]
+    dot = ac[:, :, 0] * ab[None, :, 0] + ac[:, :, 1] * ab[None, :, 1]
+    safe_denom = np.where(denom > 0.0, denom, 1.0)
+    t = np.where(denom > 0.0, np.clip(dot / safe_denom, 0.0, 1.0), 0.0)
+    closest = a[None, :, :] + t[:, :, None] * ab[None, :, :]
+    diff = corners[:, None, :] - closest
+    return bool((np.hypot(diff[:, :, 0], diff[:, :, 1]) <= radius).any())
 
 
 def _translate_specs(specs, rect, pw, ph):

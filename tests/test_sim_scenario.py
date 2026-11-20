@@ -1010,3 +1010,104 @@ def test_unobserved_truth_marca_escrita_nunca_vista():
     timeless = {"anchor": anchor, "quad": anchor, "submitted": None, "frame": None}
     unreached = _unobserved_truth(expected, [timeless], 9, None, revealed)
     assert not unreached.any()
+
+
+def test_polyline_rect_overlap_matches_scalar_reference():
+    import math as _math
+
+    def point_seg_dist(point, a, b):
+        ab = b - a
+        denom = float(ab @ ab)
+        if denom == 0:
+            return float(_math.hypot(*(point - a)))
+        t = max(0.0, min(1.0, float(((point - a) @ ab) / denom)))
+        closest = a + t * ab
+        return float(_math.hypot(*(point - closest)))
+
+    def scalar_overlap(points, rect, thickness=0):
+        if len(points) == 0:
+            return False
+        x, y, w, h = rect
+        inside = (
+            (points[:, 0] >= x)
+            & (points[:, 0] < x + w)
+            & (points[:, 1] >= y)
+            & (points[:, 1] < y + h)
+        )
+        if inside.any():
+            return True
+        if thickness <= 0:
+            return False
+        radius = thickness / 2.0
+        x1, y1 = x + w - 1, y + h - 1
+        dx = np.maximum.reduce(
+            [x - points[:, 0], points[:, 0] - x1, np.zeros(len(points))]
+        )
+        dy = np.maximum.reduce(
+            [y - points[:, 1], points[:, 1] - y1, np.zeros(len(points))]
+        )
+        if (np.hypot(dx, dy) <= radius).any():
+            return True
+        corners = np.float32([[x, y], [x1, y], [x1, y1], [x, y1]])
+        for a, b in zip(points[:-1], points[1:], strict=False):
+            for corner in corners:
+                if point_seg_dist(corner, a, b) <= radius:
+                    return True
+        return False
+
+    rng = np.random.default_rng(12345)
+    for _ in range(120):
+        n_pts = int(rng.integers(0, 12))
+        pts = rng.integers(-10, 80, size=(n_pts, 2), dtype=np.int32)
+        rect = (
+            int(rng.integers(0, 40)),
+            int(rng.integers(0, 40)),
+            int(rng.integers(1, 30)),
+            int(rng.integers(1, 30)),
+        )
+        thick = int(rng.choice([0, 1, 2, 4, 7, 12]))
+        assert sim_source._polyline_rect_overlap(pts, rect, thick) is scalar_overlap(
+            pts, rect, thick
+        )
+    # Segmento degenerado (comprimento zero) e ponto unico perto da borda:
+    same = np.array([[20, 20], [20, 20]], dtype=np.int32)
+    assert sim_source._polyline_rect_overlap(same, (22, 18, 10, 10), 4)
+    assert not sim_source._polyline_rect_overlap(same, (23, 18, 10, 10), 4)
+    single = np.array([[19, 20]], dtype=np.int32)
+    assert sim_source._polyline_rect_overlap(single, (21, 18, 10, 10), 4)
+
+
+def test_static_warp_cache_is_byte_identical_across_static_and_optic_phases():
+    kwargs = dict(
+        fps=4,
+        stroke_seconds=0.25,
+        warmup_seconds=0.5,
+        settle_seconds=0.5,
+        hold_seconds=0.5,
+        erase_stroke=-1,
+        redraw_text="c",
+        erase_seconds=0.25,
+        move=(20, 10, 4),
+        move_seconds=0.25,
+        lift=(300, 200),
+        return_pose=(-20, 15, 10),
+        absent_seconds=0.5,
+        lift_seconds=0.25,
+        return_seconds=0.25,
+        rest_hand_seconds=0.5,
+        ink_sheen=0.5,
+        page_curl=0.4,
+    )
+    cached = SyntheticCapture("ab", **kwargs)
+    uncached = SyntheticCapture("ab", **kwargs)
+    while True:
+        uncached._static_cache = None
+        ok_a, frame_a = cached.read()
+        ok_b, frame_b = uncached.read()
+        assert ok_a == ok_b
+        if not ok_a:
+            break
+        assert np.array_equal(frame_a, frame_b)
+        for key in ("rgb", "mask", "ink_full"):
+            assert np.array_equal(cached.last_scene[key], uncached.last_scene[key])
+        assert np.array_equal(cached.page_to_scene, uncached.page_to_scene)
