@@ -1850,9 +1850,10 @@ def main():
         default=None,
         metavar="SEGUNDOS",
         help=(
-            "intervalo minimo entre passadas da tinta com a mao ativa "
-            "(InkConfig.pass_interval_s; padrao 0,25). Com o page_clean INT8, "
-            "0,15 mediu 6,7 passadas/s em ~3 nucleos (simulado, sem a mao)"
+            "intervalo minimo entre passadas ativas da tinta "
+            "(InkConfig.pass_interval_s; substitui o piso de 0,25 s, mantendo "
+            "sonda ociosa e descanso). Com o page_clean INT8, 0,15 mediu 6,7 "
+            "passadas/s em ~3 nucleos (simulado, sem a mao)"
         ),
     )
     parser.add_argument(

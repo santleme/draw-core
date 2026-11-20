@@ -85,9 +85,10 @@ class InkConfig:
     # (medido so em replay).
     motion_veto: bool = False
     motion_veto_px: float = 1.0
-    # Intervalo minimo entre inicios de passada da tinta com mao ativa
-    # (s). None = o piso de draw.ink.worker._PAGE_CLEAN_INTERVAL_SECONDS
-    # (0,25 s). Simulado em 2026-11-20 (Ryzen 7700X, draw_seg a 6 Hz em
+    # Intervalo minimo entre inicios de passadas ativas da tinta (s).
+    # None = o piso de draw.ink.worker._PAGE_CLEAN_INTERVAL_SECONDS
+    # (0,25 s); substitui apenas esse piso, mantendo sonda ociosa e
+    # descanso. Simulado em 2026-11-20 (Ryzen 7700X, draw_seg a 6 Hz em
     # quadros reais, tinta INT8 de pagina inteira em 4 threads, sem a mao
     # do MediaPipe): 0,25 s -> 4,0 passadas/s em 2,3 nucleos; 0,15 s ->
     # 6,7/s em 3,1; 0,10 s -> 9,9/s em 4,3 (o fp32 em mosaico de hoje, a

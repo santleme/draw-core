@@ -95,6 +95,119 @@ def test_slow_cadence_movement_resets_quiet_streak():
     assert worker._pass_interval() == 2.0
 
 
+def test_explicit_default_cadence_preserves_rest_after_move_and_exit():
+    # --ink-interval 0.25 precisa preservar exatamente o comportamento de
+    # descanso do padrao (None): mover a mao e sair nao exige passadas
+    # quietas extras alem da passada de confirmacao.
+    now = [100.0]
+    default = worker_mod.PageCleanWorker(
+        _NoModel(), config=InkConfig(), clock=lambda: now[0]
+    )
+    explicit = worker_mod.PageCleanWorker(
+        _NoModel(), config=InkConfig(pass_interval_s=0.25), clock=lambda: now[0]
+    )
+    for worker in (default, explicit):
+        worker.set_hand_presence(True, moved=True)
+        worker._generation_passes = worker_mod._REST_MIN_GENERATION_PASSES
+        worker._quiet_passes = worker_mod._REST_QUIET_PASSES
+        worker.set_hand_presence(True, moved=True)
+        worker.set_hand_presence(False)
+        worker._confirm_once = False
+    assert default._at_rest() is True
+    assert explicit._at_rest() is True
+
+
+def test_late_reference_aligns_to_confirmed_ink_when_sheet_returns():
+    # Regressao: folha comeca com tinta esparsa (< 6 blocos com textura),
+    # confirma essa tinta, depois escorrega 3 px enquanto ganha o resto da
+    # textura que qualifica a referencia tardia. Quando a folha volta para
+    # a posicao original, o portao nao pode empurrar a tinta para +3 px e
+    # duplicar os tracos ja confirmados.
+    import cv2
+    import numpy as np
+
+    from draw.contracts import WarpedPage
+
+    class _DarkIsInk:
+        threshold = 0.5
+
+        def ink_prob(self, warped):
+            gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
+            return ((255.0 - gray) / 255.0).astype(np.float32)
+
+    def _draw_block_texture(img, y0, x0, seed):
+        rng = np.random.default_rng(seed)
+        for _ in range(18):
+            y = int(rng.integers(y0 + 20, y0 + 180))
+            x = int(rng.integers(x0 + 20, x0 + 180))
+            img[y - 2 : y + 3, x - 2 : x + 3] = 25
+
+    base = np.full((1200, 850), 240, dtype=np.uint8)
+    # 4 blocos texturizados (< 6): confirma tinta sem armar o portao
+    sparse_blocks = [(0, 0), (0, 200), (200, 0), (200, 200)]
+    for idx, (by, bx) in enumerate(sparse_blocks):
+        _draw_block_texture(base, by, bx, seed=10 + idx)
+
+    full = base.copy()
+    # +6 blocos extras: agora qualifica (>= 6 blocos)
+    extra_blocks = [
+        (400, 0),
+        (400, 200),
+        (400, 400),
+        (600, 0),
+        (600, 200),
+        (600, 400),
+    ]
+    for idx, (by, bx) in enumerate(extra_blocks):
+        _draw_block_texture(full, by, bx, seed=50 + idx)
+
+    corners = np.float32([[100, 100], [500, 100], [500, 660], [100, 660]])
+    now = [1000.0]
+    worker = worker_mod.PageCleanWorker(
+        _DarkIsInk(),
+        config=InkConfig(motion_veto=True, anchor_follow=False),
+        clock=lambda: now[0],
+    )
+    worker.set_hand_presence(True)
+    generation = worker.new_generation()
+
+    def _bgr(gray):
+        return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+
+    # 1) Confirma tinta esparsa na posicao (0, 0)
+    for _ in range(4):
+        worker.submit(WarpedPage(_bgr(base), generation, corners))
+        assert worker.pump()
+        now[0] += 1.0
+    before = worker.poll_display(generation, 0).confirmed > 0
+    assert before.any()
+    assert worker._motion._reference is None  # ainda nao armou (< 6 blocos)
+
+    # 2) Folha desloca +3 px sob cantos fixos e ganha blocos que armam o portao
+    shifted_full = np.roll(full, 3, axis=1)
+    shifted_full[:, :3] = 240
+    worker.submit(WarpedPage(_bgr(shifted_full), generation, corners))
+    assert worker.pump()
+    now[0] += 1.0
+    assert worker._motion._reference is not None
+
+    # 3) Folha volta para a posicao original (0, 0): nao pode duplicar tinta
+    for _ in range(4):
+        worker.set_hand_presence(True, moved=True)
+        worker.submit(WarpedPage(_bgr(full), generation, corners))
+        assert worker.pump()
+        now[0] += 1.0
+    after = worker.poll_display(generation, 0).confirmed > 0
+    # Na regiao dos 4 blocos iniciais, nao pode ter copia deslocada fora da
+    # tinta original (margem de 1 px para interpolacao).
+    orig_region = before[:400, :400]
+    orig_dilated = (
+        cv2.dilate(orig_region.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
+    )
+    displaced_px = int(np.count_nonzero(after[:400, :400] & ~orig_dilated))
+    assert displaced_px == 0
+
+
 def test_motion_gate_latches_reference_after_blank_start():
     # Se a sessao comeca em folha em branco, o portao nao pode travar a
     # pagina vazia como referencia: assim que surge escrita na mesma
