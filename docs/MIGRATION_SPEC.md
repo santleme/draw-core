@@ -194,10 +194,18 @@ dependency shipped grouped — those groupings are marked.
     `export_vectors` and `vectorize`; nothing beyond that is planned.
 13. Parity gate: `lab/parity_e2e.py` (legacy in a subprocess, same model
     binaries, Tier A flags on) plus `tests/test_parity_e2e.py` and the
-    fake-worker scenarios in `tests/test_pipeline*`. Open: re-run
-    `parity_e2e` on a real recorded session (not only the synthetic
-    68-frame one) before retiring the legacy repo; the opt-in features
-    are off by default and outside the parity claim.
+    fake-worker scenarios in `tests/test_pipeline*`. Real-clip evidence
+    (2026-11-19, `main` at b7101f4, legacy = tag `legacy-final`, same model
+    binaries, Tier A flags, hand model on): the four real clips in
+    `~/draw-data/bench-clips` (`escrita-mao-sombra` 232 frames,
+    `escrita-folha-movida` 316, `agora-escuro-estatico` 42,
+    `e5-escuro-estatico` 40) show zero divergences (presence, corners, canvas
+    mask, hand samples equal). Caveat: one desk clip (`desk-ghost2`, since
+    lost with the legacy checkout) diverged from frame 90 (canvas frozen in
+    the new side, +3.6k px in legacy) while it matched at e85ef11, so
+    something between #40 and #57 changed behavior there; not reproduced on
+    the clips above. The opt-in features are off by default and outside the
+    parity claim.
 
 ## Invariants to preserve
 
