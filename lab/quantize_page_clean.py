@@ -3,14 +3,14 @@
 Receita medida em 2026-11-20 (draw-lab/bench-3b/RESULTADO.md, Ryzen 7
 7700X, 4 threads, ONNX Runtime CPU):
 
-  fp32 mosaico de 256 (models-v2)      227 ms  holdout-v1 IoU 0,8700
-  INT8 pagina inteira (esta receita)    89 ms  holdout-v1 IoU 0,8804
+  fp32 mosaico de 256 (models-v2)     ~234 ms  holdout-v1 IoU 0,8700
+  INT8 pagina inteira (esta receita)  ~93 ms  holdout-v1 IoU 0,8812
 
 1. Quantizacao estatica QDQ, pesos QInt8 por canal, ativacoes QUInt8,
    calibracao MinMax sobre blocos de 256 de paginas retificadas reais.
-   So MinMax: a calibracao Entropy/Percentile do ONNX Runtime guarda
-   todas as ativacoes de todos os blocos na memoria e derrubou o WSL
-   (OOM) na bancada.
+   MinMax guarda as saidas de todos os blocos (pico medido: 454 MB
+   com 20 paginas); Entropy/Percentile guardam histogramas e pesam
+   muito mais.
 2. Altura e largura da entrada e da saida viram dinamicas: o
    draw.page_clean le isso na carga e roda a pagina inteira numa
    chamada (padding ate multiplo de 8, recorte exato na volta).
@@ -160,12 +160,6 @@ def quantize(src, pages, dst):
     from onnxruntime.quantization.shape_inference import quant_pre_process
 
     calibration = pages[::2]
-    # Lote que nao divide o total de blocos: no ORT 1.23, um ultimo lote
-    # vazio faz o calibrador falhar com "No data is collected".
-    total = sum(len(tiles(p)) for p in calibration)
-    chunk = 16
-    while total % chunk == 0:
-        chunk += 1
 
     class Reader(CalibrationDataReader):
         # Um bloco por vez: MinMax e incremental, nada fica acumulado.
@@ -188,10 +182,11 @@ def quantize(src, pages, dst):
             activation_type=QuantType.QUInt8,
             weight_type=QuantType.QInt8,
             calibrate_method=CalibrationMethod.MinMax,
-            # O calibrador guarda as saidas intermediarias de todos os
-            # blocos ate o fim; a cada `chunk` ele funde min/max (o
-            # resultado do MinMax e o mesmo) e a memoria fica limitada.
-            extra_options={"CalibMaxIntermediateOutputs": chunk},
+            # Sem CalibMaxIntermediateOutputs: no ORT 1.23 ela LIMPA o
+            # buffer ao encher sem calcular os limites (so o ultimo lote
+            # calibrava) e no 1.17 chama um metodo que nao existe (review
+            # do PR #66). O MinMax guarda as saidas de todos os blocos:
+            # pico medido abaixo, rode com teto de memoria (ulimit -v).
         )
         dynamic_side(fixed, dst)
     return len(calibration)

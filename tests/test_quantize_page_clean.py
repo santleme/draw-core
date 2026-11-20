@@ -40,3 +40,32 @@ def test_load_pages_reads_only_the_given_archives(tmp_path):
     )
     assert len(qpc.load_pages([keep])) == 1  # so o que esta captura escreveu
     assert len(qpc.load_pages(tmp_path)) == 3  # pasta explicita (--pages): tudo
+
+
+def test_calibration_never_uses_the_lossy_intermediate_output_cap(
+    tmp_path, monkeypatch
+):
+    # No onnxruntime 1.23, CalibMaxIntermediateOutputs limpa o buffer ao
+    # encher SEM calcular os limites: so o ultimo lote calibrava (review
+    # do PR #66). A receita tem de ver todos os blocos.
+    import shutil
+
+    import numpy as np
+    from onnxruntime import quantization
+
+    seen = {}
+
+    def fake_quantize_static(src, dst, reader, **kwargs):
+        seen.update(kwargs)
+        seen["tiles"] = 0
+        while reader.get_next() is not None:
+            seen["tiles"] += 1
+        shutil.copy(src, dst)
+
+    monkeypatch.setattr(quantization, "quantize_static", fake_quantize_static)
+    src = onnx_fixtures.page_clean_model(tmp_path / "fixed.onnx", patch=256)
+    pages = [np.zeros((300, 520, 3), np.uint8)] * 4
+    used = qpc.quantize(src, pages, tmp_path / "out.onnx")
+    assert used == 2
+    assert "CalibMaxIntermediateOutputs" not in (seen.get("extra_options") or {})
+    assert seen["tiles"] == 2 * 2 * 3  # 2 paginas de calibracao x 6 blocos
