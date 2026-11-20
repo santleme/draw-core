@@ -1087,7 +1087,7 @@ def _report_format_suggestion(telemetry, suggestion):
     print(f"Sugestao de formato: proporcao {ratio_text}; {label}.")
 
 
-def _ignore_ink(*_args):
+def _ignore_ink(_publication):
     pass
 
 
@@ -1364,12 +1364,13 @@ def run(
                 from .stream import InkStreamPublisher
 
                 ink_stream = InkStreamPublisher(
-                    port=stream_port if stream_port is not None else 0,
+                    port=stream_port,
                     token_file=stream_token_file,
                     paper_mm=config.paper_mm(),
                     record_path=stream_record,
                 )
-                print(f"Stream de tinta em 127.0.0.1:{ink_stream.port}")
+                if ink_stream.port is not None:
+                    print(f"Stream de tinta em 127.0.0.1:{ink_stream.port}")
             pipeline = Pipeline(
                 detection_worker=detection_worker,
                 ink_worker=ink_worker,
@@ -1928,6 +1929,10 @@ def main():
         page_clean_model = None  # padrao: models/page_clean_unet.onnx
     if hand_model is not None and not hand_model:
         hand_model = None  # padrao: models/hand_landmarker.task
+    if args.stream_port is not None and not args.stream_token_file:
+        parser.error("--stream-port exige --stream-token-file")
+    if args.markers and (args.stream_port is not None or args.stream_record):
+        parser.error("--stream-port/--stream-record nao existem com --markers")
     try:
         run(
             source=args.source,

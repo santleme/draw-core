@@ -113,7 +113,7 @@ class Pipeline:
     render_display: o painel em camadas (confirmada + provisoria).
     Callbacks: on_format_suggestion (sugestao de formato),
     on_acquisition (evento por aquisicao),
-    on_ink(geracao, versao, confirmada) a cada publicacao nova da tinta,
+    on_ink(contracts.InkPublication) a cada publicacao nova da tinta,
     save_page_snapshot(prefixo, mascara) (pagina anterior na
     virada ou na divisao) e log (console).
     """
@@ -405,6 +405,8 @@ class Pipeline:
         # nova abrir a sua geracao.
         self.clean_generation = -1
         self.clean_display_version = 0
+        # A tinta antiga morreu: a saida ao vivo precisa saber (canvas limpo).
+        self._on_ink(contracts.InkPublication(-1, 0, None))
         self.tracker.reset()
         self.corner_history.clear()
         self.display_corners = None
@@ -649,7 +651,11 @@ class Pipeline:
             self.clean_provisional_mask = got.provisional
             # Tomada de saida (bridge/STREAM.md): so a camada confirmada;
             # o publicador nunca bloqueia (latest-wins).
-            self._on_ink(self.clean_generation, got.version, got.confirmed)
+            self._on_ink(
+                contracts.InkPublication(
+                    self.clean_generation, got.version, got.confirmed
+                )
+            )
             self.accumulated_canvas = self._render_display(
                 self.clean_mask,
                 self.clean_provisional_mask,

@@ -288,6 +288,30 @@ class InkDisplaySnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class InkPublication:
+    """Uma publicação da tinta confirmada para a saída ao vivo.
+
+    generation e version identificam a publicação (a geração da trabalhadora
+    e a versão dentro dela); confirmed é a máscara 2D uint8 somente-leitura,
+    ou None para "canvas limpo" (troca de câmera: a tinta antiga morreu).
+    """
+
+    generation: int
+    version: int
+    confirmed: np.ndarray | None = None
+
+    def __post_init__(self):
+        mask = self.confirmed
+        if mask is None:
+            return
+        if not isinstance(mask, np.ndarray) or mask.ndim != 2 or mask.dtype != np.uint8:
+            raise ValueError("confirmed precisa ser máscara 2D uint8 ou None")
+        view = mask.view()
+        view.flags.writeable = False
+        object.__setattr__(self, "confirmed", view)
+
+
+@dataclass(frozen=True, slots=True)
 class GateInfo:
     """O pacote do portão de primeira confirmação (frente 88).
 

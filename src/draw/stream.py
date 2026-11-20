@@ -2,8 +2,9 @@
 
 O Draw publica o canvas confirmado a cada versão nova para um consumidor
 externo (o drawlink) por um fluxo binário de registros: cabeçalho de
-32 bytes + payload. Mesma regra do PROTOCOL.md: o arquivo gravado é, byte
-a byte, o que passou pelo socket, e o consumidor não distingue a fonte.
+32 bytes + payload. Socket e arquivo gravado têm a mesma gramática e o
+consumidor não distingue a fonte (cada destino tem o próprio diff, então os
+bytes de um consumidor tardio e os do arquivo podem diferir).
 
 O publicador NUNCA bloqueia o laço do Draw: `publish` só guarda a última
 publicação (latest-wins) e acorda uma thread que codifica e envia. Sem
@@ -12,6 +13,8 @@ consumidor inicia a conexão (o Draw escuta em 127.0.0.1) e passa pelo mesmo
 handshake de token do PROTOCOL.md.
 """
 
+import os
+import select
 import socket
 import struct
 import threading
@@ -40,6 +43,10 @@ DEFAULT_PORT = 8766
 # Prazo de envio por registro: consumidor que não drena é derrubado em vez
 # de segurar a thread (o laço do Draw nunca espera por ele).
 SEND_TIMEOUT_S = 2.0
+# Teto de handshakes simultaneos (clientes sem token ainda) e de consumidores
+# autenticados: o excedente e fechado, o laco do Draw nunca paga por isso.
+MAX_PENDING_HANDSHAKES = 8
+MAX_CONSUMERS = 8
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,9 +143,14 @@ def records_from_file(path, max_payload=MAX_PAYLOAD_LEN):
 def _inflate(data, size):
     # Limite a size+1 bytes: payload malicioso nao vira bomba de descompressao.
     decomp = zlib.decompressobj()
-    out = decomp.decompress(data, size + 1)
+    try:
+        out = decomp.decompress(data, size + 1)
+    except zlib.error as error:
+        raise ProtocolError("payload zlib invalido") from error
     if len(out) != size or decomp.unconsumed_tail or not decomp.eof:
         raise ProtocolError("payload zlib com tamanho diferente do declarado")
+    if decomp.unused_data:
+        raise ProtocolError("bytes extras apos o payload zlib")
     return out
 
 
@@ -185,19 +197,43 @@ class InkCanvas:
 class _Sink:
     """Um destino (socket ou arquivo) com o próprio estado de diff."""
 
-    def __init__(self, write, close):
+    def __init__(self, write, close, alive=None, is_socket=False):
         self.write = write
         self.close = close
+        self.alive = alive or (lambda: True)
+        self.is_socket = is_socket
         self.mask = None
         self.generation = None
+
+
+def _socket_alive(conn):
+    """False se o consumidor fechou (leitura devolve b"" sem bloquear)."""
+    try:
+        readable, _, _ = select.select([conn], [], [], 0)
+        if not readable:
+            return True
+        return conn.recv(1, socket.MSG_PEEK) != b""
+    except (OSError, ValueError):
+        return False
+
+
+def _safe_close(sink):
+    try:
+        sink.close()
+    except (OSError, ValueError):
+        pass
 
 
 class InkStreamPublisher:
     """Publica a tinta confirmada sem nunca bloquear quem publica.
 
-    `paper_mm`: (largura_mm, altura_mm) da folha — vai no registro FULL, para
-    o consumidor travar a escala. `record_path`: grava os mesmos bytes do
-    socket num arquivo (replay).
+    `port`: porta em 127.0.0.1 (0 = efêmera; None = sem socket, só gravação;
+    com socket o token é obrigatório). `paper_mm`: (largura_mm, altura_mm) da
+    folha — vai no registro FULL, para o consumidor travar a escala.
+    `record_path`: grava o fluxo num arquivo privado (0600) para replay.
+
+    `generation` no fio é do publicador, monotônica: sobe a cada geração da
+    trabalhadora nova e a cada limpeza (troca de câmera).
     """
 
     def __init__(
@@ -212,7 +248,9 @@ class InkStreamPublisher:
         clock=time.monotonic,
         log=print,
     ):
-        self._token = resolve_token(token, token_file)
+        if port is None and record_path is None:
+            raise ValueError("sem porta e sem arquivo: nada a publicar")
+        self._token = None if port is None else resolve_token(token, token_file)
         self._paper_mm = tuple(float(v) for v in paper_mm)
         self._clock = clock
         self._log = log
@@ -221,45 +259,93 @@ class InkStreamPublisher:
         self._closed = False
         self._sinks = []
         self._sinks_lock = threading.Lock()
-        self._server = socket.create_server((host, port))
-        self.port = self._server.getsockname()[1]
-        # accept() com prazo: fechar o socket de outra thread nao o destrava.
-        self._server.settimeout(0.2)
-        if record_path is not None:
-            handle = open(record_path, "wb")  # noqa: SIM115 - fecha no close()
-            self._sinks.append(_Sink(handle.write, handle.close))
-        self._threads = [
-            threading.Thread(
-                target=self._accept_loop, name="ink-stream-accept", daemon=True
-            ),
+        self._handshakes = threading.BoundedSemaphore(MAX_PENDING_HANDSHAKES)
+        self._src_generation = None
+        self._stream_generation = 0
+        self._last_shape = None
+        self._server = None
+        self.port = None
+        threads = []
+        try:
+            if port is not None:
+                self._server = socket.create_server((host, port))
+                self.port = self._server.getsockname()[1]
+                # accept() com prazo: fechar o socket de outra thread nao o
+                # destrava.
+                self._server.settimeout(0.2)
+                threads.append(
+                    threading.Thread(
+                        target=self._accept_loop, name="ink-stream-accept", daemon=True
+                    )
+                )
+            if record_path is not None:
+                self._sinks.append(self._open_record(record_path))
+        except BaseException:
+            if self._server is not None:
+                self._server.close()
+            raise
+        threads.append(
             threading.Thread(
                 target=self._send_loop, name="ink-stream-send", daemon=True
-            ),
-        ]
+            )
+        )
+        self._threads = threads
         for thread in self._threads:
             thread.start()
 
-    def publish(self, generation, ink_version, mask):
-        """Guarda a última publicação e retorna na hora (latest-wins)."""
+    @staticmethod
+    def _open_record(path):
+        # 0600: a tinta gravada nao pode depender do token do socket.
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+            handle = os.fdopen(fd, "wb")
+        except BaseException:
+            os.close(fd)
+            raise
+        return _Sink(handle.write, handle.close)
+
+    def publish(self, publication):
+        """Guarda a última publicação e retorna na hora (latest-wins).
+
+        publication: contracts.InkPublication; confirmed None = canvas limpo.
+        """
         ts_us = int(self._clock() * 1_000_000)
+        mask = publication.confirmed
         with self._cond:
-            self._pending = (int(generation), int(ink_version), ts_us, mask)
+            if mask is None:
+                if self._last_shape is None:
+                    return  # nunca publicou: nada a limpar
+                self._src_generation = None
+                self._stream_generation += 1
+                mask = np.zeros(self._last_shape, np.uint8)
+                mask.flags.writeable = False
+                version = 0
+            else:
+                if publication.generation != self._src_generation:
+                    self._src_generation = publication.generation
+                    self._stream_generation += 1
+                self._last_shape = mask.shape
+                version = publication.version
+            self._pending = (self._stream_generation, int(version), ts_us, mask)
             self._cond.notify()
 
     def close(self):
+        """Encerra; a última publicação pendente ainda é despachada."""
         with self._cond:
             self._closed = True
             self._cond.notify()
-        try:
-            self._server.close()
-        except OSError:
-            pass
+        if self._server is not None:
+            try:
+                self._server.close()
+            except OSError:
+                pass
         for thread in self._threads:
             thread.join(timeout=SEND_TIMEOUT_S + 1)
         with self._sinks_lock:
             sinks, self._sinks = self._sinks, []
         for sink in sinks:
-            sink.close()
+            _safe_close(sink)
 
     def _accept_loop(self):
         while not self._closed:
@@ -269,6 +355,9 @@ class InkStreamPublisher:
                 continue
             except OSError:
                 return
+            if not self._handshakes.acquire(blocking=False):
+                conn.close()  # handshakes demais em aberto: recusa sem thread
+                continue
             threading.Thread(
                 target=self._adopt, args=(conn,), name="ink-stream-hello", daemon=True
             ).start()
@@ -276,36 +365,66 @@ class InkStreamPublisher:
     def _adopt(self, conn):
         # Handshake em thread própria: cliente lento não trava o accept.
         try:
-            if not server_handshake(conn, self._token):
+            try:
+                if not server_handshake(conn, self._token):
+                    conn.close()
+                    return
+                conn.settimeout(SEND_TIMEOUT_S)
+            except OSError:
                 conn.close()
                 return
-            conn.settimeout(SEND_TIMEOUT_S)
-        except OSError:
-            conn.close()
-            return
-        sink = _Sink(conn.sendall, conn.close)
+        finally:
+            self._handshakes.release()
+        sink = _Sink(
+            conn.sendall, conn.close, lambda: _socket_alive(conn), is_socket=True
+        )
+        evicted = []
         with self._sinks_lock:
             self._sinks.append(sink)
+            # Teto de consumidores: o mais antigo (nunca o arquivo) sai.
+            consumers = [s for s in self._sinks if s.is_socket]
+            while len(consumers) > MAX_CONSUMERS:
+                oldest = consumers.pop(0)
+                self._sinks.remove(oldest)
+                evicted.append(oldest)
+        for old in evicted:
+            _safe_close(old)
+        self._prune_dead()
         # Consumidor novo recebe FULL da última publicação mesmo parada.
         with self._cond:
-            if self._pending is not None:
-                self._cond.notify()
+            self._cond.notify()
+
+    def _prune_dead(self):
+        with self._sinks_lock:
+            dead = [s for s in self._sinks if not s.alive()]
+            if dead:
+                self._sinks = [s for s in self._sinks if s not in dead]
+        for sink in dead:
+            _safe_close(sink)
 
     def _send_loop(self):
         last = None
         while True:
             with self._cond:
-                while self._pending is None and not self._closed:
+                if self._pending is None and not self._closed:
                     self._cond.wait(timeout=0.5)
-                    if self._sinks_wanting_full(last):
-                        break
-                if self._closed:
-                    return
                 item, self._pending = self._pending, None
+                closed = self._closed
             if item is None:
+                if closed:
+                    return
+                # Acordou sem publicacao: limpa mortos e atende quem chegou.
+                self._prune_dead()
+                if not self._sinks_wanting_full(last):
+                    continue
                 item = last
             last = item
-            self._dispatch(*item)
+            try:
+                self._dispatch(*item)
+            except Exception as error:  # noqa: BLE001 - o envio nunca morre
+                self._log(f"Stream de tinta: falha ao despachar ({error!r}).")
+            if closed:
+                return
 
     def _sinks_wanting_full(self, last):
         if last is None:
@@ -322,14 +441,14 @@ class InkStreamPublisher:
                 data = self._encode_for(sink, generation, ink_version, ts_us, mask)
                 if data:
                     sink.write(data)
-            except OSError:
+            except (OSError, ValueError):
                 dead.append(sink)
         if dead:
             with self._sinks_lock:
                 self._sinks = [s for s in self._sinks if s not in dead]
             for sink in dead:
-                sink.close()
-            self._log("Stream de tinta: consumidor desconectado.")
+                _safe_close(sink)
+            self._log("Stream de tinta: destino removido (conexao ou disco).")
 
     def _encode_for(self, sink, generation, ink_version, ts_us, mask):
         full = (

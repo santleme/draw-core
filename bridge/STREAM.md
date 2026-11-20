@@ -11,11 +11,18 @@ Não confundir com o [PROTOCOL.md](PROTOCOL.md): aquele leva JPEG da câmera
 ## Garantias de isolamento
 
 - `publish()` só guarda a última publicação e retorna (latest-wins); a
-  codificação e o envio rodam em thread própria.
+  codificação e o envio rodam em thread própria. Falha em um destino (disco
+  cheio, socket morto) remove só aquele destino; o envio nunca para.
 - Sem consumidor, consumidor lento ou conexão caída: o laço não espera. Um
-  envio que passa de 2 s derruba o consumidor.
+  envio que passa de 2 s derruba o consumidor; consumidor que fechou é
+  podado mesmo com a tinta parada.
+- No encerramento limpo, a última publicação pendente ainda é despachada.
 - Desligado por padrão. Ligar: `--stream-port PORTA --stream-token-file ARQ`
-  (sem env `DRAW_*`). `--stream-record ARQ` grava os mesmos bytes do socket.
+  (sem env `DRAW_*`). `--stream-record ARQ` grava o fluxo num arquivo `0600`;
+  sozinho (sem porta) não abre socket e não pede token. Não existe com
+  `--markers`.
+- Limites: até 8 handshakes simultâneos (o excedente é recusado sem thread) e
+  8 consumidores autenticados (o mais antigo sai).
 
 ## Transporte e autenticação
 
@@ -23,6 +30,12 @@ Igual ao PROTOCOL.md: o Draw **escuta** em `127.0.0.1` e o consumidor
 **conecta**; a conexão passa pelo mesmo handshake `DRAH`/`DROK` com token
 compartilhado (16..256 bytes) antes de qualquer registro. Sem TLS (canal
 local). O arquivo gravado não tem handshake.
+
+Limite herdado do handshake do PROTOCOL v1: o consumidor envia o token **antes**
+de o servidor provar quem é, então quem controlar a porta enquanto o Draw está
+parado captura o token. Mesmo modelo de ameaça do PROTOCOL.md (canal local, o
+token autentica o par, não cifra). Fechar isso pede um desafio-resposta, que é
+versão nova do handshake, não deste stream.
 
 ## Registro
 
@@ -45,9 +58,18 @@ Cabeçalho fixo de **32 bytes**, little-endian, `struct.Struct("<4sHBBIIqHHI")`:
 - **DELTA**: payload = `<HHHH` (x, y, w, h) + `zlib(sub-retângulo h*w)`. Só
   vale sobre um FULL anterior da **mesma geração e mesma forma**; senão é erro
   de protocolo.
+- `generation` no fio é do publicador e monotônica: sobe a cada geração nova da
+  trabalhadora e a cada **limpeza** (troca de câmera: FULL de tela vazia com
+  geração nova). Não é o número interno da trabalhadora.
 - Todo consumidor novo (e todo arquivo gravado) começa por um FULL; geração
   nova também. Versões intermediárias podem ser puladas (latest-wins), e o
-  DELTA é calculado contra o último estado enviado àquele destino.
+  DELTA é calculado contra o último estado enviado àquele destino. Por isso o
+  arquivo é a **mesma gramática** do socket, não os mesmos bytes: um consumidor
+  tardio começa por FULL mesmo quando o arquivo gravou um DELTA.
+- Limitação conhecida: a divisão de página por identidade que acontece
+  **dentro** da trabalhadora (conteúdo diferente na mesma geração) não tem
+  evento hoje; sai como DELTA (o canvas fica correto, mas a fronteira de
+  página não é sinalizada).
 - Publicação idêntica à anterior não gera registro.
 
 O receptor valida magic, versão, tipo, `payload_len`, dimensões (<= 8192 px por
