@@ -428,3 +428,43 @@ def test_loop_at_junction_does_not_force_sharp_join_between_branches():
     assert not link, f"ramos em V foram ligados: {link}"
     strokes = vectorize._chain_strokes(graph, link) + graph.loose
     assert sorted(s["closed"] for s in strokes) == [False, False, True]
+
+
+def test_loop_connector_to_nearby_tee_is_not_contracted():
+    # Laço com um conector de 13 px até um 'T' (raios 6 e 7: limite de
+    # contração 15,6 px). O nó do laço é grau 3 sem ser metade de um
+    # 'X'; contrair apagava o conector e soltava o laço (review do
+    # PR #65).
+    dist = np.zeros((200, 200), np.float32)
+    dist[100, 60] = 6.0  # nó do laço
+    dist[100, 73] = 7.0  # nó do 'T'
+    loop_node, tee = np.array([60.0, 100.0]), np.array([73.0, 100.0])
+    loop = np.array([loop_node, [40.0, 80.0], [20.0, 100.0], [40.0, 120.0]])
+    items = [
+        {"points": loop, "closed": True, "start_node": 1, "end_node": 1},
+        {
+            "points": np.array([loop_node, [66.0, 100.0], tee]),
+            "closed": False,
+            "start_node": 1,
+            "end_node": 2,
+        },
+        {
+            "points": np.array([tee, [73.0, 60.0], [73.0, 20.0]]),
+            "closed": False,
+            "start_node": 2,
+            "end_node": 3,
+        },
+        {
+            "points": np.array([tee, [73.0, 140.0], [73.0, 180.0]]),
+            "closed": False,
+            "start_node": 2,
+            "end_node": 4,
+        },
+    ]
+    graph = vectorize._TopoGraph(items, dist)
+    vectorize._prune_and_contract(graph, 1.5, 1.2)
+    assert all(e["alive"] for e in graph.edges), "conector do laço foi contraído"
+    link = vectorize._pair_junctions(graph, vectorize.PAIR_TAU, 0.5)
+    strokes = vectorize._chain_strokes(graph, link) + graph.loose
+    ends = [tuple(p) for s in strokes if not s["closed"] for p in s["points"][[0, -1]]]
+    assert (60.0, 100.0) in ends, "o laço ficou sem conector"

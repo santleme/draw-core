@@ -684,12 +684,18 @@ def _prune_and_contract(graph, spur_ratio, contract_ratio):
                 deg[u] -= 1
                 deg[v] -= 1
                 changed = True
+    loop_nodes = {graph.find(nid) for nid in graph.loops}
     deg = graph.degrees()
     for e in graph.edges:
         if not e["alive"]:
             continue
         u, v = graph.find(e["u"]), graph.find(e["v"])
         if u == v or deg.get(u, 0) != 3 or deg.get(v, 0) != 3:
+            continue
+        if u in loop_nodes or v in loop_nodes:
+            # Nó de laço com um conector é grau 3 sem ser metade de um
+            # 'X': contrair levava o conector embora e deixava o laço,
+            # que não se move com o centro, solto (review do PR #65).
             continue
         ru, rv = graph.radius[u], graph.radius[v]
         if e["length"] > contract_ratio * (ru + rv):
