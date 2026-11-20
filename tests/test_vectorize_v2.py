@@ -341,3 +341,59 @@ def test_clean_path_on_dense_page_stays_fast():
     vectorize.vectorize_clean(ink)
     dt_ms = (time.perf_counter() - t0) * 1000.0
     assert dt_ms < 1500.0, f"caminho limpo lento demais: {dt_ms:.0f} ms"
+
+
+def test_line_crossing_two_close_parallels_keeps_each_line_whole():
+    # Dois cruzamentos completos a 12 px um do outro não são um 'X'
+    # partido: fundi-los ligava a ponta esquerda de uma paralela à
+    # ponta direita da outra (review do PR #65).
+    img = _canvas()
+    cv2.line(img, (40, 150), (360, 150), 0, thickness=7)
+    cv2.line(img, (40, 162), (360, 162), 0, thickness=7)
+    cv2.line(img, (200, 40), (200, 360), 0, thickness=7)
+    strokes = _strokes(img)
+    assert len(strokes) == 3
+    horizontals = []
+    for s in strokes:
+        a, b = s["points"][0], s["points"][-1]
+        if abs(a[1] - b[1]) < abs(a[0] - b[0]):
+            horizontals.append((a, b))
+    assert len(horizontals) == 2
+    for a, b in horizontals:
+        assert abs(a[1] - b[1]) <= 3.0, f"paralela trocou de ponta: {a} -> {b}"
+        assert abs(a[0] - b[0]) > 300.0
+
+
+def test_circle_with_tangent_stem_keeps_both_primitives():
+    # O laço volta ao próprio nó (u == v): fica fora do pareamento,
+    # como na costura legada (review do PR #65). Quando a haste grossa
+    # se sobrepõe ao arco por um trecho, o nó de junção sai do laço e
+    # o arco continua tangente na haste — leitura ambígua (um 'd'),
+    # resolvida pela continuidade.
+    img = np.full((150, 120), 255, dtype=np.uint8)
+    cv2.circle(img, (60, 45), 20, 0, thickness=7)
+    cv2.line(img, (40, 45), (40, 105), 0, thickness=7)
+    kinds = sorted(p["type"] for p in vectorize.classify_primitives(_strokes(img)))
+    assert "circle" in kinds, kinds
+    assert "line" in kinds, kinds
+
+
+def test_clean_json_is_strict_when_dust_removes_everything():
+    img = np.full((vectorize.PAPER_H_PX, vectorize.PAPER_W_PX), 255, dtype=np.uint8)
+    img[100:103, 100:105] = 0  # 15 px de tinta: abaixo de DUST_MIN_AREA
+
+    def reject(token):
+        raise ValueError(f"JSON fora do padrão: {token}")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        png = Path(tmp) / "c.png"
+        out_json = Path(tmp) / "c.json"
+        cv2.imwrite(str(png), img)
+        rc = vectorize.main(
+            [str(png), "--clean", "--json", str(out_json), "--out", str(png) + ".svg"]
+        )
+        assert rc == 0
+        payload = json.loads(
+            out_json.read_text(encoding="utf-8"), parse_constant=reject
+        )
+        assert payload["summary"]["polilinhas"] == 0

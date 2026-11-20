@@ -600,7 +600,11 @@ class _TopoGraph:
         for item in items:
             u, v = item.get("start_node"), item.get("end_node")
             pts = item["points"]
-            if u is None or v is None or len(pts) < 2:
+            if u is None or v is None or len(pts) < 2 or item["closed"]:
+                # Laço fechado que volta ao próprio nó (o círculo com
+                # uma haste tangente) fica fora do pareamento, como na
+                # costura legada: ligar uma ponta dele à haste trocaria
+                # um círculo e uma reta por uma polilinha aberta.
                 self.loose.append({"points": pts, "closed": item["closed"]})
                 continue
             for nid, p in ((u, pts[0]), (v, pts[-1])):
@@ -645,7 +649,10 @@ def _prune_and_contract(graph, spur_ratio, contract_ratio):
     afinamento deixa nos cantos de traço grosso. Duas junções ligadas
     por uma aresta mais curta que contract_ratio*(r_u + r_v) são o
     mesmo cruzamento visto como dois nós (o 'X' grosso afina em dois
-    'Y'); viram um nó no centróide ponderado pelos raios.
+    'Y'); viram um nó no centróide ponderado pelos raios. Só o par
+    3+3 contrai: dois cruzamentos completos (grau 4) próximos — uma
+    reta cortando duas paralelas — são cruzamentos de verdade, e
+    fundi-los trocava as pontas das paralelas entre si.
     """
     changed = True
     while changed:
@@ -664,25 +671,24 @@ def _prune_and_contract(graph, spur_ratio, contract_ratio):
                 deg[u] -= 1
                 deg[v] -= 1
                 changed = True
-    changed = True
-    while changed:
-        changed = False
-        deg = graph.degrees()
-        for e in graph.edges:
-            if not e["alive"]:
-                continue
-            u, v = graph.find(e["u"]), graph.find(e["v"])
-            if u == v or deg.get(u, 0) < 3 or deg.get(v, 0) < 3:
-                continue
-            ru, rv = graph.radius[u], graph.radius[v]
-            if e["length"] > contract_ratio * (ru + rv):
-                continue
-            graph.center[u] = (graph.center[u] * ru + graph.center[v] * rv) / (ru + rv)
-            graph.radius[u] = max(ru, rv)
-            graph.parent[v] = u
-            e["alive"] = False
-            changed = True
-            deg = graph.degrees()
+    deg = graph.degrees()
+    for e in graph.edges:
+        if not e["alive"]:
+            continue
+        u, v = graph.find(e["u"]), graph.find(e["v"])
+        if u == v or deg.get(u, 0) != 3 or deg.get(v, 0) != 3:
+            continue
+        ru, rv = graph.radius[u], graph.radius[v]
+        if e["length"] > contract_ratio * (ru + rv):
+            continue
+        graph.center[u] = (graph.center[u] * ru + graph.center[v] * rv) / (ru + rv)
+        graph.radius[u] = max(ru, rv)
+        graph.parent[v] = u
+        e["alive"] = False
+        # Grau do nó fundido sem varrer o grafo: as duas pontas da
+        # aresta contraída saem; o resto de v passa a contar em u
+        # (grau 4, que não volta a contrair).
+        deg[u] += deg.pop(v) - 2
 
 
 def _half_edge_feature(graph, edge, at_start, root):
@@ -1338,12 +1344,22 @@ def distance_stats(ink, polylines):
                 thickness=1,
                 lineType=cv2.LINE_8,
             )
-    dt_to_poly = cv2.distanceTransform((raster == 0).astype(np.uint8), cv2.DIST_L2, 5)
-    d_bwd = dt_to_poly[ink]
+    if raster.any():
+        dt_to_poly = cv2.distanceTransform(
+            (raster == 0).astype(np.uint8), cv2.DIST_L2, 5
+        )
+        d_bwd = dt_to_poly[ink]
+    else:
+        # Sem polilinha nenhuma (ex.: a poeira levou tudo) o
+        # distanceTransform não tem alvo e devolve o sentinela de
+        # float32 — a média estourava para Infinity no JSON.
+        d_bwd = np.zeros((0,), dtype=np.float32)
 
     def summary(d):
         if len(d) == 0:
             return {"n": 0}
+        if not np.isfinite(d).all():
+            return {"n": int(len(d))}
         return {
             "n": int(len(d)),
             "media_px": float(d.mean()),
@@ -1546,8 +1562,9 @@ def main(argv=None):
         "--stamps",
         default=None,
         metavar="ARQUIVO.npz",
-        help="carimbos temporais (`_stamps.npz`) para orientar, costurar e "
-        "ordenar os traços na ordem real em que foram desenhados",
+        help="carimbos temporais (`_stamps.npz`) para orientar e ordenar os "
+        "traços na ordem real em que foram desenhados (sem --clean, também "
+        "desempatam a costura legada; o --clean não usa tempo nas junções)",
     )
     parser.add_argument(
         "--primitives",
