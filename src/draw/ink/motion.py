@@ -1,167 +1,179 @@
-"""Veto de passada por movimento residual da folha (InkConfig.motion_veto).
+"""Arbitro de registro e veto por movimento residual (InkConfig.motion_veto).
 
-Medido em 2026-11-20 no replay da escrita-folha-movida (preset ganho +
-pauta + histerese): nas passadas 5-9 a folha deslizou 1,9-3,3 px na
-grade da ancora DEPOIS do registro, e essas passadas carimbaram ~42 mil
-dos 107 mil px novos do clipe (39%) — tinta duplicada ao lado da tinta
-assentada. O registro nao viu o deslizamento porque o quad que ele le
-estava parado: o detector alternava entre dois modos (rodape fora do
-quadro, saltos crus de 60-120 px de camera) e o rastreador segurava o
-quad confirmado por ~1,75 s esperando o salto persistir. Nesse
-intervalo o deslocamento so aparece na imagem.
+O problema (replay da escrita-folha-movida, 2026-11-20): passadas
+carimbaram tinta deslocada 1,9-4 px ao lado da tinta assentada — 39%
+da tinta nova do clipe. A causa medida e o proprio registro: ele leva
+cada passada para a grade da ancora por M = A @ C^-1 (homografias
+camera->pagina da ancora e da passada), o que supoe a folha PARADA e
+so a estimativa do quad oscilando. Quando a folha anda de verdade e o
+quad acompanha, o warp da passada ja sai alinhado (1,2-1,6 px nas
+passadas 5-9) e o registro desfaz o movimento real (3,1-4,0 px depois
+dele). Na maioria das passadas o registro acerta (e5 parado: 1,24 ->
+0,42 px; mao-sombra: melhora em 15 passadas, piora em 3): ele nao pode
+sair, so ser conferido.
 
-A medida e a correlacao de fase entre a pagina registrada desta
-passada e a referencia da geracao, em meia escala e so na textura
-(passa-alta: pauta e tinta, sem iluminacao), fora da mao. Medido na
-pagina retificada real (e5): piso 0,35-0,40 px parada, erro <= 0,22 px
-em deslocamentos sinteticos de ate 3 px; ~6,5 ms por passada (p50) no
-replay (a passada do modelo custa ~260 ms).
+A medida: correlacao de fase, bloco a bloco, entre a textura (passa-alta,
+meia escala) da pagina desta passada e a referencia da ancora. Votam no
+consenso so os blocos com:
+  - textura 2D (menor autovalor do tensor de estrutura acima do piso e
+    nao muito menor que o maior): papel liso vota (0, 0) ou ruido e
+    mascara o deslizamento; pauta so horizontal nao mede X (problema da
+    abertura);
+  - pagina visivel nas duas imagens fora da mao (mascara dilatada);
+  - pico de correlacao confiavel.
+Os deslocamentos dos blocos validos ajustam um modelo afim robusto
+(rejeita os blocos fora do consenso, como a mao que a mascara nao
+cobre), o que pega translacao e rotacao. Poucos blocos validos ou
+sem juizo (a passada segue como hoje, nunca veto falso). Blocos de
+sobra que discordam entre si sao outra coisa: prova de movimento, e a
+mediana deles decide.
 
-Decisao por passada:
-  - residuo <= limiar: aceita (historicos zeram);
-  - residuo > limiar e a folha ainda anda: veta (a passada nao vota);
-  - residuo > limiar ESTAVEL por `settle_passes` passadas, pequeno
-    (<= MOTION_CORRECT_MAX_PX) e RIGIDO (as quatro metades da pagina
-    concordam com o global ate MOTION_RIGID_TOL_PX): a folha parou
-    deslocada por translacao pura, abaixo da banda morta do
-    rastreador — o quad pode nunca mais andar. A passada entra
-    corrigida pela translacao medida, em vez de vetar para sempre;
-  - deslocamento grande ou nao-rigido segue vetado: grande, os cantos
-    andam alem da banda morta e o registro alcanca a folha; nao-rigido
-    (rotacao, papel deformando), a translacao global desalinha a outra
-    metade. Medido na folha-movida: corrigir sem a checagem de rigidez
-    criou um terceiro jogo de copias na metade direita (+17 mil px), com
-    esquerda e direita discordando em 2,7 px (e ate 30 px depois);
+Decisao por passada (MotionGate.decide):
+  - registrada alinhada (<= MOTION_VETO_PX nos cantos da grade do
+    modelo) ou sem juizo: aceita como esta;
+  - registrada desalinhada mas o warp SEM registro alinhado: a folha
+    andou com o quad; a passada vota na propria geometria;
+  - nenhuma alinhada, modelo afim consistente e deslocamento <=
+    MOTION_CORRECT_MAX_PX: a passada
+    entra corrigida pelo modelo afim da hipotese mais proxima. O modelo
+    e medido na MESMA imagem de onde sai a probabilidade da passada,
+    entao vale para ela mesmo com a folha andando. A folha que para
+    deslocada (o quad congelado pela banda morta de 2 px do rastreador,
+    ou pela espera de persistencia de salto que o segurou por 1,75 s na
+    folha-movida) e corrigida em toda passada — nao ha deadlock a
+    escapar. Re-ancorar foi descartado: a tinta ja confirmada ficaria
+    na grade velha e a nova cairia deslocada dela;
+  - acima disso, ou sem consenso afim com blocos de sobra (folha
+    deformando): veta. Deslocamento desse tamanho o quad acompanha e o
+    registro alcanca a folha;
   - trava de vivacidade: MOTION_FAIL_OPEN_PASSES vetos seguidos e a
-    passada entra como entraria sem o veto (o comportamento de hoje).
-    O veto nunca silencia o acumulador para sempre, e no pior caso o
-    resultado e o de sem veto.
-
-Re-ancorar na posicao nova, a outra saida possivel, foi descartado: a
-tinta ja confirmada fica na grade velha, e a evidencia nova cairia
-deslocada dela — a mesma duplicata, por outro caminho.
+    passada entra como entraria sem o portao. O acumulador nunca fica
+    mudo, e o pior caso e o comportamento de hoje.
 """
 
-from collections import deque
+from dataclasses import dataclass
 
 import cv2
 import numpy as np
 
-# Residuo acima do qual a passada e suspeita: ~2,5x o piso da meia
-# escala, abaixo do 1,9 px da menor passada duplicadora medida.
+# Maior deslocamento aceito sem juizo, em px da pagina: ~3x o piso do
+# consenso na pagina parada, abaixo do 1,9 px da menor passada
+# duplicadora medida.
 MOTION_VETO_PX = 1.0
-# Passadas seguidas com o mesmo deslocamento para tratar a folha
-# como parada (na cadencia de ~4 passadas/s, ~0,75 s).
-MOTION_SETTLE_PASSES = 3
-# Concordancia entre as medidas que fecha o "parado": ~o piso.
-MOTION_SETTLE_TOL_PX = 0.5
-# Maior translacao corrigida: acima disso (~2,5-5 px de camera, alem
-# da banda morta de 2 px do rastreador) o quad acompanha a folha.
+# Maior deslocamento corrigido: acima disso (alem da banda morta do
+# rastreador) o quad acompanha a folha e o registro alcanca.
 MOTION_CORRECT_MAX_PX = 4.0
-# Deslocamento de uma metade da pagina acima do qual a passada e
-# suspeita mesmo com o global parado (rotacao em torno do centro). O
-# registro do app ja deixa as metades discordarem: no e5 parado (quad
-# reajustado pelo rastreador entre passadas) uma metade mede ate
-# 1,5 px com o global em 0,2 px, e a tinta sai certa. Pega rotacao a
-# partir de ~0,5 grau (meia pagina andando ~2,5 px).
-MOTION_HALF_VETO_PX = 2.5
-# Discordancia maxima entre uma metade e o global para tratar o
-# movimento como translacao pura: acima do piso do registro (~1,3 px
-# no e5 parado) e abaixo da discordancia medida quando a folha girou
-# na folha-movida (2,7 px e crescendo).
-MOTION_RIGID_TOL_PX = 1.5
 # Vetos seguidos ate a passada entrar sem juizo (~5 s na cadencia).
 MOTION_FAIL_OPEN_PASSES = 20
+
 _SCALE = 0.5
-_HIGHPASS_SIGMA = 12.0  # em px da meia escala (24 px na pagina)
-# Abaixo desta fracao de pagina visivel nas duas imagens a medida
-# nao e confiavel (mao cobrindo a pagina): a passada segue sem juizo.
-_MIN_OVERLAP = 0.3
+_HIGHPASS_SIGMA = 12.0  # px da meia escala (24 px na pagina)
+_BLOCK = 100  # lado do bloco na meia escala (200 px da pagina)
+_HAND_MARGIN = 15  # dilatacao da regiao invisivel, px da meia escala
+_BLOCK_MIN_VISIBLE = 0.9
+_TEXTURE_MIN = 60.0  # menor autovalor do tensor de estrutura (papel liso ~12)
+_TEXTURE_MIN_RATIO = 0.15  # menor/maior: abaixo e textura de uma direcao so
+_PEAK_MIN = 0.08  # resposta do phaseCorrelate (identico ~1, ruido ~0,02)
+_MIN_BLOCKS = 6
+# Sem consenso so vira prova de movimento com a maior parte da grade
+# (24 blocos na pagina de 850x1200) visivel e com textura. Medido:
+# na folha-movida as passadas que carimbavam a copia tinham 20-23
+# blocos validos (8-13 em acordo); na mao-sombra, com a folha parada,
+# a mao, a sombra e a escrita nova deixavam 6-10 blocos validos sem
+# acordo nenhum (0-1) — ler isso como movimento vetava escrita real.
+_MIN_BLOCKS_DISAGREEING = 15
+_INLIER_PX = 1.5
+_MIN_INLIER_FRACTION = 0.5
+
+
+@dataclass(frozen=True)
+class Motion:
+    """Modelo afim do deslocamento da pagina, em px da pagina.
+
+    Um ponto p (px da pagina, origem no centro) aparece deslocado de
+    jacobian @ p + shift. max_px e o maior deslocamento do modelo nos
+    blocos dos cantos da grade; blocks e inliers contam o consenso.
+    """
+
+    jacobian: np.ndarray
+    shift: np.ndarray
+    center: np.ndarray
+    max_px: float
+    blocks: int
+    inliers: int
+    corners: np.ndarray  # deslocamento nos 4 blocos dos cantos da grade
+    # False: muitos blocos com textura, mas sem consenso afim (folha
+    # deformando, movimento grande). max_px e entao a mediana do
+    # deslocamento dos blocos — prova de movimento, nunca correcao.
+    consistent: bool = True
+
+    def warp_back(self, image, *, nearest=False):
+        """Leva uma imagem desta passada de volta para a grade da referencia."""
+        j, t, c = self.jacobian, self.shift, self.center
+        matrix = np.hstack([np.eye(2) + j, (t - j @ c).reshape(2, 1)])
+        flags = (cv2.INTER_NEAREST if nearest else cv2.INTER_LINEAR) | (
+            cv2.WARP_INVERSE_MAP
+        )
+        return cv2.warpAffine(
+            image,
+            matrix.astype(np.float64),
+            (image.shape[1], image.shape[0]),
+            flags=flags,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        )
 
 
 def _texture(gray_small):
-    blur = cv2.GaussianBlur(gray_small, (0, 0), _HIGHPASS_SIGMA)
-    return gray_small - blur
-
-
-def _dft_side(n):
-    """Maior lado <= n que o phaseCorrelate nao preenche, com a
-    metade tambem sem preenchimento (as quatro metades da pagina)."""
-    for side in range(n - n % 2, 1, -2):
-        half = side // 2
-        if cv2.getOptimalDFTSize(side) == side and cv2.getOptimalDFTSize(half) == half:
-            return side
-    return n
-
-
-def _dft_crop(image):
-    """Recorta para lados que a DFT do phaseCorrelate usa sem preencher.
-
-    O phaseCorrelate completa a imagem ate getOptimalDFTSize, e o
-    preenchimento desloca o pico: duas imagens identicas de 224
-    colunas (otimo 225) medem 0,5 px — 1 px de residuo falso na
-    meia escala, veto em pagina parada.
-    """
-    h, w = image.shape[:2]
-    return image[: _dft_side(h), : _dft_side(w)]
+    return gray_small - cv2.GaussianBlur(gray_small, (0, 0), _HIGHPASS_SIGMA)
 
 
 def _scaled_registration(matrix):
-    """A matriz de registro de escala cheia agindo na meia escala."""
     s = np.diag([_SCALE, _SCALE, 1.0])
     return s @ np.asarray(matrix, dtype=np.float64) @ np.linalg.inv(s)
 
 
-def _phase_shift(reference, texture, overlap):
-    """(dx, dy) em px da meia escala, ou None sem pagina visivel bastante."""
-    if float(overlap.mean()) < _MIN_OVERLAP:
-        return None
-    size = (texture.shape[1], texture.shape[0])
-    window = cv2.createHanningWindow(size, cv2.CV_32F) * overlap.astype(np.float32)
-    # Copias contiguas: o phaseCorrelate escreveu na referencia
-    # guardada quando ela chegava como fatia (recorte/metade) — a
-    # mesma imagem medida 4 vezes derivava 0,07 -> 0,27 px.
-    (dx, dy), _response = cv2.phaseCorrelate(
-        np.array(reference, dtype=np.float32, order="C"),
-        np.array(texture, dtype=np.float32, order="C"),
-        window,
-    )
-    return float(dx), float(dy)
+def _structure(block):
+    gx = cv2.Sobel(block, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(block, cv2.CV_32F, 0, 1, ksize=3)
+    a, b, c = float(np.mean(gx * gx)), float(np.mean(gx * gy)), float(np.mean(gy * gy))
+    root = np.sqrt(max(0.0, ((a - c) / 2) ** 2 + b * b))
+    return (a + c) / 2 - root, (a + c) / 2 + root
 
 
-def translate(image, dx, dy, *, nearest=False):
-    """Desloca uma imagem por (dx, dy) px; borda vazia."""
-    affine = np.float32([[1, 0, dx], [0, 1, dy]])
-    flags = cv2.INTER_NEAREST if nearest else cv2.INTER_LINEAR
-    return cv2.warpAffine(
-        image,
-        affine,
-        (image.shape[1], image.shape[0]),
-        flags=flags,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=0,
-    )
+def _fit_affine(points, shifts):
+    """Ajuste afim robusto: parte dos blocos perto da mediana (a mao ou a
+    sombra que a mascara nao cobre puxariam o primeiro minimos quadrados
+    e a rejeicao descartaria os blocos bons), depois rejeicao iterativa."""
+    median = np.median(shifts, axis=0)
+    keep = np.linalg.norm(shifts - median, axis=1) <= _INLIER_PX
+    full = np.hstack([points, np.ones((len(points), 1))])
+    params = None
+    for _ in range(4):
+        if np.count_nonzero(keep) < 3:
+            return None, keep
+        params, *_ = np.linalg.lstsq(full[keep], shifts[keep], rcond=None)
+        new_keep = np.linalg.norm(full @ params - shifts, axis=1) <= _INLIER_PX
+        if np.array_equal(new_keep, keep):
+            break
+        keep = new_keep
+    if np.count_nonzero(keep) < 3:
+        return None, keep
+    params, *_ = np.linalg.lstsq(full[keep], shifts[keep], rcond=None)
+    return params, keep
 
 
 class MotionGate:
-    """Mede o deslocamento residual da pagina registrada e decide a passada."""
+    """Mede o movimento residual da pagina por consenso de blocos e decide."""
 
     def __init__(
         self,
         threshold_px=MOTION_VETO_PX,
-        settle_passes=MOTION_SETTLE_PASSES,
-        settle_tol_px=MOTION_SETTLE_TOL_PX,
         correct_max_px=MOTION_CORRECT_MAX_PX,
-        half_veto_px=MOTION_HALF_VETO_PX,
-        rigid_tol_px=MOTION_RIGID_TOL_PX,
         fail_open_passes=MOTION_FAIL_OPEN_PASSES,
     ):
         self.threshold_px = float(threshold_px)
-        self.settle_passes = int(settle_passes)
-        self.settle_tol_px = float(settle_tol_px)
         self.correct_max_px = float(correct_max_px)
-        self.half_veto_px = float(half_veto_px)
-        self.rigid_tol_px = float(rigid_tol_px)
         self.fail_open_passes = int(fail_open_passes)
         self.reset()
 
@@ -170,31 +182,9 @@ class MotionGate:
         self._reference = None
         self._reference_visible = None
         self._reference_anchor = None
-        self._history = deque(maxlen=max(1, self.settle_passes))
         self._vetoes_in_row = 0
 
-    def measure(self, warped, matrix, visible, anchor):
-        """Deslocamento da pagina desta passada contra a referencia.
-
-        Devolve (dx, dy, half_max, spread) em px da grade da ancora, ou
-        None sem juizo. (dx, dy) e o deslocamento global; half_max, o
-        maior deslocamento entre as quatro metades da pagina (pega
-        rotacao); spread, a maior discordancia entre uma metade e o
-        global (inf quando alguma metade nao tem pagina visivel
-        bastante).
-
-        matrix leva o warp desta passada para a grade da ancora
-        (None = identidade); visible e a visibilidade DESTE warp
-        (None = pagina toda). A primeira passada medida de uma ancora
-        vira a referencia; ancora diferente da guardada recomeca.
-        """
-        anchor = None if anchor is None else np.asarray(anchor, dtype=np.float32)
-        if (
-            self._reference_anchor is not None
-            and anchor is not None
-            and float(np.max(np.abs(anchor - self._reference_anchor))) > 1e-3
-        ):
-            self.reset()
+    def _prepare(self, warped, matrix, visible):
         gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY) if warped.ndim == 3 else warped
         small = cv2.resize(
             np.asarray(gray, dtype=np.float32),
@@ -223,65 +213,144 @@ class MotionGate:
             vis = cv2.warpPerspective(
                 vis, scaled, size, flags=cv2.INTER_NEAREST, borderValue=0
             )
-        texture = _dft_crop(_texture(small))
-        vis = _dft_crop(vis)
+        # A mascara de mao do app cobre so a mao, nao a sombra nem a
+        # borda borrada: a regiao invisivel ganha margem.
+        hidden = cv2.dilate(
+            (vis == 0).astype(np.uint8),
+            np.ones((2 * _HAND_MARGIN + 1, 2 * _HAND_MARGIN + 1), np.uint8),
+        )
+        return _texture(small), hidden == 0
+
+    def measure(self, warped, matrix, visible, anchor):
+        """Motion desta passada contra a referencia, ou None sem juizo.
+
+        warped e a pagina retificada (BGR ou cinza, 0-255: o portao de
+        textura e calibrado nessa escala); matrix leva o warp desta
+        passada para a grade da ancora (None = sem registro); visible e
+        a visibilidade DESTE warp. A primeira
+        passada medida de uma ancora vira a referencia (registrada);
+        ancora diferente da guardada recomeca.
+        """
+        anchor = None if anchor is None else np.asarray(anchor, dtype=np.float32)
+        if (
+            self._reference_anchor is not None
+            and anchor is not None
+            and float(np.max(np.abs(anchor - self._reference_anchor))) > 1e-3
+        ):
+            self.reset()
+        texture, vis = self._prepare(warped, matrix, visible)
         if self._reference is None:
-            self._reference = texture
-            self._reference_visible = vis > 0
+            self._reference, self._reference_visible = texture, vis
             self._reference_anchor = anchor
             return None
-        overlap = (vis > 0) & self._reference_visible
-        shift = _phase_shift(self._reference, texture, overlap)
-        if shift is None:
-            return None
-        dx, dy = shift
-        # As quatro metades sempre: rotacao em torno do centro deixa o
-        # global perto de zero com as bordas andando px.
-        half_max = 0.0
-        spread = 0.0
+        return self._consensus(texture, vis)
+
+    def _consensus(self, texture, vis):
+        ref, ref_vis = self._reference, self._reference_visible
         h, w = texture.shape
-        halves = (
-            np.s_[:, : w // 2],
-            np.s_[:, w // 2 :],
-            np.s_[: h // 2, :],
-            np.s_[h // 2 :, :],
-        )
-        for part in halves:
-            local = _phase_shift(self._reference[part], texture[part], overlap[part])
-            if local is None:
-                spread = float("inf")
-                continue
-            half_max = max(half_max, float(np.hypot(*local)))
-            spread = max(spread, float(np.hypot(local[0] - dx, local[1] - dy)))
-        return dx / _SCALE, dy / _SCALE, half_max / _SCALE, spread / _SCALE
-
-    def decide(self, measured):
-        """("accept" | "veto" | "correct" | "fail_open", deslocamento a desfazer).
-
-        measured e a saida de measure: (dx, dy, half_max, spread) ou None.
-        """
-        if measured is None:
-            return "accept", None
-        dx, dy, half_max, spread = measured
-        residual = float(np.hypot(dx, dy))
-        if residual <= self.threshold_px and half_max <= self.half_veto_px:
-            self._history.clear()
-            self._vetoes_in_row = 0
-            return "accept", None
-        self._history.append(np.array([dx, dy], dtype=np.float64))
-        if (
-            len(self._history) >= self.settle_passes
-            and residual <= self.correct_max_px
-            and spread <= self.rigid_tol_px
+        window = cv2.createHanningWindow((_BLOCK, _BLOCK), cv2.CV_32F)
+        points, shifts = [], []
+        for y in range(0, h - _BLOCK + 1, _BLOCK):
+            for x in range(0, w - _BLOCK + 1, _BLOCK):
+                part = np.s_[y : y + _BLOCK, x : x + _BLOCK]
+                if (
+                    vis[part].mean() < _BLOCK_MIN_VISIBLE
+                    or ref_vis[part].mean() < _BLOCK_MIN_VISIBLE
+                ):
+                    continue
+                a = np.array(ref[part], dtype=np.float32, order="C")
+                b = np.array(texture[part], dtype=np.float32, order="C")
+                small_eig, big_eig = _structure(a)
+                if small_eig < _TEXTURE_MIN or small_eig < _TEXTURE_MIN_RATIO * big_eig:
+                    continue
+                # Copias contiguas: o phaseCorrelate escreve na entrada
+                # quando ela chega como fatia (medido: a referencia
+                # derivava a cada medida).
+                (dx, dy), peak = cv2.phaseCorrelate(a, b, window)
+                if peak < _PEAK_MIN:
+                    continue
+                points.append(((x + _BLOCK / 2 - w / 2), (y + _BLOCK / 2 - h / 2)))
+                shifts.append((dx, dy))
+        if len(points) < _MIN_BLOCKS:
+            return None
+        points = np.asarray(points, dtype=np.float64) / _SCALE
+        shifts = np.asarray(shifts, dtype=np.float64) / _SCALE
+        params, keep = _fit_affine(points, shifts)
+        inliers = int(np.count_nonzero(keep))
+        if params is None or inliers < max(
+            _MIN_BLOCKS, _MIN_INLIER_FRACTION * len(points)
         ):
-            stack = np.stack(self._history)
-            center = stack.mean(axis=0)
-            if float(np.max(np.linalg.norm(stack - center, axis=1))) <= (
-                self.settle_tol_px
-            ):
-                self._vetoes_in_row = 0
-                return "correct", (float(center[0]), float(center[1]))
+            if len(points) < _MIN_BLOCKS_DISAGREEING:
+                return None
+            # Sem consenso com blocos de sobra: a folha deformou ou andou
+            # demais para um modelo afim (folha-movida, passadas 5-9:
+            # ~20 blocos validos, sem consenso — e eram as que
+            # carimbavam a copia deslocada). A mediana dos blocos resiste
+            # a mao cobrindo ate metade deles.
+            median = np.median(shifts, axis=0)
+            return Motion(
+                jacobian=np.zeros((2, 2)),
+                shift=median,
+                center=np.array([w / 2, h / 2]) / _SCALE,
+                max_px=float(np.median(np.linalg.norm(shifts, axis=1))),
+                blocks=len(points),
+                inliers=inliers,
+                corners=np.tile(median, (4, 1)),
+                consistent=False,
+            )
+        jacobian, shift = params[:2].T, params[2]
+        # Pontos fixos (centros dos blocos dos cantos da grade): o
+        # mesmo lugar da pagina em toda passada, para comparar modelos.
+        nx, ny = w // _BLOCK, h // _BLOCK
+        gx = (np.array([0, nx - 1]) * _BLOCK + _BLOCK / 2 - w / 2) / _SCALE
+        gy = (np.array([0, ny - 1]) * _BLOCK + _BLOCK / 2 - h / 2) / _SCALE
+        corners = np.array(
+            [[gx[0], gy[0]], [gx[1], gy[0]], [gx[1], gy[1]], [gx[0], gy[1]]]
+        )
+        displaced = corners @ jacobian.T + shift
+        return Motion(
+            jacobian=jacobian,
+            shift=shift,
+            center=np.array([w / 2, h / 2]) / _SCALE,
+            max_px=float(np.max(np.linalg.norm(displaced, axis=1))),
+            blocks=len(points),
+            inliers=inliers,
+            corners=displaced,
+        )
+
+    def aligned(self, motion):
+        return motion is None or motion.max_px <= self.threshold_px
+
+    def decide(self, registered, unregistered=None):
+        """(decisao, Motion, hipotese) desta passada.
+
+        decisao: "accept" | "unregistered" | "correct" | "veto" | "fail_open".
+        registered e o Motion da passada registrada; unregistered, o do
+        warp sem registro (so medido quando o registrado falha). Em
+        "correct", o Motion leva a evidencia da hipotese indicada
+        ("registered" ou "unregistered") de volta para a grade da
+        referencia: o modelo foi medido na MESMA imagem de onde sai a
+        probabilidade da passada, entao vale para ela mesmo com a folha
+        andando — e a folha parada fora do lugar e corrigida em toda
+        passada, sem deadlock.
+        """
+        if self.aligned(registered):
+            self._vetoes_in_row = 0
+            return "accept", None, "registered"
+        if unregistered is not None and self.aligned(unregistered):
+            self._vetoes_in_row = 0
+            return "unregistered", None, "unregistered"
+        candidates = [(registered, "registered")]
+        if unregistered is not None:
+            candidates.append((unregistered, "unregistered"))
+        candidates = [c for c in candidates if c[0].consistent]
+        best, hypothesis = min(
+            candidates, key=lambda c: c[0].max_px, default=(None, None)
+        )
+        if best is not None and best.max_px <= self.correct_max_px:
+            self._vetoes_in_row = 0
+            return "correct", best, hypothesis
         if self._vetoes_in_row >= self.fail_open_passes:
-            return "fail_open", None
+            return "fail_open", None, "registered"
         self._vetoes_in_row += 1
-        return "veto", None
+        return "veto", None, "registered"

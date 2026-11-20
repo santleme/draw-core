@@ -77,15 +77,14 @@ class InkConfig:
     t_high: float = 0.90
     t_low: float = 0.65
     provisional_min_px: int = 12
-    # Veto de passada por movimento residual da folha (draw.ink.motion):
-    # a passada cuja pagina registrada esta deslocada mais de
-    # motion_veto_px da referencia da geracao nao vota; o mesmo
-    # deslocamento estavel por motion_settle_passes passadas (folha
-    # parada fora do lugar) entra corrigido pela translacao medida,
-    # em vez de vetar para sempre. Opt-in (medido so em replay).
+    # Arbitro de registro e veto por movimento residual (draw.ink.motion):
+    # mede por consenso de blocos o deslocamento da pagina desta passada
+    # contra a referencia da ancora; desalinhada alem de motion_veto_px,
+    # a passada vota sem registro (se o warp cru esta alinhado), entra
+    # corrigida pelo modelo afim medido (ate 4 px) ou e vetada. Opt-in
+    # (medido so em replay).
     motion_veto: bool = False
     motion_veto_px: float = 1.0
-    motion_settle_passes: int = 3
 
     def __post_init__(self):
         if not 0.0 < self.t_low < self.t_high <= 1.0:
@@ -97,8 +96,6 @@ class InkConfig:
             raise ValueError("provisional_min_px deve ser >= 1")
         if not self.motion_veto_px > 0.0:
             raise ValueError("motion_veto_px deve ser > 0")
-        if self.motion_settle_passes < 2:
-            raise ValueError("motion_settle_passes deve ser >= 2")
 
     @classmethod
     def strict_vote(cls, level, **overrides):

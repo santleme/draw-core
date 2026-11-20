@@ -201,9 +201,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         # Veto por movimento residual (InkConfig.motion_veto, opt-in):
         # ver draw.ink.motion.
         self._motion = (
-            motion.MotionGate(
-                self._config.motion_veto_px, self._config.motion_settle_passes
-            )
+            motion.MotionGate(self._config.motion_veto_px)
             if self._config.motion_veto
             else None
         )
@@ -211,6 +209,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         self._motion_vetoes_total = 0
         self._motion_corrections_total = 0
         self._motion_fail_open_total = 0
+        self._motion_unregistered_total = 0
         self._ruling_generation = None
         # Relogio monotonico injetavel: o padrao e o do processo;
         # replays com pump() passam o relogio da cena.
@@ -1092,31 +1091,49 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 )
                 if registration._registration_is_identity(motion_matrix):
                     motion_matrix = None
-                motion_shift = self._motion.measure(
-                    warped, motion_matrix, visible, anchor
-                )
-                motion_decision, motion_undo = self._motion.decide(motion_shift)
-                reg_info["motion_residual_px"] = (
-                    None
-                    if motion_shift is None
-                    else float(np.hypot(motion_shift[0], motion_shift[1]))
-                )
-                reg_info["motion_half_max_px"] = (
-                    None if motion_shift is None else float(motion_shift[2])
+                measured = self._motion.measure(warped, motion_matrix, visible, anchor)
+                unregistered = None
+                if motion_matrix is not None and not self._motion.aligned(measured):
+                    # O registro supoe a folha parada; se ela andou e o
+                    # quad acompanhou, o warp sem registro e o alinhado
+                    # (folha-movida, passadas 5-9: 1,2-1,6 px sem
+                    # registro contra 3,1-4,0 px com ele).
+                    unregistered = self._motion.measure(warped, None, visible, anchor)
+                motion_decision, motion_fix, hypothesis = self._motion.decide(
+                    measured, unregistered
                 )
                 reg_info["motion_decision"] = motion_decision
+                reg_info["motion_residual_px"] = (
+                    None if measured is None else measured.max_px
+                )
+                reg_info["motion_unregistered_px"] = (
+                    None if unregistered is None else unregistered.max_px
+                )
+                reg_info["motion_blocks"] = (
+                    None if measured is None else (measured.inliers, measured.blocks)
+                )
+                if hypothesis == "unregistered":
+                    # A passada vota na propria geometria: registro
+                    # identidade, a mesma da 1a passada da ancora.
+                    registration_corners = anchor.copy()
+                    registered_prob, registered_visible = (
+                        registration._register_ink_probability(
+                            prob, anchor, registration_corners, visible
+                        )
+                    )
+                    self._last_registration = (
+                        anchor.copy(),
+                        registration_corners.copy(),
+                        None if corners is None else corners.copy(),
+                    )
                 if motion_decision == "correct":
-                    # Folha parada fora do lugar: a evidencia volta
-                    # para a grade da ancora pela translacao medida.
-                    dx, dy = motion_undo
-                    registered_prob = motion.translate(registered_prob, -dx, -dy)
+                    # A evidencia volta para a grade da ancora pelo
+                    # modelo afim medido nesta mesma imagem.
+                    registered_prob = motion_fix.warp_back(registered_prob)
                     if registered_visible is not None:
                         registered_visible = (
-                            motion.translate(
-                                registered_visible.astype(np.uint8),
-                                -dx,
-                                -dy,
-                                nearest=True,
+                            motion_fix.warp_back(
+                                registered_visible.astype(np.uint8), nearest=True
                             )
                             > 0
                         )
@@ -1527,6 +1544,8 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 self._motion_vetoes_total += 1
             elif motion_decision == "correct" and prob is registered_prob:
                 self._motion_corrections_total += 1
+            elif motion_decision == "unregistered" and prob is registered_prob:
+                self._motion_unregistered_total += 1
             elif motion_decision == "fail_open" and prob is registered_prob:
                 self._motion_fail_open_total += 1
             pass_voted = not (
@@ -1702,6 +1721,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 "motion_vetoes_total": self._motion_vetoes_total,
                 "motion_corrections_total": self._motion_corrections_total,
                 "motion_fail_open_total": self._motion_fail_open_total,
+                "motion_unregistered_total": self._motion_unregistered_total,
                 "worker_mode": (
                     "rest"
                     if self._at_rest()
