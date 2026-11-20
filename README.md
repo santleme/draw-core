@@ -10,12 +10,12 @@ See [`docs/MIGRATION_SPEC.md`](docs/MIGRATION_SPEC.md) for structure and plan.
 Place the model binaries verified by [`assets/manifest.json`](assets/manifest.json)
 (`draw_seg_v3_dyn.onnx`, `page_clean_unet.onnx`, and optionally
 `hand_landmarker.task`) in `models/`. Because the base runtime depends on
-`opencv-python-headless`, replace it with the GUI wheel in your virtualenv
-before opening the live window:
+`opencv-contrib-python-headless`, replace it with the GUI wheel in your
+virtualenv before opening the live window:
 
 ```sh
 uv sync --extra gui --extra hand
-uv pip uninstall opencv-python-headless && uv pip install --reinstall opencv-python
+uv pip uninstall opencv-contrib-python-headless && uv pip install --reinstall "opencv-contrib-python>=4.8,<5.1"
 uv run --no-sync draw --check
 uv run --no-sync draw
 ```

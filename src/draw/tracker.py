@@ -799,12 +799,12 @@ class DetectWakeGate:
     def settled(self):
         return self._settled
 
-    def wake(self):
-        """Sai do estado assentado e agenda deteccao no proximo quadro."""
+    def wake(self, *, force_next=False):
+        """Sai do estado assentado e volta a cadencia normal imediatamente."""
         if self._settled:
             self.wake_events += 1
         self._settled = False
-        self._force_next = True
+        self._force_next = bool(force_next)
         self._stable_count = 0
         self._ref_prof = None
         self._ref_valid = None
@@ -897,7 +897,6 @@ class DetectWakeGate:
         now = float(captured_at)
         if wake_signal or self._sentinel_triggered(frame, hand_mask=hand_mask):
             self.wake()
-            self._force_next = False
             self._last_submit_at = now
             return True
         last_ref = (

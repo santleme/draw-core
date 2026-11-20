@@ -261,16 +261,22 @@ def test_queued_masked_frame_on_exit_legacy_vs_production():
         worker.submit(WarpedPage(warp, gen))
         assert worker.pump() is True
 
-        # Quadro mascarado entra na fila antes de a mao sair; logo apos a
-        # saida, a passada consome esse quadro mascarado.
+        # Quadros mascarados esgotam tanto os skips mascarados quanto a
+        # janela inicial pos-saida, levando a trabalhadora ao descanso total
+        # antes de a mascara de mao limpar.
         worker.submit(WarpedPage(warp, gen, visible=masked_vis))
         worker.set_hand_presence(False)
-        now[0] += 0.3
-        assert worker.pump() is True
-
-        # Submissoes limpas seguintes sem novo movimento da mao.
-        for _ in range(4):
+        for _ in range(6):
             now[0] += 0.3
+            worker.submit(WarpedPage(warp, gen, visible=masked_vis))
+            worker.pump()
+        assert worker.stats()["resting"] is True
+
+        # Submissoes limpas seguintes sem novo movimento da mao: no preset de
+        # producao, a 1a submissao limpa re-arma a janela de 3 passadas e
+        # recupera a confirmacao; no legado (1 passada), permanece em descanso.
+        for _ in range(5):
+            now[0] += 1.05
             worker.submit(WarpedPage(warp, gen))
             worker.pump()
         snap = worker.poll(gen, 0)
@@ -281,5 +287,6 @@ def test_queued_masked_frame_on_exit_legacy_vs_production():
     assert legacy_px == 0
     assert legacy_worker.stats()["resting"] is True
 
-    prod_px, _prod_worker = _run_case(InkConfig.production())
+    prod_px, prod_worker = _run_case(InkConfig.production())
     assert prod_px == 8 * 15
+    assert prod_worker.stats()["resting"] is True

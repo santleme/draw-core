@@ -696,7 +696,7 @@ class Pipeline:
                         # em cache: acorda uma vez para renovar _hand_mask_det
                         # no proximo quadro antes de fechar a confirmacao.
                         self._stale_hand_woke = True
-                        self._detect_wake.wake()
+                        self._detect_wake.wake(force_next=True)
                 else:
                     self._hand_exit_at = None
                     self._stale_hand_woke = False
@@ -786,6 +786,8 @@ class Pipeline:
                 self._detect_wake.settled
                 or (
                     self.clean_hand_present is False
+                    and not self.tracker.missed
+                    and not self.tracker.has_pending
                     and (self._hand_mask_det is None or not np.any(self._hand_mask_det))
                 )
             )
