@@ -197,8 +197,8 @@ def test_provision_official_models_isolates_failures_and_handles_explicit_offici
 
     def fake_ensure(names):
         requested.extend(names)
-        if names == ["draw_seg_v3_dyn.onnx"]:
-            raise RuntimeError("falha no sheet")
+        if names == ["page_clean_unet.onnx"]:
+            raise RuntimeError("falha no primeiro download")
         return []
 
     monkeypatch.setattr(manifest_module, "ensure_models", fake_ensure)

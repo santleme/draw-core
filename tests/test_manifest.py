@@ -431,6 +431,44 @@ def test_ensure_models_accepts_existing_external_symlink_without_rejecting(tmp_p
     assert (models_dir / "page_clean_unet.onnx").read_bytes() == ink_payload
 
 
+def test_ensure_models_does_not_overwrite_existing_resolved_target_of_broken_symlink(
+    tmp_path,
+):
+    models_dir = tmp_path / "models"
+    existing_weights = _model(
+        models_dir, "checkpoints/ink.onnx", b"pesos-locais-intactos"
+    )
+    # Symlink atravessa pasta intermediaria inexistente ("scratch/.."),
+    # entao lexical_target.exists() e False no SO, mas Path.resolve()
+    # colapsa "scratch/.." para models/checkpoints/ink.onnx que ja existe.
+    (models_dir / "page_clean_unet.onnx").symlink_to("scratch/../checkpoints/ink.onnx")
+
+    release_payload = b"pesos-da-release"
+    manifest_path = _write_manifest(
+        tmp_path,
+        {
+            "page_clean_unet.onnx": {
+                "sha256": hashlib.sha256(release_payload).hexdigest(),
+                "bytes": len(release_payload),
+            },
+        },
+    )
+    calls = []
+
+    def fake_urlopen(request, timeout=None):
+        calls.append(request.full_url)
+        return _FakeHttpResponse(release_payload)
+
+    downloaded = manifest.ensure_models(
+        models_dir=models_dir,
+        manifest_path=manifest_path,
+        urlopen=fake_urlopen,
+    )
+    assert downloaded == []
+    assert calls == []
+    assert existing_weights.read_bytes() == b"pesos-locais-intactos"
+
+
 def test_download_model_translates_mkstemp_and_replace_oserror_to_runtime_error(
     tmp_path, monkeypatch
 ):

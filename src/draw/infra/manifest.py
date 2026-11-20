@@ -430,6 +430,8 @@ def ensure_models(
         if lexical_target.exists():
             continue
         target = _validate_download_target(folder, name)
+        if target.exists():
+            continue
         print(
             f"Baixando {name} ({entry.get('bytes', '?')} bytes) da Release oficial..."
         )
