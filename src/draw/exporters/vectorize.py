@@ -6,7 +6,8 @@ gerado ao salvar no Draw — e devolve as polilinhas e primitivas
 geométricas (Camada 2 de VISION.md: reta, círculo, retângulo, polilinha).
 
 Pipeline:
-  1. binarização + filtro opcional de microfragmentos de poeira;
+  1. binarização + preenchimento opcional de pinholes (<= 9 px) +
+     filtro opcional de microfragmentos de poeira;
   2. afinamento com cv2.ximgproc.thinning (Zhang-Suen ou Guo-Hall);
   3. travessia indexada O(H*W) do esqueleto como grafo (~225x mais
      rápida que varredura por nó em páginas densas);
@@ -15,6 +16,10 @@ Pipeline:
   5. costura opcional de ramos colineares em junções (ponderada por
      ângulo tangente e continuidade temporal dos carimbos quando
      disponíveis);
+     — no caminho limpo (topology="v2", o de vectorize_clean) os
+     passos 4-5 dão lugar à higiene topológica: poda radial de
+     esporões (1,5*r), contração de junções vizinhas (1,2*(r_u+r_v))
+     e pareamento de ramos por tangente + espessura em cada junção;
   6. ordenação temporal (por first_seen_ms) ou espacial (vizinho mais
      próximo com inversão de sentido para reduzir saltos de caneta);
   7. simplificação Douglas-Peucker + classificação de primitivas
@@ -530,6 +535,344 @@ def stitch_junctions(polylines, max_turn_deg=32.0, stamps=None):
     return passthrough
 
 
+# --- Higiene topológica v2 (Etapas A/B/C) -------------------------------
+# Medido em 2026-11-19 nos quatro clipes reais da régua (e5 e agora
+# estáticos, mão-sombra, folha-movida; canvas confirmado do page_clean
+# v2 com ruling + histerese): a Etapa A sozinha derrubou os ciclos
+# falsos do grafo de 265 para 14 (-95%), e A+B+C levou os estáticos de
+# ~960 para ~510 traços em ~107 ms (thinning incluso), contra o ciclo
+# de 300 ms da passada. Nenhum prior temporal entra aqui: o relógio do
+# canvas tem a resolução das publicações do page_clean (6-11 por clipe,
+# ~1 s), grossa demais para desempatar cruzamentos.
+PINHOLE_MAX_AREA = 9  # buraco 4-conexo <= 9 px dentro do traço vira tinta
+DUST_MIN_AREA = 25  # componente 8-conexa < 25 px sai antes do afinamento
+SPUR_RADIUS_RATIO = 1.5  # ramo-folha mais curto que 1,5*r da junção é esporão
+CONTRACT_RADIUS_RATIO = 1.2  # junções a <= 1,2*(r_u + r_v) viram uma só
+PAIR_TAU = 0.25  # custo máximo para dois ramos atravessarem a junção juntos
+PAIR_RADIUS_WEIGHT = 0.5  # peso da diferença relativa de espessura no custo
+_PAIR_EXACT_MAX = 10  # até 10 ramos na junção o pareamento é exato (DP)
+
+
+def fill_pinholes(ink, max_area=PINHOLE_MAX_AREA):
+    """Preenche buracos minúsculos dentro do traço (Etapa A).
+
+    Um furo de 1-9 px no meio de um traço grosso vira um ciclo no
+    esqueleto — o afinamento contorna o furo — e cada ciclo falso
+    parte o traço em junções que não existem. Buracos 4-conexos que
+    não tocam a borda e têm área <= max_area são tinta; o miolo de um
+    'o' ou de um laço (dezenas de px) fica.
+    """
+    ink = ink.astype(bool, copy=False)
+    if max_area <= 0:
+        return ink.copy()
+    h, w = ink.shape
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(
+        (~ink).astype(np.uint8), connectivity=4
+    )
+    x0 = stats[:, cv2.CC_STAT_LEFT]
+    y0 = stats[:, cv2.CC_STAT_TOP]
+    x1 = x0 + stats[:, cv2.CC_STAT_WIDTH]
+    y1 = y0 + stats[:, cv2.CC_STAT_HEIGHT]
+    fill = (
+        (stats[:, cv2.CC_STAT_AREA] <= int(max_area))
+        & (x0 > 0)
+        & (y0 > 0)
+        & (x1 < w)
+        & (y1 < h)
+    )
+    fill[0] = False
+    if n <= 1 or not fill.any():
+        return ink.copy()
+    return ink | fill[labels]
+
+
+class _TopoGraph:
+    """Grafo do esqueleto: nós com raio local e arestas com polilinha."""
+
+    def __init__(self, items, dist):
+        self.dist = dist
+        self.edges = []  # dicts: u, v, pts, length, alive
+        self.loose = []  # itens sem nós (anéis livres, pontos isolados)
+        self.center = {}
+        self.radius = {}
+        self.parent = {}
+        h, w = dist.shape
+        for item in items:
+            u, v = item.get("start_node"), item.get("end_node")
+            pts = item["points"]
+            if u is None or v is None or len(pts) < 2:
+                self.loose.append({"points": pts, "closed": item["closed"]})
+                continue
+            for nid, p in ((u, pts[0]), (v, pts[-1])):
+                if nid not in self.center:
+                    self.center[nid] = np.asarray(p, dtype=np.float64).copy()
+                    x = int(np.clip(round(float(p[0])), 0, w - 1))
+                    y = int(np.clip(round(float(p[1])), 0, h - 1))
+                    self.radius[nid] = max(1.0, float(dist[y, x]))
+                    self.parent[nid] = nid
+            self.edges.append(
+                {
+                    "u": u,
+                    "v": v,
+                    "pts": pts,
+                    "length": _polyline_arc_length(pts),
+                    "alive": True,
+                }
+            )
+
+    def find(self, nid):
+        root = nid
+        while self.parent[root] != root:
+            root = self.parent[root]
+        while self.parent[nid] != root:
+            self.parent[nid], nid = root, self.parent[nid]
+        return root
+
+    def degrees(self):
+        deg = {}
+        for e in self.edges:
+            if e["alive"]:
+                for nid in (self.find(e["u"]), self.find(e["v"])):
+                    deg[nid] = deg.get(nid, 0) + 1
+        return deg
+
+
+def _prune_and_contract(graph, spur_ratio, contract_ratio):
+    """Etapa B: poda radial de esporões e contração de junções vizinhas.
+
+    Esporão é o ramo-folha preso a uma junção (grau >= 3) mais curto
+    que spur_ratio vezes o raio do traço ali — a barba que o
+    afinamento deixa nos cantos de traço grosso. Duas junções ligadas
+    por uma aresta mais curta que contract_ratio*(r_u + r_v) são o
+    mesmo cruzamento visto como dois nós (o 'X' grosso afina em dois
+    'Y'); viram um nó no centróide ponderado pelos raios.
+    """
+    changed = True
+    while changed:
+        changed = False
+        deg = graph.degrees()
+        for e in graph.edges:
+            if not e["alive"]:
+                continue
+            u, v = graph.find(e["u"]), graph.find(e["v"])
+            leaf_u, leaf_v = deg.get(u) == 1, deg.get(v) == 1
+            if leaf_u == leaf_v:
+                continue
+            hub = v if leaf_u else u
+            if deg[hub] >= 3 and e["length"] < spur_ratio * graph.radius[hub]:
+                e["alive"] = False
+                deg[u] -= 1
+                deg[v] -= 1
+                changed = True
+    changed = True
+    while changed:
+        changed = False
+        deg = graph.degrees()
+        for e in graph.edges:
+            if not e["alive"]:
+                continue
+            u, v = graph.find(e["u"]), graph.find(e["v"])
+            if u == v or deg.get(u, 0) < 3 or deg.get(v, 0) < 3:
+                continue
+            ru, rv = graph.radius[u], graph.radius[v]
+            if e["length"] > contract_ratio * (ru + rv):
+                continue
+            graph.center[u] = (graph.center[u] * ru + graph.center[v] * rv) / (ru + rv)
+            graph.radius[u] = max(ru, rv)
+            graph.parent[v] = u
+            e["alive"] = False
+            changed = True
+            deg = graph.degrees()
+
+
+def _half_edge_feature(graph, edge, at_start, root):
+    """Tangente de saída e raio mediano de um ramo junto à junção."""
+    pts = edge["pts"] if at_start else edge["pts"][::-1]
+    c = graph.center[root]
+    r = graph.radius[root]
+    seg = np.hypot(*np.diff(pts, axis=0).T)
+    cum = np.concatenate([[0.0], np.cumsum(seg)])
+    # A tangente é lida fora do disco da junção (>= 2r): dentro dele o
+    # esqueleto entorta para o centro e todos os ramos parecem iguais.
+    k = int(np.searchsorted(cum, max(2.0 * r, 3.0)))
+    k = min(max(k, 1), len(pts) - 1)
+    vec = pts[k] - c
+    norm = float(np.hypot(vec[0], vec[1]))
+    tangent = vec / norm if norm > 1e-6 else np.array([1.0, 0.0])
+    h, w = graph.dist.shape
+    sample = pts[: k + 1]
+    ys = np.clip(np.round(sample[:, 1]).astype(int), 0, h - 1)
+    xs = np.clip(np.round(sample[:, 0]).astype(int), 0, w - 1)
+    rad = max(1.0, float(np.median(graph.dist[ys, xs])))
+    return tangent, rad
+
+
+def _max_weight_pairing(cost, tau):
+    """Pares (i, j) que maximizam a soma de (tau - custo), cada ramo uma vez.
+
+    Exato por DP em máscara até _PAIR_EXACT_MAX ramos (junções reais
+    têm 3-6); acima disso, guloso pelo menor custo.
+    """
+    k = len(cost)
+    if k > _PAIR_EXACT_MAX:
+        cand = sorted(
+            (cost[i][j], i, j)
+            for i in range(k)
+            for j in range(i + 1, k)
+            if cost[i][j] < tau
+        )
+        used, out = set(), []
+        for _c, i, j in cand:
+            if i not in used and j not in used:
+                used.update((i, j))
+                out.append((i, j))
+        return out
+
+    full = (1 << k) - 1
+    memo = {}
+
+    def best(mask):
+        if mask == full:
+            return 0.0, ()
+        if mask in memo:
+            return memo[mask]
+        i = 0
+        while mask >> i & 1:
+            i += 1
+        top_w, top_p = best(mask | 1 << i)  # i fica sem par
+        for j in range(i + 1, k):
+            if mask >> j & 1 or cost[i][j] >= tau:
+                continue
+            w_rest, p_rest = best(mask | 1 << i | 1 << j)
+            w_pair = w_rest + tau - cost[i][j]
+            if w_pair > top_w:
+                top_w, top_p = w_pair, ((i, j), *p_rest)
+        memo[mask] = (top_w, top_p)
+        return memo[mask]
+
+    return list(best(0)[1])
+
+
+def _pair_junctions(graph, tau, radius_weight):
+    """Etapa C: liga as meias-arestas que atravessam cada nó.
+
+    Em nó de grau 2 a passagem é obrigatória. Em junção, o custo de
+    atravessar do ramo a para o b é (1 + t_a.t_b)/2 (0 quando saem em
+    sentidos opostos) mais radius_weight vezes a diferença relativa
+    de espessura; o pareamento de peso máximo abaixo de tau decide
+    quem continua quem. Devolve {(edge, end): (edge, end)}.
+    """
+    incident = {}
+    for idx, e in enumerate(graph.edges):
+        if e["alive"]:
+            incident.setdefault(graph.find(e["u"]), []).append((idx, 0))
+            incident.setdefault(graph.find(e["v"]), []).append((idx, 1))
+    link = {}
+    for root, halves in incident.items():
+        if len(halves) == 2:
+            a, b = halves
+            link[a] = b
+            link[b] = a
+            continue
+        if len(halves) < 3:
+            continue
+        feats = [
+            _half_edge_feature(graph, graph.edges[i], end == 0, root)
+            for i, end in halves
+        ]
+        k = len(halves)
+        cost = [[math.inf] * k for _ in range(k)]
+        for a in range(k):
+            ta, ra = feats[a]
+            for b in range(a + 1, k):
+                tb, rb = feats[b]
+                c = (1.0 + float(ta @ tb)) / 2.0
+                c += radius_weight * abs(ra - rb) / max(ra, rb)
+                cost[a][b] = cost[b][a] = c
+        for a, b in _max_weight_pairing(cost, tau):
+            link[halves[a]] = halves[b]
+            link[halves[b]] = halves[a]
+    return link
+
+
+def _edge_points(graph, idx, forward):
+    """Polilinha da aresta no sentido pedido, pontas no centro do nó."""
+    e = graph.edges[idx]
+    pts = e["pts"].copy()
+    pts[0] = graph.center[graph.find(e["u"])]
+    pts[-1] = graph.center[graph.find(e["v"])]
+    return pts if forward else pts[::-1]
+
+
+def _chain_strokes(graph, link):
+    """Encadeia as arestas pelos pares das junções em traços."""
+    alive = [i for i, e in enumerate(graph.edges) if e["alive"]]
+    used = set()
+    strokes = []
+
+    def walk(start_idx, start_end):
+        # Entra pela ponta start_end e segue pelo outro lado.
+        idx, entry = start_idx, start_end
+        parts = []
+        while True:
+            used.add(idx)
+            parts.append(_edge_points(graph, idx, forward=entry == 0))
+            nxt = link.get((idx, 1 - entry))
+            if nxt is None:
+                return parts, False
+            if nxt[0] == start_idx and nxt[1] == start_end:
+                return parts, True
+            if nxt[0] in used:
+                return parts, False
+            idx, entry = nxt
+
+    # Primeiro as cadeias abertas, a partir de uma ponta sem par.
+    for idx in alive:
+        if idx in used:
+            continue
+        for end in (0, 1):
+            if (idx, end) not in link:
+                parts, closed = walk(idx, end)
+                strokes.append((parts, closed))
+                break
+    # O que sobrou são ciclos (toda ponta tem par).
+    for idx in alive:
+        if idx not in used:
+            strokes.append(walk(idx, 0))
+
+    out = []
+    for parts, closed in strokes:
+        pts = np.vstack([parts[0]] + [p[1:] for p in parts[1:]])
+        if closed and len(pts) >= 4:
+            out.append({"points": pts[:-1], "closed": True})
+        else:
+            out.append({"points": pts, "closed": False})
+    return out
+
+
+def topology_strokes(
+    skel,
+    ink,
+    *,
+    spur_ratio=SPUR_RADIUS_RATIO,
+    contract_ratio=CONTRACT_RADIUS_RATIO,
+    tau=PAIR_TAU,
+    radius_weight=PAIR_RADIUS_WEIGHT,
+):
+    """Esqueleto -> traços (Etapas B e C): poda, contração e pareamento.
+
+    Substitui prune_skeleton_spurs + stitch_junctions no caminho
+    limpo. Mesmo formato de saída de traverse_graph sem topologia:
+    lista de {"points": Nx2 (x, y) px, "closed": bool}.
+    """
+    dist = cv2.distanceTransform(ink.astype(np.uint8), cv2.DIST_L2, 5)
+    items = traverse_graph(_make_8_minimal(skel), include_topology=True)
+    graph = _TopoGraph(items, dist)
+    _prune_and_contract(graph, spur_ratio, contract_ratio)
+    link = _pair_junctions(graph, tau, radius_weight)
+    return _chain_strokes(graph, link) + graph.loose
+
+
 def annotate_and_order_polylines(polylines, stamps=None):
     """Anota carimbos temporais quando presentes e ordena para minimizar saltos."""
     first_plane = None
@@ -598,24 +941,28 @@ def annotate_and_order_polylines(polylines, stamps=None):
     ordered = [enriched[first_idx]]
     cur_pos = ordered[0]["points"][0 if ordered[0]["closed"] else -1]
 
-    while remaining:
-        best_i = None
-        best_flip = False
-        best_d2 = 1e30
-        for i in remaining:
-            pts = enriched[i]["points"]
-            d0 = float(np.sum((pts[0] - cur_pos) ** 2))
-            if d0 < best_d2:
-                best_d2 = d0
-                best_i = i
-                best_flip = False
-            if not enriched[i]["closed"] and len(pts) > 1:
-                d1 = float(np.sum((pts[-1] - cur_pos) ** 2))
-                if d1 < best_d2:
-                    best_d2 = d1
-                    best_i = i
-                    best_flip = True
-        remaining.remove(best_i)
+    # Pontas candidatas em vetores: a varredura escalar (np.sum por
+    # traço, O(n^2) chamadas) custava ~0,7 s em páginas reais de 400+
+    # traços. Intercalar (início, fim) por traço e pegar o primeiro
+    # argmin reproduz o desempate do laço antigo (o '<' estrito
+    # varria início antes do fim, traço a traço, em ordem de índice).
+    n = len(enriched)
+    heads = np.array([it["points"][0] for it in enriched], dtype=np.float64)
+    tails = np.array([it["points"][-1] for it in enriched], dtype=np.float64)
+    can_flip = np.array(
+        [(not it["closed"]) and len(it["points"]) > 1 for it in enriched]
+    )
+    live = np.ones(n, dtype=bool)
+    live[first_idx] = False
+    for _ in range(n - 1):
+        idx = np.flatnonzero(live)
+        d0 = ((heads[idx] - cur_pos) ** 2).sum(axis=1)
+        d1 = ((tails[idx] - cur_pos) ** 2).sum(axis=1)
+        d1[~can_flip[idx]] = np.inf
+        pick = int(np.argmin(np.column_stack([d0, d1]).ravel()))
+        best_i = int(idx[pick // 2])
+        best_flip = bool(pick % 2)
+        live[best_i] = False
         chosen = dict(enriched[best_i])
         if best_flip:
             chosen["points"] = chosen["points"][::-1].copy()
@@ -892,15 +1239,28 @@ def vectorize_mask(
     stitch=False,
     stamps=None,
     order_strokes=False,
+    fill_holes=False,
+    topology="legacy",
 ):
-    """Máscara de tinta -> polilinhas simplificadas (px, espaço do papel)."""
-    work = filter_microfragments(ink, min_area=min_area) if min_area > 1 else ink
+    """Máscara de tinta -> polilinhas simplificadas (px, espaço do papel).
+
+    topology="v2" troca a poda e a costura legadas (prune_spurs,
+    stitch) pela higiene topológica (topology_strokes); os dois
+    caminhos devolvem o mesmo formato.
+    """
+    if topology not in ("legacy", "v2"):
+        raise ValueError(f"topology desconhecida: {topology!r}")
+    work = fill_pinholes(ink) if fill_holes else ink
+    work = filter_microfragments(work, min_area=min_area) if min_area > 1 else work
     skel = thin(work, thinning)
-    if prune_spurs:
-        skel = prune_skeleton_spurs(skel, work)
-    raw = traverse_graph(skel, include_topology=stitch)
-    if stitch:
-        raw = stitch_junctions(raw, stamps=stamps)
+    if topology == "v2":
+        raw = topology_strokes(skel, work)
+    else:
+        if prune_spurs:
+            skel = prune_skeleton_spurs(skel, work)
+        raw = traverse_graph(skel, include_topology=stitch)
+        if stitch:
+            raw = stitch_junctions(raw, stamps=stamps)
     if order_strokes or stamps is not None:
         raw = annotate_and_order_polylines(raw, stamps=stamps)
     out = []
@@ -915,14 +1275,19 @@ def vectorize_mask(
 
 
 def vectorize_clean(ink, epsilon=1.5, thinning="zhangsuen", stamps=None):
-    """Atalho recomendado para canvas reais: limpa poeira, poda esporões, costura e ordena."""
+    """Atalho recomendado para canvas reais: higiene topológica v2 e ordenação.
+
+    Preenche pinholes, remove poeira (< DUST_MIN_AREA px), poda
+    esporões, contrai junções e pareia ramos nas junções; os carimbos,
+    quando presentes, só orientam e ordenam os traços.
+    """
     return vectorize_mask(
         ink,
         epsilon=epsilon,
         thinning=thinning,
-        min_area=4,
-        prune_spurs=True,
-        stitch=True,
+        min_area=DUST_MIN_AREA,
+        fill_holes=True,
+        topology="v2",
         stamps=stamps,
         order_strokes=True,
     )
