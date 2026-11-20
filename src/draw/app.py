@@ -34,7 +34,7 @@ do Windows por Hyper-V socket (hvcam-host.exe, santleme/hvcam) — sem
 IP, sem firewall e sem usbipd.
 Para evitar o registro de servico do Windows, rode o Draw com
 `--source hvcam+reverse://` e inicie `hvcam-host.exe --reverse` no
-Windows (o listener aguarda ate 35 s pela conexao ou reconexao do host).
+Windows (a abertura aguarda ate 35 s pela conexao inicial do host).
 Assim todo o processamento (e o ML futuro) fica no Linux. A camera so
 envia os frames. Ela pode ser um celular, outro computador ou uma camera IP.
 

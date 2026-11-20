@@ -23,6 +23,7 @@ LatestFrameCapture usa na telemetria.
 import ctypes
 import errno
 import os
+import pwd
 import selectors
 import socket
 import time
@@ -62,13 +63,25 @@ class HvFrameHeader(ctypes.Structure):
     ]
 
 
-def _load():
+def _candidates():
     here = os.path.dirname(os.path.abspath(__file__))
-    for cand in (
+    paths = [
         os.path.join(here, "libhvcam.so"),
         os.path.join(here, "..", "..", "build", "libhvcam.so"),
-        "libhvcam.so",
-    ):
+        os.path.join(here, "..", "..", "..", "hvcam", "build", "libhvcam.so"),
+    ]
+    try:
+        home_dir = pwd.getpwuid(os.getuid()).pw_dir
+    except (AttributeError, KeyError, OSError):
+        home_dir = None
+    if home_dir:
+        paths.append(os.path.join(home_dir, "hvcam", "build", "libhvcam.so"))
+    paths.append("libhvcam.so")
+    return tuple(paths)
+
+
+def _load():
+    for cand in _candidates():
         try:
             lib = ctypes.CDLL(cand)
             break
