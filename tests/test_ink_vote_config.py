@@ -139,7 +139,7 @@ def test_main_ink_vote_flag_builds_the_pipeline_config(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["draw"])
     app_module.main()
     assert (
-        seen[-1]["pipeline_config"].ink == InkConfig()
+        seen[-1]["pipeline_config"].ink == InkConfig.production()
     )  # sem a flag: preset de produção
     monkeypatch.setattr(sys, "argv", ["draw", "--ink-vote", "0.92"])
     app_module.main()
@@ -183,7 +183,7 @@ def test_main_combines_ink_vote_gain_and_rotation(monkeypatch):
     monkeypatch.setattr(
         sys,
         "argv",
-        ["draw", "--ink-vote", "0.85", "--ink-gain", "--rotate", "180"],
+        ["draw", "--ink-vote", "0.85", "--rotate", "180"],
     )
     app_module.main()
     kwargs = seen[-1]

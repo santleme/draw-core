@@ -753,22 +753,73 @@ def test_main_orientation_paisagem_recusa_markers(monkeypatch):
     assert error.value.code == 2
 
 
-def test_main_ink_gain_liga_o_ganho_no_pipeline(monkeypatch):
-    """--ink-gain chega ao Pipeline como PipelineConfig(ink_auto_gain=True);
-    sem a flag, o preset de producao (desligado)."""
+def _run_main(monkeypatch, *argv):
     seen = []
     monkeypatch.setattr(app_module, "run", lambda **kw: seen.append(kw))
-    for argv, expected in ((["draw"], False), (["draw", "--ink-gain"], True)):
-        monkeypatch.setattr(sys, "argv", argv)
-        app_module.main()
-        assert seen[-1]["pipeline_config"].ink_auto_gain is expected
+    monkeypatch.setattr(sys, "argv", ["draw", *argv])
+    app_module.main()
+    return seen[-1]
 
 
-def test_markers_mode_rejects_ink_gain(monkeypatch):
-    """Modo marcadores não roda o pipeline de tinta: o ganho seria
-    ignorado em silêncio (review #52)."""
+def test_main_sem_flags_usa_o_preset_de_producao(monkeypatch):
+    pipeline = _run_main(monkeypatch)["pipeline_config"]
+    assert pipeline == app_module.PipelineConfig()
+    assert pipeline.ink == app_module.InkConfig.production()
+    assert pipeline.ink_auto_gain is True
+    assert pipeline.detect_wake is True
+    ink = pipeline.ink
+    assert ink.ruling_removal and ink.hysteresis and ink.motion_veto
+    assert ink.pass_interval_s == 0.15
+    assert ink.vote_score_strong > 1.9
+
+
+def test_main_legacy_ink_volta_ao_comportamento_anterior(monkeypatch):
+    pipeline = _run_main(monkeypatch, "--legacy-ink")["pipeline_config"]
+    assert pipeline == app_module.PipelineConfig(
+        ink=app_module.InkConfig(), ink_auto_gain=False, detect_wake=False
+    )
+
+
+def test_main_no_ink_ruling_tira_so_a_pauta(monkeypatch):
+    pipeline = _run_main(monkeypatch, "--no-ink-ruling")["pipeline_config"]
+    assert pipeline.ink == app_module.InkConfig.production(ruling_removal=False)
+    assert pipeline.ink_auto_gain and pipeline.detect_wake
+
+
+def test_main_ink_vote_e_interval_ajustam_o_preset(monkeypatch):
+    ink = _run_main(monkeypatch, "--ink-vote", "0.9", "--ink-interval", "0.4")[
+        "pipeline_config"
+    ].ink
+    assert ink == app_module.InkConfig.production(vote_level=0.9, pass_interval_s=0.4)
+
+
+def test_main_markers_sem_flags_usa_o_preset_legado(monkeypatch):
+    pipeline = _run_main(monkeypatch, "--markers")["pipeline_config"]
+    assert pipeline.ink == app_module.InkConfig()
+    assert pipeline.ink_auto_gain is False and pipeline.detect_wake is False
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--markers", "--ink-vote", "0.85"],
+        ["--markers", "--ink-interval", "0.15"],
+        ["--markers", "--no-ink-ruling"],
+        ["--markers", "--legacy-ink"],
+        ["--legacy-ink", "--no-ink-ruling"],
+        ["--ink-interval", "0"],
+        ["--ink-vote", "1.5"],
+        ["--ink-gain"],
+        ["--ink-ruling"],
+        ["--ink-hysteresis"],
+        ["--ink-motion-veto"],
+        ["--detect-wake"],
+        ["--experimental-all"],
+    ],
+)
+def test_main_combinacoes_e_flags_removidas_saem_com_2(monkeypatch, argv):
     monkeypatch.setattr(app_module, "run", lambda **kw: None)
-    monkeypatch.setattr(sys, "argv", ["draw", "--markers", "--ink-gain"])
+    monkeypatch.setattr(sys, "argv", ["draw", *argv])
     with pytest.raises(SystemExit) as error:
         app_module.main()
     assert error.value.code == 2

@@ -244,47 +244,28 @@ def test_config_validates_the_interval(bad):
         InkConfig(pass_interval_s=bad)
 
 
-def test_cli_flag_sets_it_and_markers_mode_rejects(monkeypatch):
+def test_cli_default_is_production_and_flag_overrides(monkeypatch):
     seen = []
     monkeypatch.setattr(app_module, "run", lambda **kw: seen.append(kw))
-    monkeypatch.setattr(sys, "argv", ["draw", "--ink-interval", "0.15", "--ink-ruling"])
+    monkeypatch.setattr(sys, "argv", ["draw"])
     app_module.main()
-    ink = seen[-1]["pipeline_config"].ink
-    assert ink.pass_interval_s == 0.15 and ink.ruling_removal
-    for argv in (
-        ["draw", "--markers", "--ink-interval", "0.15"],
-        ["draw", "--ink-interval", "0"],
-    ):
-        monkeypatch.setattr(sys, "argv", argv)
-        with pytest.raises(SystemExit) as error:
-            app_module.main()
-        assert error.value.code == 2
+    assert seen[-1]["pipeline_config"].ink.pass_interval_s == 0.15
+    monkeypatch.setattr(sys, "argv", ["draw", "--ink-interval", "0.4"])
+    app_module.main()
+    assert seen[-1]["pipeline_config"].ink.pass_interval_s == 0.4
+    monkeypatch.setattr(sys, "argv", ["draw", "--legacy-ink"])
+    app_module.main()
+    assert seen[-1]["pipeline_config"].ink.pass_interval_s is None
 
 
-def test_full_live_stack_flags_combine(monkeypatch):
+def test_default_is_the_full_live_stack(monkeypatch):
     # A pilha do teste de mesa: ganho, pauta, histerese, portao e cadencia.
     seen = []
     monkeypatch.setattr(app_module, "run", lambda **kw: seen.append(kw))
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "draw",
-            "--ink-gain",
-            "--ink-ruling",
-            "--ink-hysteresis",
-            "--ink-motion-veto",
-            "--ink-interval",
-            "0.15",
-        ],
-    )
+    monkeypatch.setattr(sys, "argv", ["draw"])
     app_module.main()
     config = seen[-1]["pipeline_config"]
     ink = config.ink
     assert config.ink_auto_gain
     assert ink.ruling_removal and ink.hysteresis and ink.motion_veto
     assert ink.pass_interval_s == 0.15
-    monkeypatch.setattr(sys, "argv", ["draw", "--markers", "--ink-motion-veto"])
-    with pytest.raises(SystemExit) as error:
-        app_module.main()
-    assert error.value.code == 2

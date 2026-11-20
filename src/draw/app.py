@@ -26,6 +26,12 @@ raiz do repositorio e sao conferidos contra assets/manifest.json
 antes de abrir (sha256 + tamanho); --allow-unverified rebaixa a
 recusa para aviso.
 
+A tinta usa por padrao o preset de producao (InkConfig.production):
+ganho digital, voto 0,85, remocao de pauta, histerese, veto por
+movimento, passadas a 0,15 s e Detect-Wake. --no-ink-ruling tira so a
+pauta (pode apagar lapis fino sobre a linha); --legacy-ink volta ao
+comportamento anterior; --ink-vote e --ink-interval ajustam os numeros.
+
 A fonte via rede (MJPEG/RTSP) e o caminho recomendado no WSL. O WSL nao
 enxerga webcams USB do Windows por padrao, mas enxerga streams de rede.
 A alternativa nativa e a fonte hvcam://, que puxa os quadros da webcam
@@ -1815,15 +1821,6 @@ def main():
         ),
     )
     parser.add_argument(
-        "--ink-gain",
-        action="store_true",
-        help=(
-            "ganho digital na pagina retificada antes da tinta: clareia o "
-            "papel escuro quando a camera esta no teto de exposicao de 30 fps "
-            "(PipelineConfig.ink_auto_gain)"
-        ),
-    )
-    parser.add_argument(
         "--ink-vote",
         type=float,
         default=None,
@@ -1833,25 +1830,6 @@ def main():
             "derruba a pauta que o page_clean v2 deixa passar, ao custo de "
             "afinar o traco (medido: 0,85 e o ponto equilibrado). So com a "
             "imagem bem exposta: com papel escuro quebra as letras"
-        ),
-    )
-    parser.add_argument(
-        "--detect-wake",
-        action="store_true",
-        help=(
-            "cadencia adaptativa do detector com sentinela de bordas "
-            "(PipelineConfig.detect_wake): cai para 1 Hz quando a folha "
-            "assenta e acorda no mesmo quadro se a folha mexer. Experimental, "
-            "desligado por padrao"
-        ),
-    )
-    parser.add_argument(
-        "--ink-motion-veto",
-        action="store_true",
-        help=(
-            "arbitro de registro e veto por movimento residual da folha "
-            "(InkConfig.motion_veto): passada desalinhada vota sem registro, "
-            "entra corrigida ou e vetada. Experimental, desligado por padrao"
         ),
     )
     parser.add_argument(
@@ -1867,22 +1845,22 @@ def main():
         ),
     )
     parser.add_argument(
-        "--ink-ruling",
+        "--no-ink-ruling",
         action="store_true",
         help=(
-            "remove a pauta do caderno do mapa de tinta por programacao "
-            "dinamica antes do voto (InkConfig.ruling_removal): segue a "
-            "curvatura da lombada e preserva cruzamentos de caneta; "
-            "experimental, desligado por padrao"
+            "desliga a remocao de pauta do preset de producao "
+            "(InkConfig.ruling_removal): ela segue a curvatura da lombada, mas "
+            "pode apagar lapis fino deitado sobre a linha impressa (PR #56)"
         ),
     )
     parser.add_argument(
-        "--ink-hysteresis",
+        "--legacy-ink",
         action="store_true",
         help=(
-            "histerese espaco-temporal da tinta (InkConfig.hysteresis): poeira "
-            "isolada nao confirma nem aparece na camada provisoria; so "
-            "componentes ligados a tinta forte. Experimental, desligado por padrao"
+            "volta ao comportamento anterior ao preset de producao: voto "
+            "legado, sem ganho, pauta, histerese, veto por movimento nem "
+            "Detect-Wake, passadas a 0,25 s (InkConfig() e PipelineConfig "
+            "sem os mecanismos); para comparar e depurar"
         ),
     )
     parser.add_argument(
@@ -1917,54 +1895,42 @@ def main():
         parser.error(str(error))
     # Validado ANTES do --check: o mesmo nivel invalido impede a sessao ao
     # vivo, entao o preflight nao pode sair com sucesso (review do PR #53).
-    ink_config = InkConfig()
-    if args.ink_vote is not None:
-        if args.markers:
+    legacy_ink = args.legacy_ink or args.markers
+    for flag, given in (
+        ("--ink-vote", args.ink_vote is not None),
+        ("--ink-interval", args.ink_interval is not None),
+        ("--no-ink-ruling", args.no_ink_ruling),
+        ("--legacy-ink", args.legacy_ink),
+    ):
+        if args.markers and given:
             parser.error(
-                "--ink-vote nao combina com --markers (sem tinta no modo marcadores)"
+                f"{flag} nao combina com --markers (sem tinta no modo marcadores)"
             )
-        try:
-            ink_config = InkConfig.strict_vote(args.ink_vote)
-        except ValueError as error:
-            parser.error(str(error))
-    if args.ink_motion_veto:
-        if args.markers:
-            parser.error(
-                "--ink-motion-veto nao combina com --markers (sem tinta no modo "
-                "marcadores)"
-            )
-        ink_config = dataclasses.replace(ink_config, motion_veto=True)
-    if args.ink_interval is not None:
-        if args.markers:
-            parser.error(
-                "--ink-interval nao combina com --markers (sem tinta no modo marcadores)"
-            )
-        try:
-            ink_config = dataclasses.replace(
-                ink_config, pass_interval_s=args.ink_interval
-            )
-        except ValueError as error:
-            parser.error(str(error))
-    if args.ink_ruling:
-        if args.markers:
-            parser.error(
-                "--ink-ruling nao combina com --markers (sem tinta no modo marcadores)"
-            )
-        ink_config = dataclasses.replace(ink_config, ruling_removal=True)
-    if args.ink_hysteresis:
-        if args.markers:
-            parser.error(
-                "--ink-hysteresis nao combina com --markers (sem tinta no modo marcadores)"
-            )
-        ink_config = dataclasses.replace(ink_config, hysteresis=True)
-    if args.detect_wake and args.markers:
-        parser.error(
-            "--detect-wake nao combina com --markers (detector neural desligado)"
-        )
+    if args.legacy_ink and args.no_ink_ruling:
+        parser.error("--no-ink-ruling e redundante com --legacy-ink (ja sem pauta)")
+    try:
+        if legacy_ink:
+            ink_config = InkConfig()
+            if args.ink_vote is not None:
+                ink_config = InkConfig.strict_vote(args.ink_vote)
+            if args.ink_interval is not None:
+                ink_config = dataclasses.replace(
+                    ink_config, pass_interval_s=args.ink_interval
+                )
+        else:
+            options = {"ruling_removal": not args.no_ink_ruling}
+            if args.ink_vote is not None:
+                options["vote_level"] = args.ink_vote
+            if args.ink_interval is not None:
+                options["pass_interval_s"] = args.ink_interval
+            ink_config = InkConfig.production(**options)
+    except ValueError as error:
+        parser.error(str(error))
+    # Marcadores nao tem detector neural nem tinta: preset legado, sem erro.
     pipeline_config = PipelineConfig(
         ink=ink_config,
-        ink_auto_gain=args.ink_gain,
-        detect_wake=args.detect_wake,
+        ink_auto_gain=not legacy_ink,
+        detect_wake=not legacy_ink,
     )
     if args.stream_port is not None and not args.stream_token_file:
         parser.error("--stream-port exige --stream-token-file")
@@ -1982,10 +1948,6 @@ def main():
         or hand_model is not None
     ):
         parser.error("--neural/--page-clean/--hand-model nao combinam com --markers")
-    if args.markers and args.ink_gain:
-        parser.error(
-            "--ink-gain nao combina com --markers (sem tinta no modo marcadores)"
-        )
     if neural_model is not None and not neural_model:
         parser.error("--neural sem caminho: passe o arquivo .onnx")
     if page_clean_model is not None and not page_clean_model:

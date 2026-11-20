@@ -66,12 +66,16 @@ class PipelineConfig:
     - ink_auto_gain: ganho digital no retificado antes do page_clean
       (draw.exposure): leva o papel ao nível ~200 quando a câmera
       entrega a página escura (teto físico de 1/30 s a 30 fps, driver
-      sem gain UVC). Nunca escurece; desligado por padrão até a régua
-      de replay confirmar que não regride cena bem iluminada.
+      sem gain UVC). Nunca escurece; ligado por padrão (PR #52 mediu
+      ~1 ms e o voto estrito de produção depende dele).
       Ignorado com ink_divnorm, que já normaliza a escala (o ganho
       antes dele clipava o papel claro e apagava traço fraco).
     - ink: o preset do motor de tinta que a trabalhadora recebe na
       construção (quem monta a Pipeline cria a trabalhadora com ele).
+      Padrão: `InkConfig.production()`; `InkConfig()` é o legado.
+    - detect_wake: cadência adaptativa do detector com sentinela de
+      bordas (PR #69), ligada por padrão. Cai para 1 Hz quando a folha
+      assenta e acorda no mesmo quadro se ela mexer.
     """
 
     coverage: bool = True
@@ -81,9 +85,9 @@ class PipelineConfig:
     coverage_iou_floor: float = 0.2
     ink_divnorm: bool = False
     follow_move: bool = True
-    ink_auto_gain: bool = False
-    ink: InkConfig = InkConfig()
-    detect_wake: bool = False
+    ink_auto_gain: bool = True
+    ink: InkConfig = InkConfig.production()
+    detect_wake: bool = True
     detect_wake_interval_s: float = 1.0
 
     def __post_init__(self):

@@ -632,7 +632,7 @@ def test_late_masked_heartbeat_after_hand_lift_does_not_hide_finished_stroke():
     assert int(np.count_nonzero(pipe.clean_mask)) > 0
 
 
-def test_cli_flag_and_config_validation(monkeypatch):
+def test_cli_default_is_on_and_config_validation(monkeypatch):
     with pytest.raises(ValueError):
         PipelineConfig(detect_wake_interval_s=0.0)
     with pytest.raises(ValueError):
@@ -640,11 +640,10 @@ def test_cli_flag_and_config_validation(monkeypatch):
 
     seen = []
     monkeypatch.setattr(app_module, "run", lambda **kw: seen.append(kw))
-    monkeypatch.setattr(sys, "argv", ["draw", "--detect-wake"])
+    monkeypatch.setattr(sys, "argv", ["draw"])
     app_module.main()
     assert seen[-1]["pipeline_config"].detect_wake is True
 
-    monkeypatch.setattr(sys, "argv", ["draw", "--markers", "--detect-wake"])
-    with pytest.raises(SystemExit) as error:
-        app_module.main()
-    assert error.value.code == 2
+    monkeypatch.setattr(sys, "argv", ["draw", "--legacy-ink"])
+    app_module.main()
+    assert seen[-1]["pipeline_config"].detect_wake is False

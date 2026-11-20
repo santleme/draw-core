@@ -6,6 +6,11 @@ from dataclasses import dataclass
 # soma strong de 1,9. strict_vote desloca os campos a partir dele.
 LEGACY_VOTE_LEVEL = 1.9 / 3
 
+# Preset de producao (PipelineConfig): voto estrito e cadencia medidos nos
+# PRs #53 (voto 0,85, com ganho) e #68 (0,15 s com o page_clean INT8).
+PRODUCTION_VOTE_LEVEL = 0.85
+PRODUCTION_PASS_INTERVAL_S = 0.15
+
 
 @dataclass(frozen=True, slots=True)
 class InkConfig:
@@ -139,7 +144,8 @@ class InkConfig:
         dos pixels em 0,85 e 60% em 0,92 (segue legivel); no s2, 27% e 39%.
         (3) Os tracinhos onde a pauta cruza o traco sobrevivem a qualquer
         limiar — so um modelo que conheca a pauta (v4) os remove. Por isso
-        o default segue no legado.
+        `InkConfig()` segue no legado; o preset de producao, que usa este
+        voto junto do ganho, e `InkConfig.production()`.
         """
         if not LEGACY_VOTE_LEVEL <= level <= 0.99:
             raise ValueError(
@@ -153,3 +159,29 @@ class InkConfig:
         }
         fields.update(overrides)
         return cls(**fields)
+
+    @classmethod
+    def production(
+        cls,
+        *,
+        vote_level=PRODUCTION_VOTE_LEVEL,
+        pass_interval_s=PRODUCTION_PASS_INTERVAL_S,
+        ruling_removal=True,
+    ):
+        """Preset de producao do motor de tinta: voto estrito (0,85), remocao
+        de pauta, histerese, veto por movimento e passadas a 0,15 s.
+
+        E o que `PipelineConfig()` usa; `InkConfig()` continua sendo o
+        legado (paridade byte a byte com os campos desligados). Riscos
+        medidos: a pauta pode apagar lapis fino deitado sobre a linha
+        impressa (PR #56, recall do braco 8,6%), e o voto 0,85 afina o
+        traco (-27% a -48%, PR #53) e so funciona com `ink_auto_gain`.
+        `ruling_removal=False` (--no-ink-ruling) deixa so a pauta de fora.
+        """
+        return cls.strict_vote(
+            vote_level,
+            ruling_removal=ruling_removal,
+            hysteresis=True,
+            motion_veto=True,
+            pass_interval_s=pass_interval_s,
+        )

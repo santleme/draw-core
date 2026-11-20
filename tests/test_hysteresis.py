@@ -277,22 +277,16 @@ def test_default_is_off_and_strict_vote_keeps_it_off():
     assert InkConfig().seen_threshold == 0.7  # nao tocado
 
 
-def test_main_flag_enables_it_combines_and_markers_mode_rejects(monkeypatch):
+def test_main_default_is_on_and_legacy_ink_turns_it_off(monkeypatch):
     seen = []
     monkeypatch.setattr(app_module, "run", lambda **kw: seen.append(kw))
     monkeypatch.setattr(sys, "argv", ["draw"])
     app_module.main()
-    assert seen[-1]["pipeline_config"].ink.hysteresis is False
-    monkeypatch.setattr(
-        sys, "argv", ["draw", "--ink-hysteresis", "--ink-ruling", "--ink-vote", "0.85"]
-    )
-    app_module.main()
     ink = seen[-1]["pipeline_config"].ink
     assert ink.hysteresis and ink.ruling_removal and ink.vote_score_strong > 1.9
-    monkeypatch.setattr(sys, "argv", ["draw", "--markers", "--ink-hysteresis"])
-    with pytest.raises(SystemExit) as error:
-        app_module.main()
-    assert error.value.code == 2
+    monkeypatch.setattr(sys, "argv", ["draw", "--legacy-ink"])
+    app_module.main()
+    assert seen[-1]["pipeline_config"].ink.hysteresis is False
 
 
 # --------------------------------------------------------------------- régua

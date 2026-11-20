@@ -17,6 +17,7 @@ from draw.contracts import (
     FramePacket,
     InkDisplaySnapshot,
 )
+from draw.ink.config import InkConfig
 from draw.settings import PipelineConfig
 
 QUAD = np.array(
@@ -125,6 +126,13 @@ class _FakeHandPresenceWorker:
         return self._results.pop(0)
 
 
+# Os testes do laco isolam um mecanismo por vez e dependem da cadencia de
+# deteccao fixa (um detect por quadro) e do warp cru: ganho e Detect-Wake,
+# que sao padrao de producao, ficam desligados aqui salvo quando o teste os
+# pede explicitamente.
+_BASE = {"ink_auto_gain": False, "detect_wake": False}
+
+
 def _make_loop(
     script,
     *,
@@ -137,6 +145,8 @@ def _make_loop(
 ):
     det = _SyncDetectionWorker(script, traces=traces)
     ink = _FakeInkWorker() if ink is None else ink
+    if config is None:
+        config = PipelineConfig(**_BASE)
     loop = pipeline_module.Pipeline(
         detection_worker=det,
         ink_worker=ink,
@@ -173,6 +183,9 @@ def test_pipeline_config_defaults_are_the_production_preset():
     assert config.skip_stale is True
     assert config.seg_hand_occlusion is True
     assert config.follow_move is True
+    assert config.ink_auto_gain is True
+    assert config.detect_wake is True
+    assert config.ink == InkConfig.production()
 
 
 def test_no_extras_no_coverage_gate():
@@ -627,7 +640,7 @@ def test_stale_grace_passes_skipped_with_skip_stale(monkeypatch):
 def test_stale_passes_continue_without_skip_stale():
     """skip_stale desligado: o legado segue submetendo na graça."""
     loop, _det, ink = _make_loop(
-        _seen_then_lost(), config=PipelineConfig(skip_stale=False)
+        _seen_then_lost(), config=PipelineConfig(skip_stale=False, **_BASE)
     )
     submits_grew = False
     for _ in range(60):

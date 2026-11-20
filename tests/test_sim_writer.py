@@ -5,11 +5,15 @@ import pytest
 
 
 def test_parse_flags_defaults():
+    """Sem flags: a base legada da regua (ver o teste do preset producao)."""
     from lab.sim_writer import _parse_flags
 
+    from draw.ink.config import InkConfig
     from draw.settings import PipelineConfig
 
-    assert _parse_flags([]) == PipelineConfig()
+    assert _parse_flags([]) == PipelineConfig(
+        ink=InkConfig(), ink_auto_gain=False, detect_wake=False
+    )
 
 
 def test_parse_flags_pipeline_and_ink_fields():
@@ -62,3 +66,19 @@ def test_parse_flags_validates_final_hysteresis_thresholds():
     ):
         cfg = _parse_flags(order)
         assert (cfg.ink.t_low, cfg.ink.t_high) == (0.5, 0.8)
+
+
+def test_parse_flags_base_is_legacy_and_producao_preset_matches_the_default():
+    """A regua so compara se a base nao muda com o padrao de producao: sem
+    flags e o legado; o preset `producao` do bench reproduz o padrao real."""
+    from lab.bench_ink import preset_flags
+    from lab.sim_writer import _parse_flags
+
+    from draw.ink.config import InkConfig
+    from draw.settings import PipelineConfig
+
+    base = _parse_flags([])
+    assert base == PipelineConfig(
+        ink=InkConfig(), ink_auto_gain=False, detect_wake=False
+    )
+    assert _parse_flags(preset_flags("producao")) == PipelineConfig()

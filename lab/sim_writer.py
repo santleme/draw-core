@@ -617,6 +617,8 @@ def _flag_value(raw, current):
         if raw.lower() in ("0", "false"):
             return False
         raise ValueError(f"valor bool invalido: {raw!r}")
+    if current is None:  # campo opcional numerico (InkConfig.pass_interval_s)
+        return float(raw)
     return type(current)(raw)
 
 
@@ -625,10 +627,16 @@ def _parse_flags(flags):
 
     `ink.<campo>` chega ao InkConfig (ex.: `ink.reg_deadband=1`);
     os demais nomes sao campos do PipelineConfig (ex.:
-    `coverage=0`). Nome desconhecido = erro, nunca silencio."""
+    `coverage=0`). Nome desconhecido = erro, nunca silencio.
+
+    A base e o comportamento LEGADO (sem ganho, sem Detect-Wake, InkConfig()
+    padrao), nao o padrao de producao: os presets das bancadas ("legado",
+    "ganho", ...) sao deltas sobre ela, e a regua so compara se a linha de
+    base nao mudar quando o padrao de producao muda."""
+    from draw.ink.config import InkConfig
     from draw.settings import PipelineConfig
 
-    config = PipelineConfig()
+    config = PipelineConfig(ink=InkConfig(), ink_auto_gain=False, detect_wake=False)
     ink = dataclasses.replace(config.ink)
     for kv in flags:
         name, sep, raw = kv.partition("=")

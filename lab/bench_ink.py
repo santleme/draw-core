@@ -28,6 +28,7 @@ O `regions.json` de um clipe é {"writing": [[x0,y0,x1,y1], ...],
 """
 
 import argparse
+import dataclasses
 import json
 import sys
 import tempfile
@@ -61,6 +62,8 @@ PRESETS = {
         "ink.hysteresis=1",
     ],
     "ganho+voto0.85+pauta": ["ink_auto_gain=1", "@strict=0.85", "ink.ruling_removal=1"],
+    # O preset de producao (InkConfig.production + ganho + Detect-Wake).
+    "producao": ["@production"],
 }
 
 # ---------------------------------------------------------------- sintético
@@ -458,7 +461,16 @@ def preset_flags(name):
 
     out = []
     for flag in PRESETS[name]:
-        if flag.startswith("@strict="):
+        if flag == "@production":
+            cfg = InkConfig.production()
+            base = InkConfig()
+            out += ["ink_auto_gain=1", "detect_wake=1"]
+            out += [
+                f"ink.{f.name}={getattr(cfg, f.name)}"
+                for f in dataclasses.fields(InkConfig)
+                if getattr(cfg, f.name) != getattr(base, f.name)
+            ]
+        elif flag.startswith("@strict="):
             cfg = InkConfig.strict_vote(float(flag.split("=", 1)[1]))
             out += [
                 f"ink.{f}={getattr(cfg, f)}"
