@@ -242,6 +242,7 @@ def test_index_node_components_matches_the_naive_per_node_scan():
     assert ev._index_node_components(np.zeros((5, 5), np.int32), 1) == ({}, {})
 
 
+@pytest.mark.slow
 def test_trace_polylines_scales_with_nodes_not_nodes_times_page():
     import time
 

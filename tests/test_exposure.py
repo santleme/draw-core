@@ -75,6 +75,7 @@ def test_lut_gain_matches_the_naive_per_pixel_result():
     np.testing.assert_array_equal(out, naive)
 
 
+@pytest.mark.slow
 def test_gain_is_much_cheaper_than_the_naive_full_frame_version():
     """Roda no laço de UI (33 ms a 30 fps): medido ~24 ms ingênuo contra
     ~1 ms agora. Compara com a versão ingênua na MESMA máquina."""

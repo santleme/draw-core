@@ -121,6 +121,7 @@ def test_a_single_thick_column_on_the_ruling_is_not_an_anchor(straight):
     assert (out[window] > 0.5).sum() == 0
 
 
+@pytest.mark.slow
 def test_cost_per_pass_stays_inside_the_budget(straight):
     f = ruling.RulingFilter()
     f.apply(straight.prob.copy())  # estima

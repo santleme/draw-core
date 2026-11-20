@@ -362,6 +362,7 @@ def test_cldice_dot_partially_covered():
     assert r["cldice"] == pytest.approx(2 * 1.0 * 0.5 / 1.5)
 
 
+@pytest.mark.slow
 def test_skeleton_fallback_scales_and_matches_naive_reference():
     rng = np.random.default_rng(0)
     mask = rng.random((1024, 1024)) < 0.005  # ~5k graos isolados

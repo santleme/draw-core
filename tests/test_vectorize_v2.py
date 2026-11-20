@@ -7,10 +7,12 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import pytest
 
 from draw.exporters import vectorize
 
 
+@pytest.mark.slow
 def test_node_indexing_matches_naive_and_scales_linearly():
     h, w = 1200, 850
     mask = np.zeros((h, w), dtype=np.uint8)
@@ -328,6 +330,7 @@ def test_vectorized_ordering_matches_scalar_reference_including_ties():
         assert a["closed"] == b["closed"]
 
 
+@pytest.mark.slow
 def test_clean_path_on_dense_page_stays_fast():
     rng = np.random.default_rng(3)
     img = np.full((vectorize.PAPER_H_PX, vectorize.PAPER_W_PX), 255, dtype=np.uint8)
