@@ -265,6 +265,7 @@ def run(
     page_clean_model=None,
     hand_model=None,
     verify="manifest",
+    pipeline_config=None,
     log=print,
 ):
     """Dirige o Pipeline real sobre a fonte ate ela fechar ou Ctrl+C.
@@ -297,6 +298,7 @@ def run(
             hand_model=hand_model,
             on_frame=dump,
             verify=verify,
+            pipeline_config=pipeline_config,
         )
     except KeyboardInterrupt:
         interrupted = True
@@ -407,12 +409,24 @@ def main(argv=None):
         action="store_true",
         help="desliga a verificacao sha256 dos modelos",
     )
+    parser.add_argument(
+        "--legacy-ink",
+        action="store_true",
+        help="usa a configuracao legada da tinta (sem ganho, sem Detect-Wake, InkConfig())",
+    )
     args = parser.parse_args(argv)
     if args.every < 1:
         parser.error("--every precisa ser >= 1")
 
     from draw.camera import open_capture, parse_source
+    from draw.ink.config import InkConfig
+    from draw.settings import PipelineConfig
 
+    pipeline_config = (
+        PipelineConfig(ink=InkConfig(), ink_auto_gain=False, detect_wake=False)
+        if args.legacy_ink
+        else PipelineConfig()
+    )
     out_dir = args.out or _default_out_dir()
     source = parse_source(args.source)
     try:
@@ -429,6 +443,7 @@ def main(argv=None):
                 page_clean_model=args.page_clean_model,
                 hand_model=args.hand_model,
                 verify=None if args.allow_unverified else "manifest",
+                pipeline_config=pipeline_config,
             )
         finally:
             capture.release()

@@ -508,13 +508,18 @@ class Pipeline:
             # aqui são sinais separados. Um resultado sem máscara
             # limpa a evidência velha em vez de deixar oclusão
             # defasada.
+            had_hand_mask = self._hand_mask_det is not None and np.any(
+                self._hand_mask_det
+            )
             self._hand_mask_det = det_result.hand_mask
+            has_hand_mask = self._hand_mask_det is not None and np.any(
+                self._hand_mask_det
+            )
             if (
                 self._detect_wake is not None
                 and self.clean_hand_present is False
                 and not self._stale_hand_woke
-                and self._hand_mask_det is not None
-                and np.any(self._hand_mask_det)
+                and has_hand_mask
                 and self._hand_exit_at is not None
                 and det_captured_at is not None
                 and det_captured_at < self._hand_exit_at
@@ -527,6 +532,14 @@ class Pipeline:
                 self._detect_wake.wake()
                 # Re-arma a confirmacao caso a trabalhadora ja tenha gasto
                 # a passada de confirmacao sob mascara velha e descansado.
+                self.ink_worker.set_hand_presence(True)
+                self.ink_worker.set_hand_presence(False)
+            elif (
+                self.clean_hand_present is False and had_hand_mask and not has_hand_mask
+            ):
+                # A deteccao pos-saida acabou de limpar a mascara de mao que
+                # ainda cobria a pagina: re-arma a janela de confirmacao para
+                # garantir as passadas limpas completas sobre o traco novo.
                 self.ink_worker.set_hand_presence(True)
                 self.ink_worker.set_hand_presence(False)
             if self._config.coverage:

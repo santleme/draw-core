@@ -708,3 +708,37 @@ def test_main_every_invalido_sai_2():
 def test_default_out_dir_sob_captures():
     out = dc._default_out_dir()
     assert out.parent == Path("captures") and out.name.startswith("desk-")
+
+
+def test_main_usa_preset_de_producao_por_padrao_e_aceita_legacy_ink(
+    tmp_path, monkeypatch
+):
+    from draw import camera as camera_module
+    from draw.ink.config import InkConfig
+    from draw.settings import PipelineConfig
+
+    seen = []
+    monkeypatch.setattr(
+        camera_module, "open_capture", lambda *_a, **_k: _Frames(frames=1)
+    )
+    monkeypatch.setattr(
+        dc,
+        "run",
+        lambda *_a, **kw: (
+            seen.append(kw.get("pipeline_config"))
+            or {
+                "frames": 1,
+                "ink_passes": 1,
+                "detections": 1,
+                "status": "ok",
+                "canvas_shape": (10, 10),
+            }
+        ),
+    )
+    assert dc.main(["--out", str(tmp_path / "prod")]) == 0
+    assert seen[-1] == PipelineConfig()
+
+    assert dc.main(["--out", str(tmp_path / "leg"), "--legacy-ink"]) == 0
+    assert seen[-1] == PipelineConfig(
+        ink=InkConfig(), ink_auto_gain=False, detect_wake=False
+    )

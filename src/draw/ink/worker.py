@@ -302,6 +302,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         self._display_version = 0
         self._hand_state = None
         self._confirm_passes = 0
+        self._confirm_masked_skips = 0
         self._still_passes = 0
         # Descanso total (so a trabalhadora e o new_generation
         # tocam): passadas desta geracao e passadas seguidas sem
@@ -389,6 +390,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             self._last_registration = None
             self._still_passes = 0
             self._confirm_passes = 0
+            self._confirm_masked_skips = 0
             self._generation_passes = 0
             self._quiet_passes = 0
             self._activity_quiet_passes = 0
@@ -538,6 +540,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
     @_confirm_once.setter
     def _confirm_once(self, value):
         self._confirm_passes = self._post_exit_confirm_passes() if value else 0
+        self._confirm_masked_skips = 0
 
     def set_hand_presence(self, present, moved=False):
         """Alimenta a porta de ociosidade: True, False ou None.
@@ -559,8 +562,10 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         with self._condition:
             if present is False and self._hand_state is not False:
                 self._confirm_passes = self._post_exit_confirm_passes()
+                self._confirm_masked_skips = 0
             elif present is not False:
                 self._confirm_passes = 0
+                self._confirm_masked_skips = 0
             if present is not None:
                 self._still_passes = 0
             if present is not None and (moved or present != self._hand_state):
@@ -899,7 +904,21 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         self._last_pass_start = self._clock()
         pass_started_at = self._last_pass_start
         if self._confirm_passes > 0:
-            self._confirm_passes -= 1
+            # Se a passada retirada logo apos a saida da mao ainda carrega
+            # mascara de oclusao pre-saida (visible com pixels False antes
+            # de o detector renovar _hand_mask_det), nao gasta a janela de
+            # confirmacao limpa nela (limitado a _INK_VOTE_WINDOW passadas
+            # mascaradas para nunca prender o descanso).
+            if (
+                self._post_exit_confirm_passes() > 1
+                and visible is not None
+                and not np.all(visible)
+                and self._confirm_masked_skips < votes._INK_VOTE_WINDOW
+            ):
+                self._confirm_masked_skips += 1
+                self._confirm_passes = self._post_exit_confirm_passes()
+            else:
+                self._confirm_passes -= 1
         return (
             warped,
             generation,

@@ -632,6 +632,138 @@ def test_late_masked_heartbeat_after_hand_lift_does_not_hide_finished_stroke():
     assert int(np.count_nonzero(pipe.clean_mask)) > 0
 
 
+def test_cached_hand_mask_on_hand_exit_still_confirms_final_stroke_under_production():
+    """Regressao (review #74): sob PipelineConfig() (InkConfig.production),
+    quando o detector ja tem uma mascara de mao em cache cobrindo o traco novo
+    no momento em que a mao sai e uma passada mascarada ainda roda apos a
+    saida antes da limpeza da mascara, as passadas limpas seguintes precisam
+    confirmar o traco sem novo movimento da mao e depois entrar em descanso."""
+    from draw.ink.worker import PageCleanWorker
+
+    class _DarkIsInk:
+        threshold = 0.7
+
+        def ink_prob(self, warped):
+            gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
+            return np.where(gray < 80, 0.98, 0.0).astype(np.float32)
+
+    hand_blob = np.zeros((480, 640), dtype=np.uint8)
+    hand_blob[200:280, 260:380] = 255
+
+    class _ManualDet:
+        error = None
+
+        def __init__(self):
+            self._seq = 0
+            self.queued = None
+            self.current_hand_mask = None
+
+        def submit(self, frame, captured_at, frame_index=None):
+            self._seq += 1
+            mask = (
+                None
+                if self.current_hand_mask is None
+                else self.current_hand_mask.copy()
+            )
+            self.queued = contracts.DetectionResult(
+                sequence=self._seq,
+                corners=BASE_CORNERS.copy(),
+                verdict="paper",
+                captured_at=captured_at,
+                detect_ms=10.0,
+                hand_mask=mask,
+            )
+
+        def poll(self, after_seq):
+            if self.queued is not None and self.queued.sequence > after_seq:
+                return self.queued
+            return None
+
+        def take_traces(self, upto_result_seq=None):
+            return []
+
+    class _ManualHand:
+        error = None
+
+        def __init__(self):
+            self._seq = 0
+            self.state = True
+            self.moved = True
+
+        def submit(self, *_a, **_kw):
+            return None
+
+        def poll(self, after_seq):
+            if self._seq > after_seq:
+                return (self._seq, self.state, self.moved)
+            return None
+
+    now = [100.0]
+    det = _ManualDet()
+    hand = _ManualHand()
+    cfg = PipelineConfig()
+    ink_worker = PageCleanWorker(_DarkIsInk(), config=cfg.ink, clock=lambda: now[0])
+    pipe = pipeline.Pipeline(
+        detection_worker=det,
+        ink_worker=ink_worker,
+        hand_presence_worker=hand,
+        config=cfg,
+        clock=lambda: now[0],
+    )
+    still = _sheet_frame(BASE_CORNERS)
+    # Bloco base no canto superior para amadurecer a pagina e o voto.
+    cv2.rectangle(still, (150, 120), (210, 160), (10, 10, 10), -1)
+    for seq in range(18):
+        hand._seq += 1
+        hand.moved = seq < 4
+        pipe.step(contracts.FramePacket(still, now[0], seq))
+        ink_worker.pump()
+        now[0] += 0.16
+    pipe.collect_ink()
+    base_px = int(np.count_nonzero(pipe.clean_mask))
+    assert base_px > 0
+
+    # Mao cobre o centro (hand_blob em cache no detector) e desenha traco novo.
+    with_stroke = still.copy()
+    cv2.rectangle(with_stroke, (295, 225), (345, 255), (10, 10, 10), -1)
+    det.current_hand_mask = hand_blob
+    hand._seq += 1
+    hand.state = True
+    hand.moved = True
+    # Detector atualiza e coloca hand_blob em cache no pipeline (_hand_mask_det).
+    pipe._detect_wake.wake()
+    for seq in range(18, 22):
+        pipe.step(contracts.FramePacket(with_stroke, now[0], seq))
+        ink_worker.pump()
+        now[0] += 0.16
+    assert pipe._hand_mask_det is not None and np.any(pipe._hand_mask_det)
+
+    # Mao sai: no quadro da saida, uma passada ainda roda sob a mascara em
+    # cache antes de a deteccao acordada entregar hand_mask limpa.
+    hand._seq += 1
+    hand.state = False
+    hand.moved = False
+    pipe.step(contracts.FramePacket(with_stroke, now[0], 22))
+    ink_worker.pump()
+    now[0] += 0.16
+
+    # Agora a deteccao acordada termina sem mao (current_hand_mask = None) e
+    # as passadas limpas seguintes rodam sem nenhum movimento adicional da mao.
+    det.current_hand_mask = None
+    for seq in range(23, 35):
+        pipe.step(contracts.FramePacket(with_stroke, now[0], seq))
+        ink_worker.pump()
+        now[0] += 0.16
+    pipe.collect_ink()
+    assert int(np.count_nonzero(pipe.clean_mask)) > base_px
+    # Avanca o relogio para fechar as passadas quietas e entrar em descanso.
+    for seq in range(35, 45):
+        pipe.step(contracts.FramePacket(with_stroke, now[0], seq))
+        ink_worker.pump()
+        now[0] += 0.5
+    assert ink_worker.stats()["resting"] is True
+
+
 def test_cli_default_is_on_and_config_validation(monkeypatch):
     with pytest.raises(ValueError):
         PipelineConfig(detect_wake_interval_s=0.0)

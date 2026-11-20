@@ -194,8 +194,9 @@ def run_pipeline(
     injeta draw.infra.manifest.verify_model (sha256 + tamanho contra
     assets/manifest.json); None desliga, para bancadas e testes com
     modelos fora do manifesto. ``pipeline_config`` (padrão: base legada
-    sem ganho, sem Detect-Wake e com InkConfig(), como em sim_writer)
-    alinha o Pipeline e a PageCleanWorker no mesmo preset.
+    sem ganho, sem Detect-Wake e com InkConfig(), como em sim_writer;
+    ``desk_capture.main`` injeta ``PipelineConfig()``) alinha o Pipeline
+    e a PageCleanWorker no mesmo preset.
     """
     from draw import config, hand
     from draw.contracts import FramePacket
