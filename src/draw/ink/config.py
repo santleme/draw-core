@@ -62,6 +62,14 @@ class InkConfig:
     # e um traco vizinho de tinta confirmada serve de ancora; por isso duas
     # leituras fortes + um zero (media ~0,66 >= t_low) ainda estendem um traco
     # ja confirmado. E intencional; endurecer exigiria hits == janela.
+    # Calibracao medida (2026-11-19; page_clean v2, clipe real de escrita
+    # `escrita-mao-sombra`, 58 passadas, SEM gabarito) — confirmado relativo
+    # ao voto sem histerese, e quanto do que foi cortado e fragmento < 12 px:
+    #   t_high 0.90: 75,5% (30%)   0.85: 82,6%   0.80: 87,3% (63%)
+    #   t_high 0.75: 90,1%         0.70: 92,5% (90%)
+    # O default 0.90 corta ~25% do confirmado nesse clipe, 70% disso em
+    # componentes grandes: sem rotulo nao da para dizer se e traco fraco.
+    # Nao mudar o default sem um teste de mesa rotulado.
     # Campos proprios, separados do seen_threshold (que governa identidade da
     # pagina, testemunha de remocao e ancora da porta de fronteira: ver #53).
     # Opt-in: o default fica desligado ate a regua e o uso ao vivo provarem.

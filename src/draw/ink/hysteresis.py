@@ -16,6 +16,10 @@ import numpy as np
 
 _KERNEL = np.ones((3, 3), np.uint8)
 
+# Folga das comparacoes de limiar sobre mapas float32 (0.9 em float32 e
+# 0.89999998): um valor exatamente no limiar tem que contar como atingido.
+FLOAT_EPS = 1e-6
+
 
 def _bbox(mask):
     rows = np.flatnonzero(mask.any(axis=1))
@@ -52,7 +56,7 @@ def filter_provisional(provisional, evidence, confirmed, *, t_high, min_px):
     n, labels, stats, _ = cv2.connectedComponentsWithStats(roi, connectivity=8)
     if n <= 1:
         return out
-    strong = evidence[y0:y1, x0:x1] >= t_high
+    strong = evidence[y0:y1, x0:x1] >= t_high - FLOAT_EPS
     # A tinta confirmada colada fica FORA da caixa do provisorio: dilata com 1
     # px de folga e recorta (senao so contaria a que cai dentro da caixa).
     py0, py1 = max(0, y0 - 1), min(provisional.shape[0], y1 + 1)

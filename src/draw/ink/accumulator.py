@@ -166,8 +166,12 @@ class LayeredInkAccumulator:
             cfg = self._config
             # Janela ainda enchendo: passada faltante e evidencia zero.
             mean = score / votes._INK_VOTE_WINDOW
-            strong = confirmed_rule & (mean >= cfg.t_high)
-            weak = confirmed_rule & ~strong & (mean >= cfg.t_low)
+            # Tolerancia de float32: 3 x 0.9 somado em float32 e dividido por 3 da
+            # 0.8999999 < 0.9, e o traco constante exatamente em t_high nunca
+            # confirmava (medido na auditoria de 2026-11-19).
+            eps = hysteresis.FLOAT_EPS
+            strong = confirmed_rule & (mean >= cfg.t_high - eps)
+            weak = confirmed_rule & ~strong & (mean >= cfg.t_low - eps)
             kept = hysteresis.keep_anchored(weak, strong | confirmed_before)
             confirmed_rule = strong | kept
         new_confirmed = confirmed_rule & ~confirmed_before

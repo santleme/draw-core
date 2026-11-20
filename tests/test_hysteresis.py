@@ -369,3 +369,27 @@ def test_new_anchor_on_visible_side_does_not_reveal_the_covered_side():
     out = acc.add(m2, hand)
     assert (out["provisional"][right] > 0).all()
     assert not (out["provisional"][left] > 0).any()
+
+
+# ----------------------------------- limiar exato (float32), auditoria 11-19
+
+
+def test_stroke_exactly_at_t_high_confirms_in_three_passes():
+    # 0.9 em float32 e 0.89999998: sem folga o traco nunca atingia t_high.
+    stroke = _mask((10, 16, 5, 35))
+    acc = _acc(InkConfig(hysteresis=True))
+    out = None
+    for _ in range(3):
+        m = np.zeros((H, W), np.float32)
+        m[stroke] = 0.9
+        out = acc.add(m, np.ones((H, W), bool))
+    assert (out["confirmed"][stroke] > 0).all()
+
+
+def test_provisional_anchor_exactly_at_t_high_shows_up():
+    stroke = _mask((10, 16, 5, 35))
+    acc = _acc(InkConfig(hysteresis=True))
+    m = np.zeros((H, W), np.float32)
+    m[stroke] = 0.9
+    out = acc.add(m, np.ones((H, W), bool))
+    assert (out["provisional"][stroke] > 0).all()
