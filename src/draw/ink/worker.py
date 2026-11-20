@@ -1079,6 +1079,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             # vota (review do PR #67: o mapa corrigido inflava o escore de
             # camera e um movimento real virava "espurio").
             camera_prob = registered_prob
+            camera_corners = registration_corners
             motion_decision = None
             if (
                 self._motion is not None
@@ -1154,25 +1155,45 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 # sao "fora da mascara perto dela", mas so um ja
                 # era tinta. Sem tinta de ancora o gate e o veto
                 # seco de sempre.
-                if anchor is not None and registration_corners is not None:
+                def _covered(reg_corners):
+                    if anchor is None or reg_corners is None:
+                        return coverage
                     reg_matrix = registration._registration_matrix(
-                        anchor, registration_corners, prob.shape
+                        anchor, reg_corners, prob.shape
                     )
-                    if not registration._registration_is_identity(reg_matrix):
-                        reg_coverage = (
-                            cv2.warpPerspective(
-                                coverage.astype(np.uint8),
-                                reg_matrix,
-                                (prob.shape[1], prob.shape[0]),
-                                flags=cv2.INTER_NEAREST,
-                                borderValue=0,
-                            )
-                            > 0
+                    if registration._registration_is_identity(reg_matrix):
+                        return coverage
+                    return (
+                        cv2.warpPerspective(
+                            coverage.astype(np.uint8),
+                            reg_matrix,
+                            (prob.shape[1], prob.shape[0]),
+                            flags=cv2.INTER_NEAREST,
+                            borderValue=0,
                         )
-                    else:
-                        reg_coverage = coverage
-                else:
-                    reg_coverage = coverage
+                        > 0
+                    )
+
+                def _gate(evidence, reg_coverage):
+                    if anchor_ink is None:
+                        return evidence * reg_coverage
+                    return np.where(
+                        reg_coverage | anchor_ink,
+                        evidence,
+                        0.0,
+                    ).astype(np.float32)
+
+                # O mapa da camera que a arbitragem pontua passa pelo
+                # MESMO gate de cobertura de sempre (na geometria da
+                # camera): sem isso, pixels fora da folha diluiam o
+                # escore de camera mesmo com o portao desligado
+                # (review do PR #67). Portao sem efeito nesta passada:
+                # o mapa da camera e o proprio mapa que vota, como antes.
+                camera_untouched = (
+                    camera_prob is registered_prob
+                    and camera_corners is registration_corners
+                )
+                reg_coverage = _covered(registration_corners)
                 if motion_decision == "correct":
                     # A cobertura acompanha a correcao da evidencia: sem
                     # isso o traco novo deslocado para fora da mascara
@@ -1183,14 +1204,11 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                         )
                         > 0
                     )
-                if anchor_ink is None:
-                    registered_prob = registered_prob * reg_coverage
+                registered_prob = _gate(registered_prob, reg_coverage)
+                if camera_untouched:
+                    camera_prob = registered_prob
                 else:
-                    registered_prob = np.where(
-                        reg_coverage | anchor_ink,
-                        registered_prob,
-                        0.0,
-                    ).astype(np.float32)
+                    camera_prob = _gate(camera_prob, _covered(camera_corners))
             if anchor is not None and registration_corners is not None:
                 matrix = registration._registration_matrix(
                     anchor, registration_corners, prob.shape

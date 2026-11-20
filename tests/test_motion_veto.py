@@ -304,15 +304,19 @@ def test_vetoed_passes_do_not_put_the_ink_to_rest(fast):
     # como quietas: a trabalhadora segue rodando e chega ao fail-open — o
     # traco feito antes de a mao sair nao fica sem confirmar (review do
     # PR #67). Sem a correcao, ela dormia e a passada seguinte nao vinha.
-    page = _page(seed=8)
-    far = _shift(page, 7.0, 0.0)
+    # O traco escrito com a folha ja deslocada entra (no lugar em que
+    # o warp o ve: fail-open e o comportamento de hoje).
+    page, stroke = _page(seed=8), _new_stroke()
+    far = np.maximum(_shift(page, 7.0, 0.0), stroke)
     n_far = motion.MOTION_FAIL_OPEN_PASSES + 3
     sequence = [page] * 4 + [far] * n_far
     hands = [True] * 5 + [False] * (n_far - 1)
-    stats, records, _conf = _run(
+    stats, records, conf = _run(
         sequence, InkConfig(motion_veto=True, **_PLAIN), hand=hands
     )
     assert stats["motion_fail_open_total"] >= 1
+    line = stroke > 0.5
+    assert np.count_nonzero(conf & line) > 0.8 * np.count_nonzero(line)
 
 
 @pytest.mark.slow
@@ -364,6 +368,45 @@ def test_anchor_arbitration_scores_the_camera_map_not_the_corrected_one(fast):
     for i in corrected:
         expected = _InkFromWarp().ink_prob(_bgr(sequence[i]))
         assert np.allclose(seen[i], expected)
+
+
+@pytest.mark.slow
+def test_gate_off_arbitration_sees_the_same_covered_map_as_the_vote(fast):
+    # Paridade com cobertura parcial: com o portao desligado a
+    # arbitragem pontua exatamente o mapa que vota (ja com o gate de
+    # cobertura), como antes do portao. Guardar o mapa da camera antes
+    # do gate deixava pixels fora da folha diluirem o escore (review do
+    # PR #67).
+    pairs = []
+
+    def spy(worker):
+        real_arb = worker._anchor_arbitration_step
+        real_add = worker._accumulator.add
+
+        def arb(*args):
+            pairs.append([args[7]])
+            return real_arb(*args)
+
+        def add(prob, *args, **kwargs):
+            pairs[-1].append(prob)
+            return real_add(prob, *args, **kwargs)
+
+        worker._anchor_arbitration_step = arb
+        worker._accumulator.add = add
+
+    coverage = np.ones(SHAPE, bool)
+    coverage[:, :300] = False
+    page = _page(seed=3)
+    _run(
+        [page] * 6,
+        InkConfig(anchor_follow=False),
+        coverage=coverage,
+        spy=spy,
+    )
+    assert len(pairs) >= 4
+    for camera, voted in pairs[1:]:
+        assert np.array_equal(camera, voted)
+        assert not camera[:, :290].any()  # fora da folha nao pontua
 
 
 @pytest.mark.slow
