@@ -397,3 +397,34 @@ def test_clean_json_is_strict_when_dust_removes_everything():
             out_json.read_text(encoding="utf-8"), parse_constant=reject
         )
         assert payload["summary"]["polilinhas"] == 0
+
+
+def test_loop_at_junction_does_not_force_sharp_join_between_branches():
+    # O laço preso ao nó segue contando no grau: os dois ramos que
+    # saem dele em 'V' passam pelo custo da junção, não pela passagem
+    # obrigatória de grau 2 (review do PR #65). Montado direto no
+    # grafo: no raster o afinamento abre o 'V' alguns px fora do laço
+    # e um dos ramos herda esse toco (limite conhecido).
+    node = np.array([80.0, 80.0])
+    loop = np.array([node, [80.0, 30.0], [30.0, 30.0], [30.0, 130.0], [80.0, 130.0]])
+    items = [
+        {"points": loop, "closed": True, "start_node": 1, "end_node": 1},
+        {
+            "points": np.array([node, [125.0, 68.0], [170.0, 56.0]]),
+            "closed": False,
+            "start_node": 1,
+            "end_node": 2,
+        },
+        {
+            "points": np.array([node, [125.0, 92.0], [170.0, 104.0]]),
+            "closed": False,
+            "start_node": 1,
+            "end_node": 3,
+        },
+    ]
+    graph = vectorize._TopoGraph(items, np.full((160, 200), 2.0, np.float32))
+    assert graph.degrees()[1] == 4
+    link = vectorize._pair_junctions(graph, vectorize.PAIR_TAU, 0.5)
+    assert not link, f"ramos em V foram ligados: {link}"
+    strokes = vectorize._chain_strokes(graph, link) + graph.loose
+    assert sorted(s["closed"] for s in strokes) == [False, False, True]

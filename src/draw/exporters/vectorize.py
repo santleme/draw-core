@@ -593,27 +593,27 @@ class _TopoGraph:
         self.dist = dist
         self.edges = []  # dicts: u, v, pts, length, alive
         self.loose = []  # itens sem nós (anéis livres, pontos isolados)
+        self.loops = []  # nó de cada laço fechado preso a um nó (u == v)
         self.center = {}
         self.radius = {}
         self.parent = {}
-        h, w = dist.shape
         for item in items:
             u, v = item.get("start_node"), item.get("end_node")
             pts = item["points"]
             if u is None or v is None or len(pts) < 2 or item["closed"]:
                 # Laço fechado que volta ao próprio nó (o círculo com
-                # uma haste tangente) fica fora do pareamento, como na
-                # costura legada: ligar uma ponta dele à haste trocaria
-                # um círculo e uma reta por uma polilinha aberta.
+                # uma haste tangente) sai como traço próprio e fica
+                # fora do pareamento, como na costura legada: ligar
+                # uma ponta dele à haste trocaria um círculo e uma
+                # reta por uma polilinha aberta. As duas pontas dele
+                # seguem contando no grau do nó (ver degrees).
                 self.loose.append({"points": pts, "closed": item["closed"]})
+                if item["closed"] and u is not None and u == v:
+                    self._add_node(u, pts[0])
+                    self.loops.append(u)
                 continue
-            for nid, p in ((u, pts[0]), (v, pts[-1])):
-                if nid not in self.center:
-                    self.center[nid] = np.asarray(p, dtype=np.float64).copy()
-                    x = int(np.clip(round(float(p[0])), 0, w - 1))
-                    y = int(np.clip(round(float(p[1])), 0, h - 1))
-                    self.radius[nid] = max(1.0, float(dist[y, x]))
-                    self.parent[nid] = nid
+            self._add_node(u, pts[0])
+            self._add_node(v, pts[-1])
             self.edges.append(
                 {
                     "u": u,
@@ -623,6 +623,16 @@ class _TopoGraph:
                     "alive": True,
                 }
             )
+
+    def _add_node(self, nid, point):
+        if nid in self.center:
+            return
+        h, w = self.dist.shape
+        self.center[nid] = np.asarray(point, dtype=np.float64).copy()
+        x = int(np.clip(round(float(point[0])), 0, w - 1))
+        y = int(np.clip(round(float(point[1])), 0, h - 1))
+        self.radius[nid] = max(1.0, float(self.dist[y, x]))
+        self.parent[nid] = nid
 
     def find(self, nid):
         root = nid
@@ -638,6 +648,9 @@ class _TopoGraph:
             if e["alive"]:
                 for nid in (self.find(e["u"]), self.find(e["v"])):
                     deg[nid] = deg.get(nid, 0) + 1
+        for nid in self.loops:
+            root = self.find(nid)
+            deg[root] = deg.get(root, 0) + 2
         return deg
 
 
@@ -773,14 +786,21 @@ def _pair_junctions(graph, tau, radius_weight):
         if e["alive"]:
             incident.setdefault(graph.find(e["u"]), []).append((idx, 0))
             incident.setdefault(graph.find(e["v"]), []).append((idx, 1))
+    loop_ends = {}
+    for nid in graph.loops:
+        root = graph.find(nid)
+        loop_ends[root] = loop_ends.get(root, 0) + 2
     link = {}
     for root, halves in incident.items():
-        if len(halves) == 2:
+        # Passagem obrigatória só em nó de grau 2 de verdade: com um
+        # laço preso ao nó, os dois ramos restantes são junção e
+        # passam pelo custo (dois ramos em 'V' não viram um traço).
+        if len(halves) == 2 and not loop_ends.get(root):
             a, b = halves
             link[a] = b
             link[b] = a
             continue
-        if len(halves) < 3:
+        if len(halves) < 2:
             continue
         feats = [
             _half_edge_feature(graph, graph.edges[i], end == 0, root)
