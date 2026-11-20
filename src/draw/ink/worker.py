@@ -642,55 +642,62 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 return None
             return InkSnapshot(version=published[1], confirmed=published[2])
 
-    def _record_delta(self, generation, confirmed, captured_at):
-        """Guarda o delta desta publicacao (worker thread, lock ja pego
-        pelo chamador nao e exigido: so ela escreve; o poll le sob lock)."""
+    def _record_delta(self, generation, version, confirmed, captured_at, anchor):
+        """Calcula e guarda o delta desta publicacao (thread da tinta, fora
+        do lock da passada; so o append pega o lock)."""
         now = confirmed > 0
         prev = self._delta_prev
-        if prev is not None and prev[0] != generation:
-            prev = None  # outra geracao: a primeira publicacao e sempre full
-        prev = None if prev is None else prev[1]
-        full = prev is None or prev.shape != now.shape
+        if prev is not None and (prev[0] != generation or prev[1].shape != now.shape):
+            prev = None
+        first = prev is None
         removed_px = 0
-        if full:
-            new = now
-        else:
-            new = now & ~prev
-            removed_px = int(np.count_nonzero(prev & ~now))
-            full = removed_px > 0
-            if full:
-                new = now
-        bbox = _bbox_of(new)
-        mask = (
-            np.zeros((0, 0), np.uint8)
-            if bbox is None
-            else (new[bbox[0] : bbox[1], bbox[2] : bbox[3]].astype(np.uint8) * 255)
-        )
+        anchor_moved = False
+        if not first:
+            removed_px = int(np.count_nonzero(prev[1] & ~now))
+            old_anchor = prev[2]
+            anchor_moved = (old_anchor is None) != (anchor is None) or (
+                anchor is not None and not np.array_equal(old_anchor, anchor)
+            )
+        # Descontinuidade (primeira da geracao, tinta removida ou ancora
+        # re-ancorada): o consumidor substitui; a mascara sai do canvas
+        # publicado no poll, entao nao se aloca aqui.
+        full = first or removed_px > 0 or anchor_moved
+        bbox, mask = None, np.zeros((0, 0), np.uint8)
+        if not full:
+            new = now & ~prev[1]
+            bbox = _bbox_of(new)
+            if bbox is not None:
+                mask = new[bbox[0] : bbox[1], bbox[2] : bbox[3]].astype(np.uint8) * 255
         record = (
             generation,
-            self._version,
+            version,
             captured_at,
             bbox,
             mask,
             removed_px,
             full,
-            None if self._anchor_corners is None else self._anchor_corners.copy(),
+            anchor,
             now.shape,
+            first,
         )
         with self._condition:
             self._delta_ring.append(record)
-        self._delta_prev = (generation, now)
+        self._delta_prev = (generation, now, anchor)
 
     def poll_delta(self, generation, after_version):
         """InkDelta com o que a tinta confirmada ganhou depois de
-        after_version, ou None se nao ha publicacao nova da geracao.
+        after_version, ou None se nao ha publicacao nova da geracao
+        (ou o delta dela ainda esta sendo calculado: tente de novo).
 
         Mesmo gatilho e mesma versao de poll(): quem ja consome o canvas
         pode trocar o diff de mascaras de pagina inteira por isto. Sem
         historico para cobrir (after_version antes do que o anel
-        guarda, ou intervalo que contem tinta removida/migrada) o delta
-        sai full: substitui o canvas, nao soma. Nao muda cadencia nem
-        o voto: le registros que a passada ja produziu.
+        guarda), ou com tinta removida/migrada ou ancora movida no
+        intervalo, o delta sai full: substitui o canvas, nao soma.
+        removed_px soma as remocoes registradas no historico (limite
+        inferior quando o historico foi truncado). Nao muda cadencia
+        nem o voto: le registros que a passada ja produziu; o trabalho
+        sobre mascaras roda fora do lock.
         """
         with self._condition:
             published = self._published
@@ -700,39 +707,31 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 or published[1] <= after_version
             ):
                 return None
-            latest = published[1]
+            latest, confirmed = published[1], published[2]
             records = [
                 r
                 for r in self._delta_ring
-                if r[0] == generation and after_version < r[1] <= latest
+                if r[0] == generation and r[1] > after_version
             ]
-            versions = [r[1] for r in records]
-            contiguous = versions == list(range(after_version + 1, latest + 1))
-            last = records[-1] if records else None
-            full = (
-                not contiguous
-                or last is None
-                or last[1] != latest
-                or any(r[6] for r in records)
+        if not records or records[-1][1] != latest:
+            return None
+        complete = all(
+            records[i + 1][1] == records[i][1] + 1 for i in range(len(records) - 1)
+        ) and (records[0][1] == after_version + 1 or records[0][9])
+        last = records[-1]
+        full = not complete or any(r[6] for r in records)
+        removed_px = sum(r[5] for r in records)
+        if full:
+            full_mask = confirmed > 0
+            bbox = _bbox_of(full_mask)
+            mask = (
+                np.zeros((0, 0), np.uint8)
+                if bbox is None
+                else full_mask[bbox[0] : bbox[1], bbox[2] : bbox[3]].astype(np.uint8)
+                * 255
             )
-            confirmed = published[2]
-            corners = None if last is None else last[7]
-            captured_at = None if last is None else last[2]
-            removed_px = sum(r[5] for r in records) if contiguous else 0
-            if not full:
-                bbox, mask = _merge_deltas(records)
-            else:
-                full_mask = confirmed > 0
-                bbox = _bbox_of(full_mask)
-                mask = (
-                    np.zeros((0, 0), np.uint8)
-                    if bbox is None
-                    else full_mask[bbox[0] : bbox[1], bbox[2] : bbox[3]].astype(
-                        np.uint8
-                    )
-                    * 255
-                )
-            grid = tuple(int(v) for v in confirmed.shape)
+        else:
+            bbox, mask = _merge_deltas(records)
         try:
             mm = float(paper_config.mm_per_px())
         except ValueError:
@@ -741,12 +740,12 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             generation=generation,
             since_version=after_version,
             version=latest,
-            captured_at=captured_at,
+            captured_at=last[2],
             bbox=bbox,
             mask=mask,
-            page_grid=grid,
+            page_grid=tuple(int(v) for v in confirmed.shape),
             mm_per_px=mm,
-            anchor_corners=corners,
+            anchor_corners=last[7],
             removed_px=removed_px,
             full=full,
         )
@@ -1104,6 +1103,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 self._stopped = True
                 self._condition.notify_all()
             return False
+        delta_job = None
         with self._condition:
             if self._stopped:
                 return False
@@ -1526,7 +1526,17 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     self._version,
                     result["confirmed"],
                 )
-                self._record_delta(generation, result["confirmed"], captured_at)
+                # So a referencia (result["confirmed"] ja e uma copia da
+                # passada): o calculo do delta roda depois de soltar o lock.
+                delta_job = (
+                    generation,
+                    self._version,
+                    result["confirmed"],
+                    captured_at,
+                    None
+                    if self._anchor_corners is None
+                    else self._anchor_corners.copy(),
+                )
             if publish_confirmed or result["provisional_changed"]:
                 self._display_version += 1
                 self._published_display = (
@@ -1589,6 +1599,8 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             )
             self._previous_pass_started_at = pass_started_at
             self._condition.notify_all()
+        if delta_job is not None:
+            self._record_delta(*delta_job)
         return True
 
     def stats(self):

@@ -137,22 +137,85 @@ def test_history_overflow_degrades_to_full_replace(monkeypatch):
     assert delta.bbox == (5, 33, 5, 55)
 
 
-def test_removed_ink_makes_the_interval_full():
-    rig = _Rig()
-    worker, gen = rig.worker, rig.generation
+def _publish(worker, gen, version, mask, captured_at, anchor=None):
+    """Publica `mask` como a versao `version` e registra o delta."""
+    worker._version = version
+    worker._published = (gen, version, mask)
+    worker._record_delta(gen, version, mask, captured_at, anchor)
+
+
+def _strokes():
     canvas = np.zeros((H, W), np.uint8)
     canvas[STROKE_A] = 255
     shrunk = canvas.copy()
     shrunk[5:6, 5:25] = 0  # uma linha do traco sumiu
-    for version, mask in ((1, canvas), (2, shrunk)):
-        worker._version = version
-        worker._published = (gen, version, mask)
-        worker._record_delta(gen, mask, 0.1 * version)
+    return canvas, shrunk
+
+
+def test_removed_ink_makes_the_interval_full():
+    rig = _Rig()
+    worker, gen = rig.worker, rig.generation
+    canvas, shrunk = _strokes()
+    _publish(worker, gen, 1, canvas, 0.1)
+    _publish(worker, gen, 2, shrunk, 0.2)
     delta = worker.poll_delta(gen, 1)
     assert delta.full is True
     assert delta.removed_px == 20
     assert delta.bbox == (6, 8, 5, 25)  # o canvas inteiro que sobrou
     assert delta.captured_at == pytest.approx(0.2)
+
+
+def test_initial_poll_counts_the_erasures_in_the_ring():
+    # Review #61: com after_version=-1 o anel completo da geracao nao pode
+    # ser tratado como historico faltante (a versao 0 nunca foi publicada).
+    rig = _Rig()
+    worker, gen = rig.worker, rig.generation
+    canvas, shrunk = _strokes()
+    _publish(worker, gen, 7, canvas, 0.1)  # versoes seguem entre geracoes
+    _publish(worker, gen, 8, shrunk, 0.2)
+    delta = worker.poll_delta(gen, -1)
+    assert delta.full is True and delta.removed_px == 20
+
+
+def test_moved_anchor_without_mask_change_is_a_full_delta():
+    # Review #61: re-ancorar move a tinta no espaco da camera mesmo com a
+    # mascara igual; um delta incremental vazio esconderia isso.
+    rig = _Rig()
+    worker, gen = rig.worker, rig.generation
+    canvas, _ = _strokes()
+    anchor_a = np.array([[0, 0], [W, 0], [W, H], [0, H]], np.float32)
+    anchor_b = anchor_a + np.float32(3.0)
+    _publish(worker, gen, 1, canvas, 0.1, anchor_a)
+    _publish(worker, gen, 2, canvas, 0.2, anchor_b)
+    delta = worker.poll_delta(gen, 1)
+    assert delta.full is True
+    assert np.allclose(delta.anchor_corners, anchor_b)
+    assert delta.bbox == (5, 8, 5, 25)  # o canvas inteiro, para substituir
+
+
+def test_unchanged_anchor_keeps_the_delta_incremental():
+    rig = _Rig()
+    worker, gen = rig.worker, rig.generation
+    canvas, _ = _strokes()
+    anchor = np.array([[0, 0], [W, 0], [W, H], [0, H]], np.float32)
+    more = canvas.copy()
+    more[STROKE_B] = 255
+    _publish(worker, gen, 1, canvas, 0.1, anchor)
+    _publish(worker, gen, 2, more, 0.2, anchor.copy())
+    delta = worker.poll_delta(gen, 1)
+    assert delta.full is False and delta.bbox == (30, 33, 35, 55)
+
+
+def test_delta_not_ready_yet_returns_none():
+    # A passada publica a versao sob o lock e calcula o delta logo depois,
+    # fora dele: nesse intervalo o consumidor tenta de novo.
+    rig = _Rig()
+    worker, gen = rig.worker, rig.generation
+    canvas, _ = _strokes()
+    _publish(worker, gen, 1, canvas, 0.1)
+    worker._version = 2
+    worker._published = (gen, 2, canvas)  # sem _record_delta ainda
+    assert worker.poll_delta(gen, 1) is None
 
 
 def test_new_generation_restarts_with_a_full_delta():

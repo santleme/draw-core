@@ -274,7 +274,9 @@ class InkDelta:
     geração, tinta removida ou migrada, ou histórico insuficiente
     para o since_version pedido): mask/bbox descrevem TODO o canvas
     confirmado e o consumidor deve substituir o seu, não somar.
-    removed_px conta pixels que saíram do canvas nesse intervalo.
+    removed_px conta pixels que saíram do canvas nesse intervalo
+    (limite inferior se o histórico foi truncado).
+    full também cobre âncora movida (re-ancoragem) no intervalo.
     captured_at é o carimbo monotônico (s, mesmo relógio de
     FramePacket.captured_at) do quadro da passada que produziu a
     publicação mais recente, ou None. mm_per_px e anchor_corners
