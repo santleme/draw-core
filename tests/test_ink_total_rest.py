@@ -216,3 +216,70 @@ def test_production_vote_confirms_late_stroke_after_hand_exit_and_then_rests():
     calls_at_rest = fake.calls
     _pump_for(worker, generation, now, 0.5)
     assert fake.calls == calls_at_rest
+
+
+def test_queued_masked_frame_on_exit_legacy_vs_production():
+    """Regressao (review #74): com um quadro mascarado ja na fila quando a mao
+    sai numa pagina madura, o legado (InkConfig()) gasta sua unica passada
+    pos-saida e descansa sem confirmar um traco visto so 1x antes da oclusao,
+    enquanto o preset de producao re-arma na primeira submissao limpa e fecha
+    as 3 leituras antes de descansar."""
+    from draw.ink.config import InkConfig
+
+    class _DashInk:
+        threshold = 0.7
+
+        def __init__(self):
+            self.calls = 0
+            self.add_dash = False
+
+        def ink_prob(self, _warped):
+            self.calls += 1
+            prob = np.zeros((H, W), dtype=np.float32)
+            prob[5:15, 5:20] = 0.98
+            if self.add_dash:
+                prob[25:33, 35:50] = 0.98
+            return prob
+
+    warp = np.zeros((H, W, 3), dtype=np.uint8)
+    masked_vis = np.ones((H, W), dtype=bool)
+    masked_vis[25:33, 35:50] = False
+
+    def _run_case(cfg):
+        now = [1000.0]
+        fake = _DashInk()
+        worker = worker_mod.PageCleanWorker(fake, clock=lambda: now[0], config=cfg)
+        gen = worker.new_generation()
+        worker.set_hand_presence(True, moved=True)
+        _pump_for(worker, gen, now, 1.0)
+        assert worker._quiet_passes >= worker_mod._REST_QUIET_PASSES
+
+        # 1 leitura clara do traco novo com a mao presente.
+        fake.add_dash = True
+        worker.set_hand_presence(True, moved=True)
+        now[0] += 0.3
+        worker.submit(WarpedPage(warp, gen))
+        assert worker.pump() is True
+
+        # Quadro mascarado entra na fila antes de a mao sair; logo apos a
+        # saida, a passada consome esse quadro mascarado.
+        worker.submit(WarpedPage(warp, gen, visible=masked_vis))
+        worker.set_hand_presence(False)
+        now[0] += 0.3
+        assert worker.pump() is True
+
+        # Submissoes limpas seguintes sem novo movimento da mao.
+        for _ in range(4):
+            now[0] += 0.3
+            worker.submit(WarpedPage(warp, gen))
+            worker.pump()
+        snap = worker.poll(gen, 0)
+        dash_px = int(np.count_nonzero(snap.confirmed[25:33, 35:50]))
+        return dash_px, worker
+
+    legacy_px, legacy_worker = _run_case(InkConfig())
+    assert legacy_px == 0
+    assert legacy_worker.stats()["resting"] is True
+
+    prod_px, _prod_worker = _run_case(InkConfig.production())
+    assert prod_px == 8 * 15

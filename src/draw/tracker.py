@@ -897,6 +897,7 @@ class DetectWakeGate:
         now = float(captured_at)
         if wake_signal or self._sentinel_triggered(frame, hand_mask=hand_mask):
             self.wake()
+            self._force_next = False
             self._last_submit_at = now
             return True
         last_ref = (

@@ -511,6 +511,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             if (
                 self._hand_state is False
                 and self._awaiting_clear_post_exit
+                and self._post_exit_confirm_passes() > 1
                 and (visible is None or np.all(visible))
             ):
                 # Primeira submissao pos-saida com visibilidade limpa (sem
