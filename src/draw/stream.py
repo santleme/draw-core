@@ -255,10 +255,22 @@ class _Sink:
 def _socket_alive(conn):
     """False se o consumidor fechou (leitura devolve b"" sem bloquear)."""
     try:
-        readable, _, _ = select.select([conn], [], [], 0)
-        if not readable:
-            return True
-        return conn.recv(1, socket.MSG_PEEK) != b""
+        if hasattr(select, "poll"):
+            poller = select.poll()
+            poller.register(conn, select.POLLIN)
+            events = poller.poll(0)
+            if not events:
+                return True
+            if events[0][1] & select.POLLNVAL:
+                return False
+        else:
+            readable, _, _ = select.select([conn], [], [], 0)
+            if not readable:
+                return True
+        flags = socket.MSG_PEEK | getattr(socket, "MSG_DONTWAIT", 0)
+        return conn.recv(1, flags) != b""
+    except BlockingIOError:
+        return True
     except (OSError, ValueError):
         return False
 

@@ -2,7 +2,6 @@
 
 import io
 import os
-import resource
 import socket
 import struct
 import sys
@@ -802,6 +801,8 @@ def test_close_wakes_accept_loop_immediately(monkeypatch):
     sys.platform != "linux", reason="limite de 1024 FD do select.select e do Linux"
 )
 def test_accept_loop_handles_high_fd_on_linux():
+    import resource
+
     soft, _hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     if soft < 1100:
         pytest.skip("RLIMIT_NOFILE < 1100")
@@ -815,18 +816,22 @@ def test_accept_loop_handles_high_fd_on_linux():
                 break
         pub = stream.InkStreamPublisher(port=0, token=TOKEN, log=lambda *_: None)
         assert pub._wake_r.fileno() >= 1024
-        for fd in dummy_fds:
-            os.close(fd)
-        dummy_fds.clear()
+        a = _mask()
+        a[1:3, 1:3] = 255
+        _pub(pub, 1, 1, a)
+        time.sleep(0.05)
         sock = _connect(pub.port)
-        assert _wait(lambda: len(pub._sinks) == 1)
+        assert sock.fileno() >= 1024
+        canvas = stream.InkCanvas()
+        _read_until(sock, canvas, 1)
+        assert np.array_equal(canvas.mask, a)
     finally:
+        if sock is not None:
+            sock.close()
+        if pub is not None:
+            pub.close()
         for fd in dummy_fds:
             try:
                 os.close(fd)
             except OSError:
                 pass
-        if sock is not None:
-            sock.close()
-        if pub is not None:
-            pub.close()
