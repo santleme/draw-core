@@ -1087,6 +1087,10 @@ def _report_format_suggestion(telemetry, suggestion):
     print(f"Sugestao de formato: proporcao {ratio_text}; {label}.")
 
 
+def _ignore_ink(*_args):
+    pass
+
+
 def run(
     source=0,
     save_dir="captures",
@@ -1098,6 +1102,9 @@ def run(
     fullscreen=False,
     rotation=0,
     pipeline_config=None,
+    stream_port=None,
+    stream_token_file=None,
+    stream_record=None,
 ):
     _apply_opencv_thread_cap()
     _require_gui_backend()
@@ -1115,6 +1122,7 @@ def run(
     png_writer = None
     telemetry = None
     session_report = None
+    ink_stream = None
     try:
         neural_detector = None
         if neural_model is None and not markers_mode and _DEFAULT_SHEET_MODEL.exists():
@@ -1352,6 +1360,16 @@ def run(
         pipeline = None
         tracker = None
         if not markers_mode:
+            if stream_port is not None or stream_record is not None:
+                from .stream import InkStreamPublisher
+
+                ink_stream = InkStreamPublisher(
+                    port=stream_port if stream_port is not None else 0,
+                    token_file=stream_token_file,
+                    paper_mm=config.paper_mm(),
+                    record_path=stream_record,
+                )
+                print(f"Stream de tinta em 127.0.0.1:{ink_stream.port}")
             pipeline = Pipeline(
                 detection_worker=detection_worker,
                 ink_worker=ink_worker,
@@ -1362,6 +1380,7 @@ def run(
                     telemetry, suggestion
                 ),
                 on_acquisition=emit_acquisition,
+                on_ink=ink_stream.publish if ink_stream is not None else _ignore_ink,
                 save_page_snapshot=save_page_snapshot,
                 config=pipeline_config,
             )
@@ -1670,6 +1689,8 @@ def run(
             hand_presence_worker.stop()
         if ink_worker is not None:
             ink_worker.stop()
+        if ink_stream is not None:
+            ink_stream.close()
         if hand_masker is not None:
             # O masker da trabalhadora fecha aqui, depois do join:
             # determinístico, nunca pelo __del__ do MediaPipe.
@@ -1704,6 +1725,26 @@ def main():
         help="arquivo com o token do ajudante Windows para "
         "--source tcp:// (bridge/PROTOCOL.md). Sem ele, fontes "
         "tcp:// sao recusadas no handshake",
+    )
+    parser.add_argument(
+        "--stream-port",
+        type=int,
+        default=None,
+        metavar="PORTA",
+        help="publica a tinta confirmada em 127.0.0.1:PORTA para o drawlink "
+        "(bridge/STREAM.md; exige --stream-token-file). Desligado por padrao",
+    )
+    parser.add_argument(
+        "--stream-token-file",
+        default=None,
+        metavar="ARQUIVO",
+        help="arquivo com o token do stream de tinta (16..256 bytes)",
+    )
+    parser.add_argument(
+        "--stream-record",
+        default=None,
+        metavar="ARQUIVO",
+        help="grava o stream de tinta (mesmos bytes do socket) para replay",
     )
     parser.add_argument(
         "--markers",
@@ -1899,6 +1940,9 @@ def main():
             fullscreen=args.fullscreen,
             rotation=args.rotate,
             pipeline_config=pipeline_config,
+            stream_port=args.stream_port,
+            stream_token_file=args.stream_token_file,
+            stream_record=args.stream_record,
         )
     except (RuntimeError, FileNotFoundError) as error:
         print(f"Erro: {error}")

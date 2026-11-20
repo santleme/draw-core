@@ -113,6 +113,7 @@ class Pipeline:
     render_display: o painel em camadas (confirmada + provisoria).
     Callbacks: on_format_suggestion (sugestao de formato),
     on_acquisition (evento por aquisicao),
+    on_ink(geracao, versao, confirmada) a cada publicacao nova da tinta,
     save_page_snapshot(prefixo, mascara) (pagina anterior na
     virada ou na divisao) e log (console).
     """
@@ -128,6 +129,7 @@ class Pipeline:
         format_suggester=None,
         on_format_suggestion=_ignore,
         on_acquisition=_ignore,
+        on_ink=_ignore,
         save_page_snapshot=_ignore,
         clock=time.monotonic,
         warp_sheet=paper.warp_sheet,
@@ -146,6 +148,7 @@ class Pipeline:
         )
         self._on_format_suggestion = on_format_suggestion
         self._on_acquisition = on_acquisition
+        self._on_ink = on_ink
         self._save_page_snapshot = save_page_snapshot
         self._clock = clock
         self._warp_sheet = warp_sheet
@@ -644,6 +647,9 @@ class Pipeline:
             self.clean_display_version = got.version
             self.clean_mask = got.confirmed
             self.clean_provisional_mask = got.provisional
+            # Tomada de saida (bridge/STREAM.md): so a camada confirmada;
+            # o publicador nunca bloqueia (latest-wins).
+            self._on_ink(self.clean_generation, got.version, got.confirmed)
             self.accumulated_canvas = self._render_display(
                 self.clean_mask,
                 self.clean_provisional_mask,
