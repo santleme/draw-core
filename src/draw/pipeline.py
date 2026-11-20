@@ -178,7 +178,9 @@ class Pipeline:
             if self._config.detect_wake
             else None
         )
-        self._detect_wake_frames = deque(maxlen=4) if self._config.detect_wake else None
+        self._detect_wake_frames = (
+            deque(maxlen=16) if self._config.detect_wake else None
+        )
         self._last_ink_submit_at = None
         self.corner_history = deque(maxlen=_INK_CORNER_HISTORY)
         self.ink_session_open = False
@@ -538,20 +540,23 @@ class Pipeline:
             det_captured_at if ran_detection else self._clock(),
         )
         if ran_detection and self._detect_wake is not None:
-            ref_frame = frame
+            ref_frame = None
             if self._detect_wake_frames is not None and det_captured_at is not None:
                 for ts, submitted in reversed(self._detect_wake_frames):
                     if abs(ts - det_captured_at) < 1e-6:
                         ref_frame = submitted
                         break
-            self._detect_wake.on_detection(
-                self.tracker.corners,
-                ref_frame,
-                det_captured_at,
-                hand_mask=self._hand_mask_det,
-                missed=self.tracker.missed,
-                has_pending=self.tracker.has_pending,
-            )
+            if ref_frame is not None:
+                self._detect_wake.on_detection(
+                    self.tracker.corners,
+                    ref_frame,
+                    det_captured_at,
+                    hand_mask=self._hand_mask_det,
+                    missed=self.tracker.missed,
+                    has_pending=self.tracker.has_pending,
+                )
+            elif self.tracker.corners is None or self.tracker.missed:
+                self._detect_wake.reset()
         if ran_detection:
             tracker_after = self.tracker.diagnostic_state()
             for trace in self.detection_worker.take_traces(self.last_det_seq):
@@ -636,6 +641,18 @@ class Pipeline:
                     self.clean_hand_present,
                     moved=clean_hand_moved,
                 )
+                if (
+                    self.clean_hand_present is False
+                    and self._detect_wake is not None
+                    and self._detect_wake.settled
+                    and self._hand_mask_det is not None
+                    and np.any(self._hand_mask_det)
+                ):
+                    # A mao saiu enquanto o detector dormia com uma mascara
+                    # de mao velha: acorda o detector para renovar
+                    # _hand_mask_det antes de a tinta gastar a passada de
+                    # confirmacao mascarada.
+                    self._detect_wake.wake()
         # Quad de EXIBICAO (T9): em quadro com resultado de
         # deteccao, o exibido e o confirmado; nos demais,
         # propaga por LK sobre o cinza anterior. Falha de

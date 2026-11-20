@@ -408,6 +408,102 @@ def test_inflight_move_during_third_detection_wakes_immediately():
     assert not pipe._detect_wake.settled
 
 
+def test_hand_lift_with_stale_seg_hand_mask_wakes_detector_before_confirming():
+    # Regressao (review #69): se a mao sair entre heartbeats enquanto
+    # _hand_mask_det ainda marca a mao da ultima deteccao, o pipeline acorda
+    # o detector e nao submete uma passada de confirmacao mascarada pela
+    # mascara velha.
+    hand_blob = np.zeros((480, 640), dtype=np.uint8)
+    hand_blob[200:260, 250:320] = 255  # mao no centro da folha (longe das bordas)
+
+    class _DetWithHand:
+        error = None
+
+        def __init__(self):
+            self.submits = 0
+            self._seq = 0
+            self._pending = None
+
+        def submit(self, frame, captured_at, frame_index=None):
+            self.submits += 1
+            self._seq += 1
+            self._pending = contracts.DetectionResult(
+                sequence=self._seq,
+                corners=BASE_CORNERS.copy(),
+                verdict="paper",
+                captured_at=captured_at,
+                detect_ms=10.0,
+                hand_mask=hand_blob.copy(),
+            )
+
+        def poll(self, after_seq):
+            if self._pending is not None and self._pending.sequence > after_seq:
+                return self._pending
+            return None
+
+        def take_traces(self, upto_result_seq=None):
+            return []
+
+    class _CountingInk:
+        error = None
+
+        def __init__(self):
+            self.submits = 0
+
+        def new_generation(self, preserve_identity=False):
+            return 1
+
+        def submit(self, *_a, **_kw):
+            self.submits += 1
+
+        def set_hand_presence(self, *_a, **_kw):
+            return None
+
+        def poll_display(self, *_a, **_kw):
+            return None
+
+    class _HandExit:
+        error = None
+
+        def __init__(self):
+            self._seq = 0
+            self.next_state = None
+
+        def submit(self, *_a, **_kw):
+            return None
+
+        def poll(self, after_seq):
+            if self.next_state is not None and self._seq > after_seq:
+                return (self._seq, self.next_state, False)
+            return None
+
+    now = [100.0]
+    det = _DetWithHand()
+    ink = _CountingInk()
+    hand = _HandExit()
+    pipe = pipeline.Pipeline(
+        detection_worker=det,
+        ink_worker=ink,
+        hand_presence_worker=hand,
+        config=PipelineConfig(detect_wake=True, detect_wake_interval_s=1.0),
+        clock=lambda: now[0],
+    )
+    still = _sheet_frame(BASE_CORNERS)
+    for seq in range(16):
+        pipe.step(contracts.FramePacket(still, now[0], seq))
+        now[0] += 1.0 / 30.0
+    assert pipe._detect_wake.settled
+
+    # Mao sai entre heartbeats: _detect_wake acorda e nao submete tinta
+    # mascarada pelo _hand_mask_det velho neste quadro.
+    ink_before = ink.submits
+    hand._seq += 1
+    hand.next_state = False
+    pipe.step(contracts.FramePacket(still, now[0], 16))
+    assert not pipe._detect_wake.settled
+    assert ink.submits == ink_before
+
+
 def test_cli_flag_and_config_validation(monkeypatch):
     with pytest.raises(ValueError):
         PipelineConfig(detect_wake_interval_s=0.0)
