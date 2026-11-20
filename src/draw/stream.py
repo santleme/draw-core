@@ -309,6 +309,11 @@ class InkStreamPublisher:
         self._src_generation = None
         self._stream_generation = 0
         self._last_shape = None
+        # Ultima ancora/captura conhecidas da geracao: uma atualizacao so do
+        # provisorio chega sem metadados, e o consumidor tardio (FULL do
+        # ultimo estado) nao pode perder a ancora por causa dela.
+        self._last_captured_us = None
+        self._last_anchor = None
         self._server = None
         self.port = None
         threads = []
@@ -388,6 +393,7 @@ class InkStreamPublisher:
                     return  # nunca publicou: nada a limpar
                 self._src_generation = None
                 self._stream_generation += 1
+                self._last_captured_us = self._last_anchor = None
                 mask = np.zeros(self._last_shape, np.uint8)
                 mask.flags.writeable = False
                 version = 0
@@ -395,8 +401,17 @@ class InkStreamPublisher:
                 if publication.generation != self._src_generation:
                     self._src_generation = publication.generation
                     self._stream_generation += 1
+                    self._last_captured_us = self._last_anchor = None
                 self._last_shape = mask.shape
                 version = publication.version
+                if captured_at_us is None:
+                    captured_at_us = self._last_captured_us
+                else:
+                    self._last_captured_us = captured_at_us
+                if anchor is None:
+                    anchor = self._last_anchor
+                else:
+                    self._last_anchor = anchor
             self._pending = (
                 self._stream_generation,
                 int(version),

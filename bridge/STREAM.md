@@ -83,8 +83,14 @@ Cabeçalho fixo de **32 bytes**, little-endian, `struct.Struct("<4sHBBIIqHHI")`:
 - Um DELTA cujo retângulo passa de 50% da página sai como FULL: nos clipes reais a bbox cobre
   91-97% e o DELTA economiza 2-5% (FULL em zlib: 37-55 KiB, 1,8 ms).
 - `captured_at_us` usa o **mesmo relógio** do `ts_us` (monotônico do Draw): o consumidor mede
-  captura -> publicação por `ts_us - captured_at_us`. Só vem em publicações que trouxeram tinta
-  nova; nas demais é `-1`. O Draw só pede os metadados do `InkDelta` quando há stream (opt-in).
+  captura -> publicação por `ts_us - captured_at_us`. É o carimbo do quadro da última passada que
+  publicou tinta confirmada (inclusive a primeira, de página em branco); uma atualização só do
+  provisório herda o último carimbo e a última âncora da geração, para o FULL de um consumidor
+  tardio não perdê-los. `-1`/NaN só até o primeiro dado conhecido da geração. O Draw só pede os
+  metadados do `InkDelta` quando há stream (opt-in); se o delta não ficar pronto em ~5 ms (janela de
+  ~1 ms entre publicar e registrar), a publicação sai sem carimbo novo (herda o anterior).
+- Compatibilidade: o escritor só emite v2. Um consumidor v1 conectado ao vivo precisa atualizar
+  (o `drawlink` ainda não existe); o leitor de referência aceita v1 e v2 (gravações antigas).
 
 O receptor valida magic, versão, tipo, `payload_len`, dimensões (<= 8192 px por
 lado, <= 40 MP) **antes** de alocar, e limita a descompressão ao tamanho

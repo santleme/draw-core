@@ -618,6 +618,7 @@ def test_delta_over_half_the_page_becomes_full(tmp_path):
     ]
 
 
+@needs_private_files
 def test_latest_wins_keeps_the_full_request_of_a_replaced_publication():
     seen = []
     gate = threading.Event()
@@ -703,3 +704,35 @@ def test_ink_publication_validates_metadata():
         contracts.InkPublication(1, 1, _mask(), anchor_corners=np.zeros((3, 2)))
     pub = contracts.InkPublication(1, 1, _mask(), captured_at=1, anchor_corners=_QUAD)
     assert pub.captured_at == 1 and pub.anchor_corners.dtype == np.float32
+
+
+def test_late_consumer_keeps_anchor_after_a_provisional_only_update():
+    # Review #64: a atualizacao so do provisorio chega sem metadados e nao pode
+    # apagar a ancora/captura que o FULL de um consumidor tardio precisa.
+    pub = stream.InkStreamPublisher(port=0, token=TOKEN, log=lambda *_: None)
+    try:
+        a = _mask()
+        a[1:3, 1:3] = 255
+        pub.publish(
+            contracts.InkPublication(
+                3, 7, a, captured_at=4.5, anchor_corners=_QUAD, full=True
+            )
+        )
+        pub.publish(contracts.InkPublication(3, 8, a))  # sem metadados
+        time.sleep(0.15)
+        sock = _connect(pub.port)
+        canvas = stream.InkCanvas()
+        _read_until(sock, canvas, 7)
+        sock.close()
+        assert canvas.captured_at_us == 4_500_000
+        assert np.allclose(canvas.anchor_corners, _QUAD)
+        # outra geracao nao herda a ancora da anterior
+        pub.publish(contracts.InkPublication(4, 1, a))
+        time.sleep(0.15)
+        sock = _connect(pub.port)
+        canvas = stream.InkCanvas()
+        _read_until(sock, canvas, 1)
+        sock.close()
+        assert canvas.anchor_corners is None and canvas.captured_at_us is None
+    finally:
+        pub.close()
