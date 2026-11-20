@@ -188,9 +188,16 @@ dependency shipped grouped — those groupings are marked.
 10. `lab/` in two PRs: simulator (`lab-sim`, PR #11) and
     metrics/vectorize (`lab-metrics-vectorize`, PR #12).
 11. `site/` (PR #13), `bridge/` (PR #14).
-12. `pipeline.py` + CLI, `exporters.py` beyond vectorize (pending).
-13. Parity gate: replay the same recorded sessions through legacy and
-    this repo; deterministic core (geometry, tracker, accumulator) must match.
+12. `pipeline.py` + CLI (`app.py`, `view.py`): done, evolved through the
+    opt-in feature PRs (#45-#57: coverage floor, auto gain, strict vote,
+    dense warp, ruling removal, hysteresis). `exporters/` carries
+    `export_vectors` and `vectorize`; nothing beyond that is planned.
+13. Parity gate: `lab/parity_e2e.py` (legacy in a subprocess, same model
+    binaries, Tier A flags on) plus `tests/test_parity_e2e.py` and the
+    fake-worker scenarios in `tests/test_pipeline*`. Open: re-run
+    `parity_e2e` on a real recorded session (not only the synthetic
+    68-frame one) before retiring the legacy repo; the opt-in features
+    are off by default and outside the parity claim.
 
 ## Invariants to preserve
 
