@@ -203,13 +203,21 @@ def fast(monkeypatch):
     return monkeypatch
 
 
-def _run(sequence, config):
-    worker = worker_mod.PageCleanWorker(_InkFromWarp(), config=config).start()
+def _run(sequence, config, *, hand=None, coverage=None, spy=None):
+    worker = worker_mod.PageCleanWorker(_InkFromWarp(), config=config)
+    if spy is not None:
+        spy(worker)
+    worker.start()
     try:
         generation = worker.new_generation()
-        for prob in sequence:
+        hands = hand if isinstance(hand, list) else [hand] * len(sequence)
+        for prob, present in zip(sequence, hands, strict=True):
+            if present is not None:
+                worker.set_hand_presence(present)
             before = worker.stats()["passes_total"]
-            worker.submit(WarpedPage(_bgr(prob), generation, BASE.copy()))
+            worker.submit(
+                WarpedPage(_bgr(prob), generation, BASE.copy(), coverage=coverage)
+            )
             deadline = time.monotonic() + 10.0
             while worker.stats()["passes_total"] <= before:
                 assert time.monotonic() < deadline, "a passada nao executou"
@@ -287,6 +295,89 @@ def test_large_stuck_offset_fails_open_instead_of_freezing(fast):
     assert decisions[:vetoes] == ["veto"] * vetoes
     assert set(decisions[vetoes:]) == {"fail_open"}
     assert stats["motion_fail_open_total"] == len(decisions) - vetoes
+
+
+@pytest.mark.slow
+def test_vetoed_passes_do_not_put_the_ink_to_rest(fast):
+    # A mao escreve, a folha escorrega para fora do alcance da correcao
+    # e a mao sai (descanso total liberado). Passadas vetadas nao contam
+    # como quietas: a trabalhadora segue rodando e chega ao fail-open — o
+    # traco feito antes de a mao sair nao fica sem confirmar (review do
+    # PR #67). Sem a correcao, ela dormia e a passada seguinte nao vinha.
+    page = _page(seed=8)
+    far = _shift(page, 7.0, 0.0)
+    n_far = motion.MOTION_FAIL_OPEN_PASSES + 3
+    sequence = [page] * 4 + [far] * n_far
+    hands = [True] * 5 + [False] * (n_far - 1)
+    stats, records, _conf = _run(
+        sequence, InkConfig(motion_veto=True, **_PLAIN), hand=hands
+    )
+    assert stats["motion_fail_open_total"] >= 1
+
+
+@pytest.mark.slow
+def test_correction_carries_the_coverage_mask_along(fast):
+    # Cobertura de folha so a partir de x=600 no warp; a folha desliza
+    # 3 px para a direita e um traco novo nasce colado na borda da
+    # cobertura. Corrigido, o traco cai em x 597-599 da ancora: a mascara
+    # tem de ir junto, senao essas colunas sao cortadas em toda passada.
+    page = _page(seed=6)
+    coverage = np.zeros(SHAPE, bool)
+    coverage[:, 600:] = True
+    stroke = np.zeros(SHAPE, np.float32)
+    cv2.line(stroke, (602, 300), (602, 500), 1.0, thickness=5)
+    slid = np.maximum(_shift(page, 3.0, 0.0), stroke)
+    sequence = [page] * 4 + [slid] * 6
+    _s, records, conf = _run(
+        sequence, InkConfig(motion_veto=True, **_PLAIN), coverage=coverage
+    )
+    assert {r.get("motion_decision") for r in records[4:]} == {"correct"}
+    assert conf[320:480, 597:600].mean() > 0.8
+
+
+@pytest.mark.slow
+def test_anchor_arbitration_scores_the_camera_map_not_the_corrected_one(fast):
+    seen = []
+
+    def spy(worker):
+        real = worker._anchor_arbitration_step
+
+        def wrapped(*args):
+            seen.append(args[7])  # o mapa "camera" que a arbitragem pontua
+            return real(*args)
+
+        worker._anchor_arbitration_step = wrapped
+
+    page = _page(seed=4)
+    sequence = [page] * 4 + [_shift(page, 2.5, 0.0)] * 3
+    _s, records, _c = _run(
+        sequence,
+        InkConfig(motion_veto=True, anchor_follow=False),
+        spy=spy,
+    )
+    corrected = [
+        i for i, r in enumerate(records) if r.get("motion_decision") == "correct"
+    ]
+    assert corrected
+    # Sem registro (quad parado) o mapa da camera e o proprio prob: a
+    # correcao (deslocada 2,5 px) nao pode chegar a arbitragem.
+    for i in corrected:
+        expected = _InkFromWarp().ink_prob(_bgr(sequence[i]))
+        assert np.allclose(seen[i], expected)
+
+
+@pytest.mark.slow
+def test_default_path_never_builds_the_gate(fast, monkeypatch):
+    # Paridade com o canvas anterior: com motion_veto desligado o portao
+    # nem existe — nenhum caminho novo roda (review do PR #67).
+    def boom(*_a, **_k):
+        raise AssertionError("MotionGate construido com motion_veto desligado")
+
+    monkeypatch.setattr(motion, "MotionGate", boom)
+    page = _page(seed=5)
+    stats, records, _c = _run([page] * 3 + [_shift(page, 2.5, 0.0)] * 3, InkConfig())
+    assert stats["motion_vetoes_total"] == 0
+    assert all("motion_decision" not in r for r in records)
 
 
 @pytest.mark.slow

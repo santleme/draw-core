@@ -1073,6 +1073,12 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 (None if registration_corners is None else registration_corners.copy()),
                 None if corners is None else corners.copy(),
             )
+            # Mapa registrado SO pela camera: e o que a arbitragem de
+            # ancora compara com o mapa cru para julgar pouso x quad ruim.
+            # A escolha/correcao do portao vale so para a evidencia que
+            # vota (review do PR #67: o mapa corrigido inflava o escore de
+            # camera e um movimento real virava "espurio").
+            camera_prob = registered_prob
             motion_decision = None
             if (
                 self._motion is not None
@@ -1167,6 +1173,16 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                         reg_coverage = coverage
                 else:
                     reg_coverage = coverage
+                if motion_decision == "correct":
+                    # A cobertura acompanha a correcao da evidencia: sem
+                    # isso o traco novo deslocado para fora da mascara
+                    # velha era cortado em toda passada corrigida.
+                    reg_coverage = (
+                        motion_fix.warp_back(
+                            reg_coverage.astype(np.uint8), nearest=True
+                        )
+                        > 0
+                    )
                 if anchor_ink is None:
                     registered_prob = registered_prob * reg_coverage
                 else:
@@ -1409,7 +1425,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     reg_anchor_median,
                     reg_deadband,
                     prob,
-                    registered_prob,
+                    camera_prob,
                     visible,
                 )
                 arbitration_abstain = arb_status == "open"
@@ -1435,6 +1451,8 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     # Pouso: a passada corrente entra ja
                     # registrada na ancora nova, por cima do
                     # estado INTOCADO (a v3 nao move o estado).
+                    # A decisao do portao foi contra a ancora velha.
+                    motion_decision = None
                     registered_prob, registered_visible = (
                         registration._register_ink_probability(
                             prob,
@@ -1490,7 +1508,9 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     # ancora nova, por cima do estado INTOCADO
                     # (a troca e so de ancora) — e o evento de
                     # arbitragem que a abstinha foi fechado pela
-                    # re-ancoragem.
+                    # re-ancoragem. A decisao do portao foi contra a
+                    # ancora velha.
+                    motion_decision = None
                     registered_prob, registered_visible = (
                         registration._register_ink_probability(
                             prob,
@@ -1605,7 +1625,10 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             # CONFIRMADA interessa (provisoria tremula com o
             # warp e nao pode segurar a trabalhadora acordada).
             self._generation_passes += 1
-            if result["confirmed_changed"] or result["turn"]:
+            if result["confirmed_changed"] or result["turn"] or motion_abstain:
+                # Passada vetada nao e quietude: a folha esta fora do
+                # lugar e a tinta nova ainda nao entrou — descansar aqui
+                # deixava o traco sem confirmar ate outro evento.
                 self._quiet_passes = 0
             else:
                 self._quiet_passes += 1
