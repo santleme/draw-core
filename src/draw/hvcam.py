@@ -36,7 +36,11 @@ import numpy as np
 DEFAULT_PORT = 8765
 
 _TIMEOUT_MS = 1000
-_LISTEN_TIMEOUT_MS = 5000
+# No Hyper-V (AF_HYPERV), uma tentativa de connect() do host antes de o
+# listener existir no WSL pode levar 30 s para o host rescindir a oferta
+# mais 1 s de espera antes do retry do hvcam-host.exe --reverse: 35 s
+# mantem o accept limitado e cobre um ciclo completo de timeout + retry.
+_LISTEN_TIMEOUT_MS = 35_000
 _MAX_PAYLOAD = 64 * 1024 * 1024
 # Portas AF_VSOCK sao uint32; 0xFFFFFFFF e VMADDR_PORT_ANY (reservado).
 _VSOCK_PORT_MAX = 0xFFFFFFFF - 1
@@ -58,26 +62,26 @@ class HvFrameHeader(ctypes.Structure):
     ]
 
 
-def _candidates():
+def _load():
     here = os.path.dirname(os.path.abspath(__file__))
-    return (
+    for cand in (
         os.path.join(here, "libhvcam.so"),
         os.path.join(here, "..", "..", "build", "libhvcam.so"),
-        os.path.join(here, "..", "..", "..", "hvcam", "build", "libhvcam.so"),
         "libhvcam.so",
-    )
-
-
-def _configure_lib(lib):
+    ):
+        try:
+            lib = ctypes.CDLL(cand)
+            break
+        except OSError:
+            continue
+    else:
+        raise OSError(
+            "libhvcam.so nao encontrada — ela vem do build do "
+            "santleme/hvcam (cmake --build build); exporte "
+            "LD_LIBRARY_PATH apontando para o diretorio dela"
+        )
     lib.hvcam_connect.argtypes = [ctypes.c_uint32]
     lib.hvcam_connect.restype = ctypes.c_int
-    # Older builds can still use direct vsock/TCP. Reverse mode needs the
-    # listener symbol added by hvcam's no-admin connection path.
-    try:
-        lib.hvcam_listen.argtypes = [ctypes.c_uint32]
-        lib.hvcam_listen.restype = ctypes.c_int
-    except AttributeError:
-        pass
     lib.hvcam_connect_tcp.argtypes = [ctypes.c_char_p, ctypes.c_uint16]
     lib.hvcam_connect_tcp.restype = ctypes.c_int
     lib.hvcam_grab_next.argtypes = [
@@ -93,52 +97,14 @@ def _configure_lib(lib):
     return lib
 
 
-def _load(require_listen=False):
-    saw_legacy = False
-    for cand in _candidates():
-        try:
-            lib = ctypes.CDLL(cand)
-        except OSError:
-            continue
-        _configure_lib(lib)
-        if require_listen and getattr(lib, "hvcam_listen", None) is None:
-            saw_legacy = True
-            continue
-        return lib
-    if saw_legacy:
-        raise OSError(
-            "libhvcam.so sem hvcam_listen; reconstrua a biblioteca "
-            "com a versao atual de santleme/hvcam"
-        )
-    raise OSError(
-        "libhvcam.so nao encontrada — ela vem do build do "
-        "santleme/hvcam (cmake --build build); exporte "
-        "LD_LIBRARY_PATH apontando para o diretorio dela"
-    )
-
-
 _LIB = None
 
 
-def _lib(require_listen=False):
-    """Carga lazy: o import deste modulo nao exige libhvcam.so.
-
-    Quando `require_listen=True`, ignora candidatos antigos sem
-    `hvcam_listen` para que um build antigo no caminho nao mascare um
-    build novo capaz de modo reverso.
-    """
+def _lib():
+    """Carga lazy: o import deste modulo nao exige libhvcam.so."""
     global _LIB
     if _LIB is None:
-        _LIB = _load(require_listen=require_listen)
-        return _LIB
-    if require_listen and getattr(_LIB, "hvcam_listen", None) is None:
-        if isinstance(_LIB, ctypes.CDLL):
-            _LIB = _load(require_listen=True)
-            return _LIB
-        raise OSError(
-            "libhvcam.so sem hvcam_listen; reconstrua a biblioteca "
-            "com a versao atual de santleme/hvcam"
-        )
+        _LIB = _load()
     return _LIB
 
 
@@ -211,26 +177,19 @@ class Camera:
         host=None,
         listen=False,
         timeout_ms=_LISTEN_TIMEOUT_MS,
+        listener=None,
     ):
         if host is not None and listen:
             raise ValueError("hvcam: listen mode cannot use a TCP host")
         if listen and not 1 <= int(port) <= _VSOCK_PORT_MAX:
             raise ValueError(f"porta hvcam invalida: {port!r}")
-        lib = _lib(require_listen=listen)
+        lib = _lib()
         self._lib = lib
         if host is not None:
             self.fd = lib.hvcam_connect_tcp(host.encode(), port)
         elif listen:
-            listen_fn = getattr(lib, "hvcam_listen", None)
-            if listen_fn is None:
-                raise OSError(
-                    "libhvcam.so sem hvcam_listen; reconstrua a biblioteca "
-                    "com a versao atual de santleme/hvcam"
-                )
-            if isinstance(lib, ctypes.CDLL):
-                self.fd = _listen_vsock_bounded(port, timeout_ms)
-            else:
-                self.fd = listen_fn(port)
+            listen_fn = _listen_vsock_bounded if listener is None else listener
+            self.fd = listen_fn(port, timeout_ms)
         else:
             self.fd = lib.hvcam_connect(port)
         if self.fd < 0:
@@ -400,10 +359,10 @@ def parse_hvcam_endpoint(source):
             f"vsock nao tem host ({hostname!r}); para TCP use "
             f"hvcam+tcp://{hostname}:{shown_port}"
         )
-    if not sep:
+    if not sep or not port_text:
         port = DEFAULT_PORT
     else:
-        if not port_text or not port_text.isascii() or not port_text.isdigit():
+        if not port_text.isascii() or not port_text.isdigit():
             raise ValueError(f"porta hvcam invalida: {source!r}")
         port = int(port_text, 10)
     if not 1 <= port <= _VSOCK_PORT_MAX:
@@ -456,8 +415,6 @@ class HvcamCapture:
                 listen_kwargs = {"port": port, "listen": True}
                 if self._connect_timeout_ms is not None:
                     listen_kwargs["timeout_ms"] = self._connect_timeout_ms
-                elif self._timeout_ms != _TIMEOUT_MS:
-                    listen_kwargs["timeout_ms"] = self._timeout_ms
                 self._cam = camera_factory(**listen_kwargs)
             else:
                 self._cam = camera_factory(port=port)

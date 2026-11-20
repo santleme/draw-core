@@ -102,11 +102,13 @@ def test_is_hvcam_source(source, expected):
     "url,expected",
     [
         ("hvcam://", (None, 8765)),
+        ("hvcam://:", (None, 8765)),
         ("hvcam://:9100", (None, 9100)),
         ("hvcam://:70000", (None, 70000)),
         ("hvcam+tcp://10.0.0.5", ("10.0.0.5", 8765)),
         ("hvcam+tcp://10.0.0.5:9999", ("10.0.0.5", 9999)),
         ("hvcam+reverse://", (None, 8765)),
+        ("hvcam+reverse://:", (None, 8765)),
         ("hvcam+reverse://:9100", (None, 9100)),
         ("hvcam+reverse://:70000", (None, 70000)),
     ],
@@ -162,12 +164,21 @@ def test_hvcam_capture_reverse_uses_listener():
 def test_hvcam_capture_reverse_forwards_connect_timeout():
     cam = FakeCamera([])
     seen = []
+    # timeout_ms de leitura (ex.: 5000 no --check) NAO encurta o prazo de
+    # accept do listener reverso (35 s); so connect_timeout_ms explicito.
     HvcamCapture(
         "hvcam+reverse://:9100",
         timeout_ms=5000,
         camera_factory=_factory(cam, seen),
     )
-    assert seen == [{"port": 9100, "listen": True, "timeout_ms": 5000}]
+    assert seen == [{"port": 9100, "listen": True}]
+    seen.clear()
+    HvcamCapture(
+        "hvcam+reverse://:9100",
+        connect_timeout_ms=12000,
+        camera_factory=_factory(cam, seen),
+    )
+    assert seen == [{"port": 9100, "listen": True, "timeout_ms": 12000}]
 
 
 def test_hvcam_capture_tcp_endpoint_passed():
@@ -320,13 +331,21 @@ class _FakeLib:
         self.calls.append(("vsock", port))
         return self.fd
 
-    def hvcam_listen(self, port):
-        self.calls.append(("listen", port))
-        return self.fd
-
     def hvcam_connect_tcp(self, host, port):
         self.calls.append((host, port))
         return self.fd
+
+    def hvcam_grab_next(self, fd, hdr_ptr, buf, cap, last_ptr, timeout_ms):
+        self.calls.append(("grab", fd, timeout_ms))
+        hdr = hdr_ptr._obj
+        hdr.seq_num = 1
+        hdr.timestamp_us = 100_000
+        hdr.flags = 1
+        hdr.width = 4
+        hdr.height = 2
+        hdr.format = 1
+        hdr.payload_bytes = 24
+        return 24
 
     def hvcam_close(self, fd):
         self.closed.append(fd)
@@ -350,12 +369,25 @@ def test_camera_vsock_connect_without_host(monkeypatch):
     cam.close()
 
 
-def test_camera_vsock_listen(monkeypatch):
+def test_camera_vsock_listen_handoff_to_grab_and_close(monkeypatch):
+    """O descritor destacado pelo listener Python em modo reverso alimenta
+    hvcam_grab_next e e fechado por hvcam_close sem exigir hvcam_listen na
+    libhvcam.so (review #75)."""
     lib = _FakeLib()
     monkeypatch.setattr(hvcam_module, "_LIB", lib)
-    cam = hvcam_module.Camera(port=9100, listen=True)
-    assert lib.calls == [("listen", 9100)]
+    seen = []
+
+    def fake_listener(port, timeout_ms):
+        seen.append((port, timeout_ms))
+        return 42
+
+    cam = hvcam_module.Camera(port=70000, listen=True, listener=fake_listener)
+    assert seen == [(70000, hvcam_module._LISTEN_TIMEOUT_MS)]
+    info, payload = cam.grab(timeout_ms=750)
+    assert info["seq"] == 1 and payload.size == 24
+    assert lib.calls == [("grab", 42, 750)]
     cam.close()
+    assert lib.closed == [42]
 
 
 def test_camera_connect_failure_raises_oserror(monkeypatch):
@@ -373,38 +405,10 @@ def test_camera_timeout_suggests_reverse_mode(monkeypatch):
     assert "--register-vsock --port 9100" in str(error.value)
 
 
-def test_load_skips_older_library_without_hvcam_listen(monkeypatch):
-    """Um build antigo de libhvcam.so sem hvcam_listen num candidato anterior
-    nao pode mascarar o build novo quando require_listen=True (review #75)."""
-
-    class _DummyFunc:
-        argtypes = None
-        restype = None
-
-    class _OldCDLL:
-        hvcam_connect = _DummyFunc()
-        hvcam_connect_tcp = _DummyFunc()
-        hvcam_grab_next = _DummyFunc()
-        hvcam_close = _DummyFunc()
-
-    class _NewCDLL(_OldCDLL):
-        hvcam_listen = _DummyFunc()
-
-    old_lib = _OldCDLL()
-    new_lib = _NewCDLL()
-    monkeypatch.setattr(hvcam_module, "_candidates", lambda: ("old.so", "new.so"))
-    monkeypatch.setattr(
-        hvcam_module.ctypes,
-        "CDLL",
-        lambda path: old_lib if path == "old.so" else new_lib,
-    )
-    assert hvcam_module._load(require_listen=False) is old_lib
-    assert hvcam_module._load(require_listen=True) is new_lib
-
-
-def test_listen_vsock_bounded_times_out_and_filters_non_host_cid():
-    """O listener AF_VSOCK fecha no timeout (-ETIMEDOUT) e rejeita conexoes
-    que nao venham de VMADDR_CID_HOST (2) antes de entregar o fd (review #75)."""
+def test_listen_vsock_bounded_times_out_and_filters_non_host_cid(monkeypatch):
+    """O listener AF_VSOCK fecha no timeout (-ETIMEDOUT), rejeita conexoes
+    que nao venham de VMADDR_CID_HOST (2) e entrega o fd destacado ao
+    HvcamCapture.read()/release() (review #75)."""
 
     class _FakeConn:
         def __init__(self, fd):
@@ -472,22 +476,36 @@ def test_listen_vsock_bounded_times_out_and_filters_non_host_cid():
     assert listener_timeout.closed
 
     # 2) Conexao de CID != VMADDR_CID_HOST (ex.: loopback CID 1) e fechada;
-    #    a seguinte, de VMADDR_CID_HOST (2), e aceita e destacada.
+    #    a seguinte, de VMADDR_CID_HOST (2), e aceita, destacada, lida via
+    #    HvcamCapture.read() e fechada em release().
     rogue = _FakeConn(fd=11)
     host_conn = _FakeConn(fd=42)
     listener_ok = _FakeListener([(rogue, (1, 50000)), (host_conn, (2, 50001))])
-    fd = hvcam_module._listen_vsock_bounded(
-        70000,
-        timeout_ms=500,
-        socket_factory=lambda *_a: listener_ok,
-        selector_factory=lambda: _FakeSelector([[True], [True]]),
-        clock=lambda: now[0],
+    lib = _FakeLib()
+    real_listen = hvcam_module._listen_vsock_bounded
+    monkeypatch.setattr(hvcam_module, "_LIB", lib)
+    monkeypatch.setattr(
+        hvcam_module,
+        "_listen_vsock_bounded",
+        lambda port, timeout_ms=hvcam_module._LISTEN_TIMEOUT_MS: real_listen(
+            port,
+            timeout_ms=timeout_ms,
+            socket_factory=lambda *_a: listener_ok,
+            selector_factory=lambda: _FakeSelector([[True], [True]]),
+            clock=lambda: now[0],
+        ),
     )
-    assert fd == 42
+    capture = HvcamCapture("hvcam+reverse://:70000")
+    assert capture.isOpened()
     assert rogue.closed is True
     assert host_conn.closed is False
     assert host_conn.blocking is True
     assert listener_ok.closed is True
+    ok, frame = capture.read()
+    assert ok and frame.shape == (2, 4, 3)
+    assert lib.calls == [("grab", 42, hvcam_module._TIMEOUT_MS)]
+    capture.release()
+    assert lib.closed == [42]
 
 
 def test_camera_to_bgr_mjpeg_honors_bottom_up():
