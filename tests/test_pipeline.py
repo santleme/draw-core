@@ -956,3 +956,16 @@ def test_reset_source_blocks_unread_snapshots_of_the_old_generation():
     assert loop.clean_mask is None and loop.clean_provisional_mask is None
     assert loop.ink_session_open is False
     assert loop.clean_generation != old_generation
+
+
+def test_ink_page_carries_the_capture_timestamp_of_its_frame():
+    """InkDelta.captured_at nasce aqui: o warp entregue à tinta leva o
+    carimbo monotônico do quadro de câmera que o originou."""
+    loop, _det, ink = _make_loop(lambda _i: (QUAD.copy(), "paper", None))
+    _drive(loop, 40)
+    assert ink.pages, "a tinta recebeu paginas"
+    stamps = [page.captured_at for page in ink.pages]
+    assert all(s is not None for s in stamps)
+    assert stamps == sorted(stamps) and len(set(stamps)) == len(stamps)
+    # carimbos de _packet: frame_number * 0.1
+    assert all(abs(s * 10 - round(s * 10)) < 1e-6 for s in stamps)

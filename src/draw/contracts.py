@@ -187,7 +187,8 @@ class WarpedPage:
     vê a página; falso sob a mão) e coverage a cobertura de folha
     DESTE warp (verdadeiro onde a retificação cobre papel de
     verdade): ambas 2D bool/uint8 na mesma grade (altura, largura)
-    de image, somente-leitura, ou None.
+    de image, somente-leitura, ou None. captured_at é o carimbo
+    monotônico (s) do quadro de câmera que originou o warp, ou None.
     """
 
     image: np.ndarray
@@ -195,8 +196,15 @@ class WarpedPage:
     corners: np.ndarray | None = None
     visible: np.ndarray | None = None
     coverage: np.ndarray | None = None
+    captured_at: float | None = None
 
     def __post_init__(self):
+        if self.captured_at is not None and not (
+            isinstance(self.captured_at, (int, float)) and np.isfinite(self.captured_at)
+        ):
+            raise ValueError(
+                f"captured_at precisa ser float finito: {self.captured_at!r}"
+            )
         if not isinstance(self.image, np.ndarray) or self.image.ndim not in (2, 3):
             raise ValueError("image precisa ser um ndarray 2D ou (H, W, 3)")
         if self.image.ndim == 3 and (
@@ -252,6 +260,63 @@ class InkSnapshot:
         confirmed = mask.copy()
         confirmed.flags.writeable = False
         object.__setattr__(self, "confirmed", confirmed)
+
+
+@dataclass(frozen=True, slots=True)
+class InkDelta:
+    """O que a tinta confirmada ganhou desde `since_version`.
+
+    Cobre (since_version, version] de uma geração. mask é a máscara
+    2D uint8 (255 = pixel recém-confirmado) recortada em bbox =
+    (y0, y1, x0, x1), meio-aberto, em pixels da grade da página
+    page_grid = (altura, largura); bbox None e mask (0, 0) quando
+    nada mudou. full=True é descontinuidade (primeira publicação da
+    geração, tinta removida ou migrada, ou histórico insuficiente
+    para o since_version pedido): mask/bbox descrevem TODO o canvas
+    confirmado e o consumidor deve substituir o seu, não somar.
+    removed_px conta pixels que saíram do canvas nesse intervalo.
+    captured_at é o carimbo monotônico (s, mesmo relógio de
+    FramePacket.captured_at) do quadro da passada que produziu a
+    publicação mais recente, ou None. mm_per_px e anchor_corners
+    (quad (4, 2) da âncora da geração) levam a página ao mundo.
+    """
+
+    generation: int
+    since_version: int
+    version: int
+    captured_at: float | None
+    bbox: tuple[int, int, int, int] | None
+    mask: np.ndarray
+    page_grid: tuple[int, int]
+    mm_per_px: float | None
+    anchor_corners: np.ndarray | None
+    removed_px: int
+    full: bool
+
+    def __post_init__(self):
+        mask = self.mask
+        if not isinstance(mask, np.ndarray) or mask.ndim != 2 or mask.dtype != np.uint8:
+            raise ValueError("mask precisa ser máscara 2D uint8")
+        if self.bbox is None:
+            if mask.size:
+                raise ValueError("bbox None exige mask vazia")
+        else:
+            y0, y1, x0, x1 = self.bbox
+            if mask.shape != (y1 - y0, x1 - x0) or y1 <= y0 or x1 <= x0:
+                raise ValueError(f"mask {mask.shape} não bate com bbox {self.bbox}")
+        if self.version < self.since_version:
+            raise ValueError("version precisa ser >= since_version")
+        if self.removed_px < 0:
+            raise ValueError("removed_px precisa ser >= 0")
+        mask = mask.copy()
+        mask.flags.writeable = False
+        object.__setattr__(self, "mask", mask)
+        if self.anchor_corners is not None:
+            object.__setattr__(
+                self,
+                "anchor_corners",
+                _corners_float32(self.anchor_corners, "anchor_corners"),
+            )
 
 
 @dataclass(frozen=True, slots=True)

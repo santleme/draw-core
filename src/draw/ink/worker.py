@@ -7,7 +7,8 @@ from collections import deque
 import cv2
 import numpy as np
 
-from ..contracts import InkDisplaySnapshot, InkSnapshot
+from .. import config as paper_config
+from ..contracts import InkDelta, InkDisplaySnapshot, InkSnapshot
 from . import accumulator, identity, registration, ruling
 from . import anchor as anchor_mod
 from .config import InkConfig
@@ -100,6 +101,11 @@ _PAGE_CLEAN_INTERVAL_SECONDS = 0.25
 _PAGE_CLEAN_STOP_TIMEOUT_SECONDS = 5.0
 
 
+# Publicacoes confirmadas guardadas para poll_delta mesclar: ~10 s a 3
+# passadas/s. Alem disso o consumidor atrasado recebe um delta full.
+_DELTA_HISTORY = 32
+
+
 # Tamanho dos historicos de telemetria da trabalhadora: registros
 # por passada e eventos de identidade. Replays que medem episodios
 # longos passam (None, None) para guardar tudo.
@@ -109,6 +115,37 @@ _WORKER_HISTORY = (256, 128)
 # Folga do teste de cadencia no pump(): relogio de cena em float
 # (indice * 1/30 s) nao pode perder uma passada por um ulp.
 _SYNC_CADENCE_EPS_SECONDS = 1e-9
+
+
+def _bbox_of(mask):
+    """(y0, y1, x0, x1) meio-aberto do que e True em mask, ou None."""
+    rows = np.flatnonzero(mask.any(axis=1))
+    if rows.size == 0:
+        return None
+    cols = np.flatnonzero(mask.any(axis=0))
+    return int(rows[0]), int(rows[-1]) + 1, int(cols[0]), int(cols[-1]) + 1
+
+
+def _merge_deltas(records):
+    """Uniao (OR) dos deltas incrementais de registros contiguos."""
+    boxes = [r[3] for r in records if r[3] is not None]
+    if not boxes:
+        return None, np.zeros((0, 0), np.uint8)
+    y0 = min(b[0] for b in boxes)
+    y1 = max(b[1] for b in boxes)
+    x0 = min(b[2] for b in boxes)
+    x1 = max(b[3] for b in boxes)
+    merged = np.zeros((y1 - y0, x1 - x0), np.uint8)
+    for r in records:
+        if r[3] is None:
+            continue
+        by0, by1, bx0, bx1 = r[3]
+        np.maximum(
+            merged[by0 - y0 : by1 - y0, bx0 - x0 : bx1 - x0],
+            r[4],
+            out=merged[by0 - y0 : by1 - y0, bx0 - x0 : bx1 - x0],
+        )
+    return (y0, y1, x0, x1), merged
 
 
 class PageCleanWorker(anchor_mod._AnchorSteps):
@@ -174,6 +211,10 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         self._generation = 0
         self._published = None
         self._version = 0
+        # Historico de deltas confirmados para poll_delta: um registro por
+        # publicacao confirmada da geracao corrente (ver _record_delta).
+        self._delta_ring = deque(maxlen=_DELTA_HISTORY)
+        self._delta_prev = None
         self._stopped = False
         self._error = None
         # Estado privado da trabalhadora (so ela toca):
@@ -341,6 +382,8 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             self._pending = None
             self._published = None
             self._published_display = None
+            self._delta_ring.clear()
+            self._delta_prev = None
             self._condition.notify_all()
             return self._generation
 
@@ -453,6 +496,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 corners,
                 visible,
                 coverage,
+                page.captured_at,
             )
             self._condition.notify_all()
 
@@ -598,6 +642,115 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 return None
             return InkSnapshot(version=published[1], confirmed=published[2])
 
+    def _record_delta(self, generation, confirmed, captured_at):
+        """Guarda o delta desta publicacao (worker thread, lock ja pego
+        pelo chamador nao e exigido: so ela escreve; o poll le sob lock)."""
+        now = confirmed > 0
+        prev = self._delta_prev
+        if prev is not None and prev[0] != generation:
+            prev = None  # outra geracao: a primeira publicacao e sempre full
+        prev = None if prev is None else prev[1]
+        full = prev is None or prev.shape != now.shape
+        removed_px = 0
+        if full:
+            new = now
+        else:
+            new = now & ~prev
+            removed_px = int(np.count_nonzero(prev & ~now))
+            full = removed_px > 0
+            if full:
+                new = now
+        bbox = _bbox_of(new)
+        mask = (
+            np.zeros((0, 0), np.uint8)
+            if bbox is None
+            else (new[bbox[0] : bbox[1], bbox[2] : bbox[3]].astype(np.uint8) * 255)
+        )
+        record = (
+            generation,
+            self._version,
+            captured_at,
+            bbox,
+            mask,
+            removed_px,
+            full,
+            None if self._anchor_corners is None else self._anchor_corners.copy(),
+            now.shape,
+        )
+        with self._condition:
+            self._delta_ring.append(record)
+        self._delta_prev = (generation, now)
+
+    def poll_delta(self, generation, after_version):
+        """InkDelta com o que a tinta confirmada ganhou depois de
+        after_version, ou None se nao ha publicacao nova da geracao.
+
+        Mesmo gatilho e mesma versao de poll(): quem ja consome o canvas
+        pode trocar o diff de mascaras de pagina inteira por isto. Sem
+        historico para cobrir (after_version antes do que o anel
+        guarda, ou intervalo que contem tinta removida/migrada) o delta
+        sai full: substitui o canvas, nao soma. Nao muda cadencia nem
+        o voto: le registros que a passada ja produziu.
+        """
+        with self._condition:
+            published = self._published
+            if (
+                published is None
+                or published[0] != generation
+                or published[1] <= after_version
+            ):
+                return None
+            latest = published[1]
+            records = [
+                r
+                for r in self._delta_ring
+                if r[0] == generation and after_version < r[1] <= latest
+            ]
+            versions = [r[1] for r in records]
+            contiguous = versions == list(range(after_version + 1, latest + 1))
+            last = records[-1] if records else None
+            full = (
+                not contiguous
+                or last is None
+                or last[1] != latest
+                or any(r[6] for r in records)
+            )
+            confirmed = published[2]
+            corners = None if last is None else last[7]
+            captured_at = None if last is None else last[2]
+            removed_px = sum(r[5] for r in records) if contiguous else 0
+            if not full:
+                bbox, mask = _merge_deltas(records)
+            else:
+                full_mask = confirmed > 0
+                bbox = _bbox_of(full_mask)
+                mask = (
+                    np.zeros((0, 0), np.uint8)
+                    if bbox is None
+                    else full_mask[bbox[0] : bbox[1], bbox[2] : bbox[3]].astype(
+                        np.uint8
+                    )
+                    * 255
+                )
+            grid = tuple(int(v) for v in confirmed.shape)
+        try:
+            mm = float(paper_config.mm_per_px())
+        except ValueError:
+            mm = None
+        return InkDelta(
+            generation=generation,
+            since_version=after_version,
+            version=latest,
+            captured_at=captured_at,
+            bbox=bbox,
+            mask=mask,
+            page_grid=grid,
+            mm_per_px=mm,
+            anchor_corners=corners,
+            removed_px=removed_px,
+            full=full,
+        )
+
     def poll_display(self, generation, after_version):
         """InkDisplaySnapshot para a tela, ou None.
 
@@ -670,6 +823,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             corners,
             visible,
             coverage,
+            captured_at,
         ) = self._pending
         self._pending = None
         # Intervalo que governou a espera desta passada (o regime
@@ -695,6 +849,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             pass_started_at,
             scheduled_interval,
             scheduled_hand_state,
+            captured_at,
         )
 
     def pump(self):
@@ -731,6 +886,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             pass_started_at,
             scheduled_interval,
             scheduled_hand_state,
+            captured_at,
         ) = job
         # Geracao trocou (ou a trabalhadora parou) entre a retirada
         # e a execucao: a passada esta morta antes de nascer — o
@@ -1370,6 +1526,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     self._version,
                     result["confirmed"],
                 )
+                self._record_delta(generation, result["confirmed"], captured_at)
             if publish_confirmed or result["provisional_changed"]:
                 self._display_version += 1
                 self._published_display = (

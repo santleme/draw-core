@@ -264,7 +264,7 @@ class Pipeline:
             return 0.0
         return float((quad.astype(bool) & mask).sum() / union)
 
-    def _warp_and_submit_ink(self, frame, warp_corners):
+    def _warp_and_submit_ink(self, frame, warp_corners, captured_at=None):
         """Warp + visibilidade + submissao a trabalhadora de tinta.
 
         Os cantos sao o quad que retifica ESTE warp, e a
@@ -368,6 +368,7 @@ class Pipeline:
                     warp_corners,
                     visible,
                     coverage,
+                    captured_at=captured_at,
                 )
             )
         else:
@@ -377,6 +378,7 @@ class Pipeline:
                     self.clean_generation,
                     warp_corners,
                     visible,
+                    captured_at=captured_at,
                 )
             )
 
@@ -620,7 +622,9 @@ class Pipeline:
             ink_corners = np.median(np.stack(self.corner_history), axis=0).astype(
                 np.float32
             )
-            self._warp_and_submit_ink(frame, ink_corners)
+            self._warp_and_submit_ink(
+                frame, ink_corners, captured_at=packet.captured_at
+            )
 
         return self.collect_ink()
 

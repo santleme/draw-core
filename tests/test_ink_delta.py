@@ -1,0 +1,214 @@
+"""InkDelta: o que a tinta confirmada ganhou, via PageCleanWorker.poll_delta.
+
+Canal aditivo ao poll(): mesma versao, sem mexer em cadencia nem voto.
+Passadas sincronas (pump) com relogio de cena; mapas de tinta roteirizados.
+"""
+
+import numpy as np
+import pytest
+
+from draw.contracts import InkDelta, WarpedPage
+from draw.ink import worker as worker_mod
+
+H, W = 40, 60
+STROKE_A = (slice(5, 8), slice(5, 25))
+STROKE_B = (slice(30, 33), slice(35, 55))
+
+
+class _Script:
+    threshold = 0.7
+
+    def __init__(self):
+        self.strokes = []
+
+    def ink_prob(self, _warped):
+        prob = np.zeros((H, W), np.float32)
+        for box in self.strokes:
+            prob[box] = 0.99
+        return prob
+
+
+class _Rig:
+    def __init__(self, monkeypatch=None, history=None, corners=None):
+        if history is not None:
+            monkeypatch.setattr(worker_mod, "_DELTA_HISTORY", history)
+        self.t = [100.0]
+        self.ink = _Script()
+        self.worker = worker_mod.PageCleanWorker(self.ink, clock=lambda: self.t[0])
+        self.generation = self.worker.new_generation()
+        self.corners = corners
+        self.frame_t = 0.0
+        self.version = 0
+
+    def step(self, *strokes):
+        """Uma passada com a lista de tracos visiveis."""
+        self.ink.strokes = list(strokes)
+        self.t[0] += 1.0
+        self.frame_t += 0.1
+        self.worker.submit(
+            WarpedPage(
+                np.zeros((H, W, 3), np.uint8),
+                self.generation,
+                self.corners,
+                captured_at=self.frame_t,
+            )
+        )
+        assert self.worker.pump()
+
+    def delta(self, after=None):
+        return self.worker.poll_delta(
+            self.generation, self.version if after is None else after
+        )
+
+
+def _published(rig):
+    snap = rig.worker.poll(rig.generation, -1)
+    return None if snap is None else snap.version
+
+
+def test_first_publication_of_a_generation_is_full():
+    rig = _Rig()
+    rig.step()
+    delta = rig.delta(after=-1)
+    assert isinstance(delta, InkDelta)
+    assert delta.full is True
+    assert delta.bbox is None and delta.mask.shape == (0, 0)
+    assert delta.page_grid == (H, W)
+    assert delta.generation == rig.generation
+
+
+def test_new_stroke_arrives_as_cropped_incremental_delta():
+    rig = _Rig()
+    rig.step()
+    rig.version = _published(rig)
+    rig.step(STROKE_A)
+    assert rig.delta() is None  # 1a passada: ainda so provisoria
+    rig.step(STROKE_A)  # 2a passada forte confirma
+    delta = rig.delta()
+    assert delta is not None and delta.full is False
+    assert delta.bbox == (5, 8, 5, 25)
+    assert delta.mask.shape == (3, 20) and (delta.mask == 255).all()
+    assert delta.since_version == rig.version
+    assert delta.version == _published(rig)
+    assert delta.removed_px == 0
+    assert delta.captured_at == pytest.approx(rig.frame_t)
+    assert delta.mm_per_px is None or delta.mm_per_px > 0
+    assert not delta.mask.flags.writeable
+
+
+def test_nothing_new_returns_none_and_consumer_catches_up():
+    rig = _Rig()
+    rig.step()
+    rig.step(STROKE_A)
+    rig.step(STROKE_A)
+    latest = _published(rig)
+    assert rig.worker.poll_delta(rig.generation, latest) is None
+
+
+def test_lagging_consumer_gets_the_merged_union_of_deltas():
+    rig = _Rig()
+    rig.step()
+    rig.version = _published(rig)
+    rig.step(STROKE_A)
+    rig.step(STROKE_A)
+    rig.step(STROKE_A, STROKE_B)
+    rig.step(STROKE_A, STROKE_B)
+    delta = rig.delta()  # nunca consumiu entre as duas confirmacoes
+    assert delta.full is False
+    assert delta.bbox == (5, 33, 5, 55)
+    canvas = np.zeros((H, W), bool)
+    y0, y1, x0, x1 = delta.bbox
+    canvas[y0:y1, x0:x1] = delta.mask > 0
+    expected = np.zeros((H, W), bool)
+    expected[STROKE_A] = expected[STROKE_B] = True
+    assert (canvas == expected).all()
+
+
+def test_history_overflow_degrades_to_full_replace(monkeypatch):
+    rig = _Rig(monkeypatch, history=1)
+    rig.step()
+    rig.version = _published(rig)
+    rig.step(STROKE_A)
+    rig.step(STROKE_A)
+    rig.step(STROKE_A, STROKE_B)
+    rig.step(STROKE_A, STROKE_B)
+    delta = rig.delta()
+    assert delta.full is True
+    assert delta.bbox == (5, 33, 5, 55)
+
+
+def test_removed_ink_makes_the_interval_full():
+    rig = _Rig()
+    worker, gen = rig.worker, rig.generation
+    canvas = np.zeros((H, W), np.uint8)
+    canvas[STROKE_A] = 255
+    shrunk = canvas.copy()
+    shrunk[5:6, 5:25] = 0  # uma linha do traco sumiu
+    for version, mask in ((1, canvas), (2, shrunk)):
+        worker._version = version
+        worker._published = (gen, version, mask)
+        worker._record_delta(gen, mask, 0.1 * version)
+    delta = worker.poll_delta(gen, 1)
+    assert delta.full is True
+    assert delta.removed_px == 20
+    assert delta.bbox == (6, 8, 5, 25)  # o canvas inteiro que sobrou
+    assert delta.captured_at == pytest.approx(0.2)
+
+
+def test_new_generation_restarts_with_a_full_delta():
+    rig = _Rig()
+    rig.step()
+    rig.step(STROKE_A)
+    rig.step(STROKE_A)
+    old = rig.generation
+    rig.generation = rig.worker.new_generation()
+    assert rig.worker.poll_delta(old, -1) is None  # geracao morta
+    rig.step(STROKE_B)
+    rig.step(STROKE_B)
+    delta = rig.worker.poll_delta(rig.generation, -1)
+    assert delta.full is True
+    assert delta.generation == rig.generation
+    assert delta.bbox is not None and delta.bbox[0] >= 30  # sem a tinta velha
+
+
+def test_anchor_corners_travel_with_the_delta():
+    corners = np.array([[0, 0], [W - 1, 0], [W - 1, H - 1], [0, H - 1]], np.float32)
+    rig = _Rig(corners=corners)
+    rig.step()
+    delta = rig.delta(after=-1)
+    assert delta.anchor_corners is not None
+    assert delta.anchor_corners.shape == (4, 2)
+    assert np.allclose(delta.anchor_corners, corners)
+
+
+def test_poll_is_untouched_by_delta_bookkeeping():
+    rig = _Rig()
+    rig.step()
+    rig.step(STROKE_A)
+    rig.step(STROKE_A)
+    snap = rig.worker.poll(rig.generation, -1)
+    assert snap.confirmed.shape == (H, W)
+    assert (snap.confirmed[STROKE_A] == 255).all()
+
+
+def test_contract_validation():
+    with pytest.raises(ValueError):
+        WarpedPage(np.zeros((H, W, 3), np.uint8), 0, captured_at=float("nan"))
+    assert WarpedPage(np.zeros((H, W, 3), np.uint8), 0).captured_at is None
+    base = dict(
+        generation=0,
+        since_version=0,
+        version=1,
+        captured_at=None,
+        page_grid=(H, W),
+        mm_per_px=None,
+        anchor_corners=None,
+        removed_px=0,
+        full=False,
+    )
+    with pytest.raises(ValueError):
+        InkDelta(bbox=(0, 2, 0, 2), mask=np.zeros((3, 3), np.uint8), **base)
+    with pytest.raises(ValueError):
+        InkDelta(bbox=None, mask=np.zeros((2, 2), np.uint8), **base)
+    ok = InkDelta(bbox=None, mask=np.zeros((0, 0), np.uint8), **base)
+    assert ok.bbox is None
