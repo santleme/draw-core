@@ -1745,7 +1745,8 @@ def main():
         "--stream-record",
         default=None,
         metavar="ARQUIVO",
-        help="grava o stream de tinta (mesmos bytes do socket) para replay",
+        help="grava o stream de tinta (mesma gramatica do socket, arquivo "
+        "privado 0600) para replay",
     )
     parser.add_argument(
         "--markers",
@@ -1907,6 +1908,10 @@ def main():
             )
         ink_config = dataclasses.replace(ink_config, hysteresis=True)
     pipeline_config = PipelineConfig(ink=ink_config, ink_auto_gain=args.ink_gain)
+    if args.stream_port is not None and not args.stream_token_file:
+        parser.error("--stream-port exige --stream-token-file")
+    if args.markers and (args.stream_port is not None or args.stream_record):
+        parser.error("--stream-port/--stream-record nao existem com --markers")
     if args.check:
         parsed = parse_source(args.source)
         sys.exit(run_check(parsed, helper_token_file=args.helper_token_file))
@@ -1929,10 +1934,6 @@ def main():
         page_clean_model = None  # padrao: models/page_clean_unet.onnx
     if hand_model is not None and not hand_model:
         hand_model = None  # padrao: models/hand_landmarker.task
-    if args.stream_port is not None and not args.stream_token_file:
-        parser.error("--stream-port exige --stream-token-file")
-    if args.markers and (args.stream_port is not None or args.stream_record):
-        parser.error("--stream-port/--stream-record nao existem com --markers")
     try:
         run(
             source=args.source,

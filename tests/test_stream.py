@@ -395,7 +395,8 @@ def test_clear_bumps_generation_and_sends_empty_canvas():
         pub.close()
 
 
-def test_clear_before_any_publication_is_a_noop():
+def test_clear_before_any_publication_is_a_noop(monkeypatch):
+    monkeypatch.setattr(stream.InkStreamPublisher, "_send_loop", lambda self: None)
     pub = stream.InkStreamPublisher(port=0, token=TOKEN, log=lambda *_: None)
     try:
         pub.publish(contracts.InkPublication(-1, 0, None))
@@ -404,7 +405,9 @@ def test_clear_before_any_publication_is_a_noop():
         pub.close()
 
 
-def test_worker_generation_maps_to_monotonic_stream_generation():
+def test_worker_generation_maps_to_monotonic_stream_generation(monkeypatch):
+    # Sem thread de envio: _pending fica estavel e o teste nao corre contra ela.
+    monkeypatch.setattr(stream.InkStreamPublisher, "_send_loop", lambda self: None)
     pub = stream.InkStreamPublisher(port=0, token=TOKEN, log=lambda *_: None)
     try:
         _pub(pub, 7, 1, _mask())
@@ -427,3 +430,38 @@ def test_reset_source_publishes_clear():
     pipe.corner_history = type("C", (), {"clear": lambda self: None})()
     pipe.reset_source(1.0)
     assert len(calls) == 1 and calls[0].confirmed is None
+
+
+def test_reconnect_at_capacity_does_not_evict_healthy_consumer(monkeypatch):
+    monkeypatch.setattr(stream, "MAX_CONSUMERS", 2)
+    pub = stream.InkStreamPublisher(port=0, token=TOKEN, log=lambda *_: None)
+    try:
+        healthy = _connect(pub.port)
+        gone = _connect(pub.port)
+        assert _wait(lambda: len(pub._sinks) == 2)
+        gone.close()
+        time.sleep(0.05)
+        again = _connect(pub.port)  # reconecta antes da poda periodica
+        assert _wait(lambda: len(pub._sinks) == 2)
+        healthy.settimeout(0.3)
+        with pytest.raises(TimeoutError):
+            healthy.recv(1)  # segue aberto, sem EOF
+        healthy.close()
+        again.close()
+    finally:
+        pub.close()
+
+
+def test_close_reports_recording_flush_failure(tmp_path):
+    messages = []
+    pub = stream.InkStreamPublisher(
+        port=None, record_path=tmp_path / "x.drawink", log=messages.append
+    )
+    sink = pub._sinks[0]
+
+    def boom():
+        raise OSError("flush falhou")
+
+    sink.close = boom
+    pub.close()
+    assert any("falha ao fechar" in m for m in messages)

@@ -217,11 +217,12 @@ def _socket_alive(conn):
         return False
 
 
-def _safe_close(sink):
+def _safe_close(sink, log=None):
     try:
         sink.close()
-    except (OSError, ValueError):
-        pass
+    except (OSError, ValueError) as error:
+        if log is not None:
+            log(f"Stream de tinta: falha ao fechar destino ({error}).")
 
 
 class InkStreamPublisher:
@@ -298,7 +299,10 @@ class InkStreamPublisher:
         # 0600: a tinta gravada nao pode depender do token do socket.
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         try:
-            os.fchmod(fd, 0o600)
+            if hasattr(os, "fchmod"):  # ausente no Windows nativo
+                os.fchmod(fd, 0o600)
+            else:
+                os.chmod(path, 0o600)
             handle = os.fdopen(fd, "wb")
         except BaseException:
             os.close(fd)
@@ -345,7 +349,8 @@ class InkStreamPublisher:
         with self._sinks_lock:
             sinks, self._sinks = self._sinks, []
         for sink in sinks:
-            _safe_close(sink)
+            # No encerramento, perda de gravacao nao pode ser silenciosa.
+            _safe_close(sink, self._log)
 
     def _accept_loop(self):
         while not self._closed:
@@ -378,6 +383,9 @@ class InkStreamPublisher:
         sink = _Sink(
             conn.sendall, conn.close, lambda: _socket_alive(conn), is_socket=True
         )
+        # Poda os mortos ANTES de contar: quem acabou de reconectar nao pode
+        # custar a vaga de um consumidor saudavel.
+        self._prune_dead()
         evicted = []
         with self._sinks_lock:
             self._sinks.append(sink)
@@ -389,7 +397,6 @@ class InkStreamPublisher:
                 evicted.append(oldest)
         for old in evicted:
             _safe_close(old)
-        self._prune_dead()
         # Consumidor novo recebe FULL da última publicação mesmo parada.
         with self._cond:
             self._cond.notify()

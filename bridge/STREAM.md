@@ -16,7 +16,10 @@ Não confundir com o [PROTOCOL.md](PROTOCOL.md): aquele leva JPEG da câmera
 - Sem consumidor, consumidor lento ou conexão caída: o laço não espera. Um
   envio que passa de 2 s derruba o consumidor; consumidor que fechou é
   podado mesmo com a tinta parada.
-- No encerramento limpo, a última publicação pendente ainda é despachada.
+- No encerramento limpo, a última publicação pendente ainda é despachada, e
+  falha ao fechar a gravação é registrada no log (não é silenciosa).
+- O consumidor só lê: o Draw trata fechar a conexão, inclusive só o lado de
+  escrita (`shutdown(SHUT_WR)`), como desconexão.
 - Desligado por padrão. Ligar: `--stream-port PORTA --stream-token-file ARQ`
   (sem env `DRAW_*`). `--stream-record ARQ` grava o fluxo num arquivo `0600`;
   sozinho (sem porta) não abre socket e não pede token. Não existe com
