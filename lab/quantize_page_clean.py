@@ -17,8 +17,8 @@ Receita medida em 2026-11-20 (draw-lab/bench-3b/RESULTADO.md, Ryzen 7
 
 Calibracao: as paginas retificadas que o page_clean recebe ao vivo,
 capturadas no replay dos clipes da mesa (bench-clips, preset
-ganho+pauta+histerese), 10 por clipe em intervalos iguais; os
-indices pares calibram (os impares ficam para a bancada de tempo).
+ganho+pauta+histerese), 10 por clipe espalhadas pelo clipe inteiro;
+os indices pares calibram (os impares ficam para a bancada de tempo).
 Esses clipes sao gravacoes proprias da camera do autor — disjuntos do
 holdout-v1 (school-notebooks-test) e das paginas em branco do portao
 de FP (school-notebooks train/val): sem hash em comum e
@@ -59,6 +59,7 @@ def capture_pages(clips_dir, out_dir, src_model):
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     models = _REPO_ROOT / "models"
+    written = []
     pages = []
     original = PageCleanInk.ink_prob
 
@@ -85,22 +86,32 @@ def capture_pages(clips_dir, out_dir, src_model):
                 page_clean=ink,
                 verify=None,
             )
-            step = max(1, len(pages) // _PAGES_PER_CLIP)
-            pick = pages[::step][:_PAGES_PER_CLIP]
-            np.savez_compressed(out_dir / f"{clip.name}.npz", *pick)
+            # Espalhadas pelo clipe inteiro: pages[::step][:10] ficava so
+            # com o comeco dos clipes longos (19 passadas -> as 10 primeiras).
+            count = min(_PAGES_PER_CLIP, len(pages))
+            index = np.unique(np.linspace(0, len(pages) - 1, count).round().astype(int))
+            pick = [pages[i] for i in index]
+            path = out_dir / f"{clip.name}.npz"
+            np.savez_compressed(path, *pick)
+            written.append(path)
             print(f"{clip.name}: {len(pages)} passadas -> {len(pick)} paginas")
     finally:
         PageCleanInk.ink_prob = original
-    return out_dir
+    # So os arquivos desta captura: um cache reaproveitado pode ter
+    # clipes que sairam do corpus.
+    return written
 
 
-def load_pages(pages_dir):
+def load_pages(paths):
+    """Paginas de uma lista de .npz, ou de todos os .npz de uma pasta."""
+    if isinstance(paths, (str, Path)):
+        paths = sorted(Path(paths).glob("*.npz"))
     pages = []
-    for path in sorted(Path(pages_dir).glob("*.npz")):
+    for path in paths:
         data = np.load(path)
         pages += [data[k] for k in data.files]
     if not pages:
-        raise SystemExit(f"nenhuma pagina .npz em {pages_dir}")
+        raise SystemExit("nenhuma pagina .npz de calibracao")
     return pages
 
 
@@ -127,6 +138,13 @@ def dynamic_side(src, dst):
             dims[index].dim_param = name
     # As formas intermediarias inferidas para 256 deixariam de valer.
     del model.graph.value_info[:]
+    # O quant_pre_process declara dominios que nenhum no usa
+    # (ai.onnx.ml 5, com.microsoft...). O ONNX Runtime 1.17 — o piso do
+    # pyproject — recusa o arquivo pelo ai.onnx.ml 5 (review do PR #66).
+    used = {node.domain for node in model.graph.node}
+    keep = [op for op in model.opset_import if op.domain in used or op.domain == ""]
+    del model.opset_import[:]
+    model.opset_import.extend(keep)
     onnx.checker.check_model(model)
     onnx.save(model, str(dst))
 
@@ -142,6 +160,12 @@ def quantize(src, pages, dst):
     from onnxruntime.quantization.shape_inference import quant_pre_process
 
     calibration = pages[::2]
+    # Lote que nao divide o total de blocos: no ORT 1.23, um ultimo lote
+    # vazio faz o calibrador falhar com "No data is collected".
+    total = sum(len(tiles(p)) for p in calibration)
+    chunk = 16
+    while total % chunk == 0:
+        chunk += 1
 
     class Reader(CalibrationDataReader):
         # Um bloco por vez: MinMax e incremental, nada fica acumulado.
@@ -164,6 +188,10 @@ def quantize(src, pages, dst):
             activation_type=QuantType.QUInt8,
             weight_type=QuantType.QInt8,
             calibrate_method=CalibrationMethod.MinMax,
+            # O calibrador guarda as saidas intermediarias de todos os
+            # blocos ate o fim; a cada `chunk` ele funde min/max (o
+            # resultado do MinMax e o mesmo) e a memoria fica limitada.
+            extra_options={"CalibMaxIntermediateOutputs": chunk},
         )
         dynamic_side(fixed, dst)
     return len(calibration)
@@ -181,11 +209,13 @@ def main(argv=None):
     )
     args = parser.parse_args(argv)
 
-    pages_dir = args.pages
-    if args.clips:
-        cache = args.pages_cache or tempfile.mkdtemp(prefix="pc-pages-")
-        pages_dir = capture_pages(args.clips, cache, args.src)
-    pages = load_pages(pages_dir)
+    if args.pages:
+        pages = load_pages(args.pages)
+    elif args.pages_cache:
+        pages = load_pages(capture_pages(args.clips, args.pages_cache, args.src))
+    else:
+        with tempfile.TemporaryDirectory(prefix="pc-pages-") as cache:
+            pages = load_pages(capture_pages(args.clips, cache, args.src))
     used = quantize(args.src, pages, args.out)
     data = Path(args.out).read_bytes()
     print(

@@ -13,19 +13,19 @@
       "sha256": "fbc2a30080c3c557093b5ddfc334698132eb341044ccee322ccf8bcf3607cde1"
     },
     "page_clean_unet.onnx": {
-      "approved_by": "round-v2 INT8 de pagina inteira (lab/quantize_page_clean.py, 2026-11-20): os pesos do round-v2 (22a883f5, models-v2) em QDQ estatico — pesos QInt8 por canal, ativacoes QUInt8, calibracao MinMax em 20 paginas retificadas dos bench-clips (gravacoes proprias, disjuntas do holdout-v1 e das paginas em branco: nenhum hash em comum, similaridade max 0,46) — com altura/largura dinamicas: o page_clean roda a pagina inteira numa chamada (padding ate multiplo de 8), sem mosaico de 256. Regua selada (eval local, verify=None, t=0,97): holdout-v1 macro IoU 0,8803 vs 0,8700 do incumbente fp32 em mosaico (+0,010; P 0,9492 vs 0,9498, R 0,9265 vs 0,9148, traco fino 0,9228 vs 0,9105); FP em mesa vazia 0,0362% vs 0,0425% (gate 5e-4). Passada 92 ms vs 223 ms (Ryzen 7700X, 4 threads); bench_ink nos 4 bench-clips (ganho+pauta+histerese): canvas +-1%, CPU por segundo de cena -43%. Incumbente fp32 (22a883f5) segue na release models-v2; reversao = restaurar o arquivo e esta entrada.",
-      "bytes": 525390,
+      "approved_by": "round-v2 INT8 de pagina inteira (lab/quantize_page_clean.py, 2026-11-20): os pesos do round-v2 (22a883f5, models-v2) em QDQ estatico — pesos QInt8 por canal, ativacoes QUInt8, calibracao MinMax em 20 paginas retificadas dos bench-clips (espalhadas por cada clipe) (gravacoes proprias, disjuntas do holdout-v1 e das paginas em branco: nenhum hash em comum, similaridade max 0,46) — com altura/largura dinamicas: o page_clean roda a pagina inteira numa chamada (padding ate multiplo de 8), sem mosaico de 256. Regua selada (eval local, verify=None, t=0,97): holdout-v1 macro IoU 0,8799 vs 0,8700 do incumbente fp32 em mosaico (+0,010; P 0,9502 vs 0,9498, R 0,9251 vs 0,9148, traco fino 0,9213 vs 0,9105); FP em mesa vazia 0,0348% vs 0,0425% (gate 5e-4). So o dominio ai.onnx 17 declarado: carrega no onnxruntime 1.17.3 (piso do pyproject). Passada 89 ms vs 234 ms (Ryzen 7700X, 4 threads); bench_ink nos 4 bench-clips (ganho+pauta+histerese): canvas +-1%, CPU por segundo de cena -43%. Incumbente fp32 (22a883f5) segue na release models-v2; reversao = restaurar o arquivo e esta entrada.",
+      "bytes": 525203,
       "date": "2026-11-20",
-      "sha256": "d9d3737aeb9645d575d778a6c47d89e53b6b54bb8fc25fc5079abc6fe9d60e2d",
+      "sha256": "78424a7a189ff0aa656b29c8856f7dc76066341411927dd8b7e3319021285fa0",
       "runtime_threshold": 0.97,
       "calibration": {
         "date": "2026-11-20",
-        "iou": 0.8803,
-        "thin_stroke_recall": 0.9228,
-        "empty_desk_fp_rate": 0.000362,
+        "iou": 0.8799,
+        "thin_stroke_recall": 0.9213,
+        "empty_desk_fp_rate": 0.000348,
         "n_pages": 36,
         "n_empty_desk_frames": 11,
-        "chosen": "Metricas deste bloco medidas no holdout-v1 (36 paginas, macro por sessao) + 11 paginas em branco — nao no corpus de calibracao de 30 paginas do round-v2 (iou 0,8835 la), entao nao compare os dois numeros. t=0.97 mantido do round-v2 para nao deslocar o ponto de operacao na troca de runtime (curva nos clipes reais: fracao > 0,97 muda 2,4%, > 0,90 muda 0,7%). Pela regra do menor limiar que passa o gate FP <= 5e-4, este binario aceitaria t=0.96 (IoU 0,8844, FP 0,0437%): fica para uma troca de limiar propria."
+        "chosen": "Metricas deste bloco medidas no holdout-v1 (36 paginas, macro por sessao) + 11 paginas em branco — nao no corpus de calibracao de 30 paginas do round-v2 (iou 0,8835 la), entao nao compare os dois numeros. t=0.97 mantido do round-v2 para nao deslocar o ponto de operacao na troca de runtime (curva nos clipes reais: fracao > 0,97 muda 1,2%, > 0,90 muda 1,8%). Pela regra do menor limiar que passa o gate FP <= 5e-4, este binario aceitaria t=0.96 (IoU 0,8844, FP 0,0437%): fica para uma troca de limiar propria."
       }
     }
   },
