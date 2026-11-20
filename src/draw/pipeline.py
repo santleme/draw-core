@@ -542,10 +542,13 @@ class Pipeline:
         if ran_detection and self._detect_wake is not None:
             ref_frame = None
             if self._detect_wake_frames is not None and det_captured_at is not None:
-                for ts, submitted in reversed(self._detect_wake_frames):
+                while (
+                    self._detect_wake_frames
+                    and self._detect_wake_frames[0][0] <= det_captured_at + 1e-6
+                ):
+                    ts, submitted = self._detect_wake_frames.popleft()
                     if abs(ts - det_captured_at) < 1e-6:
                         ref_frame = submitted
-                        break
             if ref_frame is not None:
                 self._detect_wake.on_detection(
                     self.tracker.corners,
@@ -632,6 +635,7 @@ class Pipeline:
                 else None
             )
             if hp_result is not None:
+                prev_hand_present = self.clean_hand_present
                 (
                     self.hand_presence_seq,
                     self.clean_hand_present,
@@ -643,15 +647,15 @@ class Pipeline:
                 )
                 if (
                     self.clean_hand_present is False
+                    and prev_hand_present is not False
                     and self._detect_wake is not None
                     and self._detect_wake.settled
                     and self._hand_mask_det is not None
                     and np.any(self._hand_mask_det)
                 ):
-                    # A mao saiu enquanto o detector dormia com uma mascara
-                    # de mao velha: acorda o detector para renovar
-                    # _hand_mask_det antes de a tinta gastar a passada de
-                    # confirmacao mascarada.
+                    # Transicao para mao ausente enquanto o detector dormia
+                    # com mascara de mao velha: acorda uma vez para renovar
+                    # _hand_mask_det antes da passada de confirmacao.
                     self._detect_wake.wake()
         # Quad de EXIBICAO (T9): em quadro com resultado de
         # deteccao, o exibido e o confirmado; nos demais,
