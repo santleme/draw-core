@@ -58,9 +58,23 @@ def filter_microfragments(ink, min_area=4):
 # ------------------------------------------------------- afinamento (ZS)
 
 
-def zhang_suen_thin(ink):
-    """Esqueleto de 1 px por Zhang-Suen vetorizado (sem cv2.ximgproc)."""
+def zhang_suen_thin(ink, *, native=False):
+    """Esqueleto de 1 px por Zhang-Suen vetorizado (sem cv2.ximgproc).
+
+    native=True usa o cv2.ximgproc.thinning (C++, ~10x mais rapido num
+    canvas A4) quando existir; o padrao segue em numpy porque a saida NAO e
+    identica: difere em dezenas de pixels num canvas real (2 e 34 px de ~20 mil
+    medidos) e muito mais em manchas cheias. Quem liga aceita esse delta.
+    """
     src = ink.astype(np.uint8)
+    if native and hasattr(cv2, "ximgproc"):
+        skel = (
+            cv2.ximgproc.thinning(
+                src * 255, thinningType=cv2.ximgproc.THINNING_ZHANGSUEN
+            )
+            > 0
+        )
+        return _keep_component_pixel(src, skel)
     img = src.copy()
     changed = True
     while changed:
@@ -154,6 +168,37 @@ def _degree(skel):
     return (deg * skel_u8).astype(np.int32)
 
 
+def _index_node_components(labels, n_nodes):
+    """Pixels e centroide de cada no, numa unica passada O(H*W).
+
+    Antes: `np.nonzero(labels == nid)` por no varria a imagem inteira
+    (1 M px) uma vez por no — ~2,8 mil nos custavam ~2,7 s num canvas real.
+    Mesma saida (centroides e pixels em ordem de varredura), ~46x mais rapido.
+    """
+    labels_flat = labels.ravel()
+    width = labels.shape[1]
+    nz_flat = np.flatnonzero(labels_flat)
+    if len(nz_flat) == 0 or n_nodes <= 1:
+        return {}, {}
+    lbl_vals = labels_flat[nz_flat]
+    order = np.argsort(lbl_vals, kind="stable")
+    sorted_flat = nz_flat[order]
+    sorted_lbl = lbl_vals[order]
+    counts = np.bincount(sorted_lbl, minlength=n_nodes)
+    splits = np.cumsum(counts)
+    sum_x = np.bincount(sorted_lbl, weights=sorted_flat % width, minlength=n_nodes)
+    sum_y = np.bincount(sorted_lbl, weights=sorted_flat // width, minlength=n_nodes)
+    anchors = {}
+    node_pixels = {}
+    for nid in range(1, n_nodes):
+        count = int(counts[nid])
+        if count == 0:
+            continue
+        anchors[nid] = (float(sum_x[nid] / count), float(sum_y[nid] / count))
+        node_pixels[nid] = sorted_flat[int(splits[nid - 1]) : int(splits[nid])].tolist()
+    return anchors, node_pixels
+
+
 def trace_polylines(skel):
     """Esqueleto -> polilinhas de centro ({points Nx2 (x,y) px, closed})."""
     height, width = skel.shape
@@ -165,16 +210,7 @@ def trace_polylines(skel):
     labels_flat = labels.ravel()
     skel_flat = skel.ravel()
 
-    anchors = {}
-    node_pixels = {}
-    for nid in range(1, n_nodes):
-        ys, xs = np.nonzero(labels == nid)
-        if len(xs) == 0:
-            continue
-        anchors[nid] = (float(xs.mean()), float(ys.mean()))
-        node_pixels[nid] = [
-            int(y) * width + int(x) for y, x in zip(ys, xs, strict=False)
-        ]
+    anchors, node_pixels = _index_node_components(labels, n_nodes)
 
     def neighbors(flat_idx):
         y, x = divmod(flat_idx, width)

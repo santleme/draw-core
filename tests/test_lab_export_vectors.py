@@ -217,3 +217,61 @@ def test_main_landscape_png_writes_landscape_svg(tmp_path):
     assert proof["paper_mm"] == [297.0, 210.0]
     assert proof["iou_svg_roundtrip"] > 0.5
     assert proof["iou_dxf_roundtrip"] > 0.5
+
+
+# ------------------------------------------- trace O(H*W) e afinamento nativo
+
+
+def test_index_node_components_matches_the_naive_per_node_scan():
+    import cv2
+
+    from draw.exporters import export_vectors as ev
+
+    rng = np.random.default_rng(3)
+    mask = (rng.random((90, 130)) > 0.93).astype(np.uint8)
+    n, labels = cv2.connectedComponents(mask, connectivity=8)
+    anchors, pixels = ev._index_node_components(labels, n)
+    width = labels.shape[1]
+    for nid in range(1, n):
+        ys, xs = np.nonzero(labels == nid)
+        assert anchors[nid] == (float(xs.mean()), float(ys.mean()))
+        assert pixels[nid] == [
+            int(y) * width + int(x) for y, x in zip(ys, xs, strict=True)
+        ]
+    assert set(anchors) == set(range(1, n))
+    assert ev._index_node_components(np.zeros((5, 5), np.int32), 1) == ({}, {})
+
+
+def test_trace_polylines_scales_with_nodes_not_nodes_times_page():
+    import time
+
+    from draw.exporters import export_vectors as ev
+
+    skel = np.zeros((1200, 850), bool)
+    for k in range(
+        3000
+    ):  # 3000 pontas/nos dispersos: o laco antigo varria 1 M px por no
+        y, x = (k // 50) * 20 + 3, (k % 50) * 16 + 3
+        skel[y, x : x + 3] = True
+    start = time.perf_counter()
+    lines = ev.trace_polylines(skel)
+    assert time.perf_counter() - start < 2.0
+    assert len(lines) >= 3000
+
+
+def test_native_thinning_is_opt_in_valid_and_close_to_numpy():
+    import cv2
+
+    from draw.exporters import export_vectors as ev
+
+    if not hasattr(cv2, "ximgproc"):
+        pytest.skip("cv2.ximgproc indisponivel")
+    ink = np.zeros((160, 220), np.uint8)
+    cv2.line(ink, (10, 20), (200, 120), 1, 5)
+    cv2.circle(ink, (110, 80), 40, 1, 4)
+    ink[150:152, 5:7] = 1  # componente minimo: precisa manter 1 px
+    default = ev.zhang_suen_thin(ink > 0)
+    native = ev.zhang_suen_thin(ink > 0, native=True)
+    assert not (native & ~(ink > 0)).any()
+    assert native[150:152, 5:7].any()
+    assert (native ^ default).sum() <= 0.05 * default.sum()
