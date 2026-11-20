@@ -318,6 +318,8 @@ class MotionGate:
                 if aligned is None:
                     return None
                 ref_tex, ref_vis, shift_px = aligned
+                if self._textured_blocks(ref_tex, ref_vis) < _MIN_BLOCKS:
+                    return None
             self._reference, self._reference_visible = ref_tex, ref_vis
             self._reference_anchor = anchor
             if shift_px > self.threshold_px:

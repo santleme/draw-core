@@ -538,7 +538,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 if (
                     moved
                     and self._config.pass_interval_s is not None
-                    and self._config.pass_interval_s >= _HAND_REST_STILL_SECONDS
+                    and self._config.pass_interval_s > _PAGE_CLEAN_INTERVAL_SECONDS
                 ):
                     self._quiet_passes = 0
             self._hand_state = present
@@ -1111,7 +1111,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     motion_matrix,
                     visible,
                     anchor,
-                    confirmed_ink=anchor_ink,
+                    confirmed_ink=None if first_pass else anchor_ink,
                     ink_prob=registered_prob,
                 )
                 unregistered = None

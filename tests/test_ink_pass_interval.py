@@ -73,13 +73,14 @@ def test_only_the_floor_changes_idle_and_rest_rules_stay(hand):
         assert tuned._pass_interval() is None
 
 
-def test_slow_cadence_movement_resets_quiet_streak():
-    # Com intervalo maior que _HAND_REST_STILL_SECONDS (ex.: 2 s), um
+@pytest.mark.parametrize("interval", [0.9, 2.0])
+def test_slow_cadence_movement_resets_quiet_streak(interval):
+    # Com intervalo mais lento que o piso de 0,25 s (ex.: 0,9 s ou 2 s), um
     # movimento breve da mao precisa zerar _quiet_passes para o worker
-    # nao voltar ao descanso antes da proxima passada agendada.
+    # nao voltar ao descanso antes de confirmar um traco curto.
     now = [100.0]
     worker = worker_mod.PageCleanWorker(
-        _NoModel(), config=InkConfig(pass_interval_s=2.0), clock=lambda: now[0]
+        _NoModel(), config=InkConfig(pass_interval_s=interval), clock=lambda: now[0]
     )
     worker.set_hand_presence(True, moved=True)
     worker._generation_passes = worker_mod._REST_MIN_GENERATION_PASSES
@@ -92,7 +93,7 @@ def test_slow_cadence_movement_resets_quiet_streak():
     worker.set_hand_presence(True, moved=True)
     now[0] += worker_mod._HAND_REST_STILL_SECONDS + 0.5
     assert not worker._at_rest()
-    assert worker._pass_interval() == 2.0
+    assert worker._pass_interval() == interval
 
 
 def test_explicit_default_cadence_preserves_rest_after_move_and_exit():
