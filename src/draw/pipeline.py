@@ -182,6 +182,8 @@ class Pipeline:
             deque(maxlen=16) if self._config.detect_wake else None
         )
         self._last_ink_submit_at = None
+        self._hand_exit_at = None
+        self._stale_hand_woke = False
         self.corner_history = deque(maxlen=_INK_CORNER_HISTORY)
         self.ink_session_open = False
         self.accumulated_canvas = None
@@ -469,6 +471,8 @@ class Pipeline:
         if detect_wake_frames is not None:
             detect_wake_frames.clear()
         self._last_ink_submit_at = None
+        self._hand_exit_at = None
+        self._stale_hand_woke = False
         self.corner_history.clear()
         self.display_corners = None
         self.display_gray = None
@@ -505,6 +509,26 @@ class Pipeline:
             # limpa a evidência velha em vez de deixar oclusão
             # defasada.
             self._hand_mask_det = det_result.hand_mask
+            if (
+                self._detect_wake is not None
+                and self.clean_hand_present is False
+                and not self._stale_hand_woke
+                and self._hand_mask_det is not None
+                and np.any(self._hand_mask_det)
+                and self._hand_exit_at is not None
+                and det_captured_at is not None
+                and det_captured_at < self._hand_exit_at
+            ):
+                # Heartbeat capturado ANTES de a mao sair chegou atrasado
+                # com mascara de mao velha: descarta a mascara defasada e
+                # acorda o detector uma unica vez neste episodio de ausencia.
+                self._hand_mask_det = None
+                self._stale_hand_woke = True
+                self._detect_wake.wake()
+                # Re-arma a confirmacao caso a trabalhadora ja tenha gasto
+                # a passada de confirmacao sob mascara velha e descansado.
+                self.ink_worker.set_hand_presence(True)
+                self.ink_worker.set_hand_presence(False)
             if self._config.coverage:
                 # A máscara de cobertura acompanha o quad que saiu
                 # dela — chegou junto, guarda junto; sem ela limpa
@@ -645,18 +669,25 @@ class Pipeline:
                     self.clean_hand_present,
                     moved=clean_hand_moved,
                 )
-                if (
-                    self.clean_hand_present is False
-                    and prev_hand_present is not False
-                    and self._detect_wake is not None
-                    and self._detect_wake.settled
-                    and self._hand_mask_det is not None
-                    and np.any(self._hand_mask_det)
-                ):
-                    # Transicao para mao ausente enquanto o detector dormia
-                    # com mascara de mao velha: acorda uma vez para renovar
-                    # _hand_mask_det antes da passada de confirmacao.
-                    self._detect_wake.wake()
+                if self.clean_hand_present is False:
+                    if prev_hand_present is not False:
+                        self._hand_exit_at = packet.captured_at
+                        self._stale_hand_woke = False
+                    if (
+                        not self._stale_hand_woke
+                        and self._detect_wake is not None
+                        and self._detect_wake.settled
+                        and self._hand_mask_det is not None
+                        and np.any(self._hand_mask_det)
+                    ):
+                        # Transicao para mao ausente enquanto o detector dormia
+                        # com mascara de mao velha: acorda uma vez para renovar
+                        # _hand_mask_det antes da passada de confirmacao.
+                        self._stale_hand_woke = True
+                        self._detect_wake.wake()
+                else:
+                    self._hand_exit_at = None
+                    self._stale_hand_woke = False
         # Quad de EXIBICAO (T9): em quadro com resultado de
         # deteccao, o exibido e o confirmado; nos demais,
         # propaga por LK sobre o cinza anterior. Falha de

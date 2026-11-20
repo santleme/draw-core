@@ -504,6 +504,134 @@ def test_hand_lift_with_stale_seg_hand_mask_wakes_detector_before_confirming():
     assert ink.submits == ink_before
 
 
+def test_late_masked_heartbeat_after_hand_lift_does_not_hide_finished_stroke():
+    # Regressao (review #69): um heartbeat capturado com a mao ainda sobre
+    # o traco retorna DEPOIS de o MediaPipe ja ter reportado ausencia da mao.
+    # A mascara defasada (capturada antes da saida da mao) e descartada e o
+    # detector acorda uma vez; o traco exposto chega ao canvas confirmado no
+    # PageCleanWorker real sem precisar de outro movimento da mao.
+    from draw.ink.config import InkConfig
+    from draw.ink.worker import PageCleanWorker
+
+    class _DarkIsInk:
+        threshold = 0.5
+
+        def ink_prob(self, warped):
+            gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
+            return ((255.0 - gray) / 255.0).astype(np.float32)
+
+    hand_blob = np.zeros((480, 640), dtype=np.uint8)
+    hand_blob[200:280, 260:380] = 255
+
+    class _ManualDet:
+        error = None
+
+        def __init__(self):
+            self.submits = 0
+            self._seq = 0
+            self.queued = None
+
+        def submit(self, frame, captured_at, frame_index=None):
+            self.submits += 1
+            self._seq += 1
+            self.queued = contracts.DetectionResult(
+                sequence=self._seq,
+                corners=BASE_CORNERS.copy(),
+                verdict="paper",
+                captured_at=captured_at,
+                detect_ms=10.0,
+                hand_mask=None,
+            )
+
+        def poll(self, after_seq):
+            if self.queued is not None and self.queued.sequence > after_seq:
+                return self.queued
+            return None
+
+        def take_traces(self, upto_result_seq=None):
+            return []
+
+    class _ManualHand:
+        error = None
+
+        def __init__(self):
+            self._seq = 0
+            self.state = None
+
+        def submit(self, *_a, **_kw):
+            return None
+
+        def poll(self, after_seq):
+            if self.state is not None and self._seq > after_seq:
+                return (self._seq, self.state, False)
+            return None
+
+    now = [100.0]
+    det = _ManualDet()
+    hand = _ManualHand()
+    ink_worker = PageCleanWorker(
+        _DarkIsInk(),
+        config=InkConfig(pass_interval_s=0.15),
+        clock=lambda: now[0],
+    )
+    pipe = pipeline.Pipeline(
+        detection_worker=det,
+        ink_worker=ink_worker,
+        hand_presence_worker=hand,
+        config=PipelineConfig(
+            ink=InkConfig(pass_interval_s=0.15),
+            detect_wake=True,
+            detect_wake_interval_s=1.0,
+        ),
+        clock=lambda: now[0],
+    )
+    still = _sheet_frame(BASE_CORNERS)
+    # 1) Assenta folha limpa
+    for seq in range(16):
+        pipe.step(contracts.FramePacket(still, now[0], seq))
+        ink_worker.pump()
+        now[0] += 0.2
+    assert pipe._detect_wake.settled
+
+    # 2) Usuario escreve um traco no centro da folha sob a regiao do hand_blob
+    with_stroke = still.copy()
+    cv2.line(with_stroke, (280, 240), (360, 240), (15, 15, 15), 6)
+    # 1o voto limpo ja com a mao saindo -> MediaPipe reporta ausencia ANTES
+    # do heartbeat atrasado chegar com hand_blob.
+    pre_exit_ts = now[0] - 0.1
+    hand._seq += 1
+    hand.state = False
+    pipe.step(contracts.FramePacket(with_stroke, now[0], 16))
+    ink_worker.pump()
+    now[0] += 0.2
+
+    # 3) Heartbeat atrasado (capturado em pre_exit_ts < hand_exit_at) chega
+    # carregando hand_blob sobre o traco. A mascara velha precisa ser
+    # descartada para a passada de confirmacao confirmar o traco!
+    det._seq += 1
+    det.queued = contracts.DetectionResult(
+        sequence=det._seq,
+        corners=BASE_CORNERS.copy(),
+        verdict="paper",
+        captured_at=pre_exit_ts,
+        detect_ms=10.0,
+        hand_mask=hand_blob.copy(),
+    )
+    pipe.step(contracts.FramePacket(with_stroke, now[0], 17))
+    ink_worker.pump()
+    now[0] += 0.2
+    pipe.collect_ink()
+
+    # Roda mais uma passada limpa (detector acordou) para fechar a confirmacao
+    for seq in (18, 19, 20):
+        pipe.step(contracts.FramePacket(with_stroke, now[0], seq))
+        ink_worker.pump()
+        now[0] += 0.2
+    pipe.collect_ink()
+    assert pipe.clean_mask is not None
+    assert int(np.count_nonzero(pipe.clean_mask)) > 0
+
+
 def test_cli_flag_and_config_validation(monkeypatch):
     with pytest.raises(ValueError):
         PipelineConfig(detect_wake_interval_s=0.0)
