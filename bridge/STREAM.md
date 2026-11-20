@@ -21,7 +21,8 @@ Não confundir com o [PROTOCOL.md](PROTOCOL.md): aquele leva JPEG da câmera
 - O consumidor só lê: o Draw trata fechar a conexão, inclusive só o lado de
   escrita (`shutdown(SHUT_WR)`), como desconexão.
 - Desligado por padrão. Ligar: `--stream-port PORTA --stream-token-file ARQ`
-  (sem env `DRAW_*`). `--stream-record ARQ` grava o fluxo num arquivo `0600`;
+  (sem env `DRAW_*`). `--stream-record ARQ` grava o fluxo num arquivo `0600` (recusado onde não há
+  `os.fchmod`, i.e. Windows nativo: grave de dentro do WSL);
   sozinho (sem porta) não abre socket e não pede token. Não existe com
   `--markers`.
 - Limites: até 8 handshakes simultâneos (o excedente é recusado sem thread) e

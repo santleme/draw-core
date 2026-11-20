@@ -434,15 +434,22 @@ def test_reset_source_publishes_clear():
 
 def test_reconnect_at_capacity_does_not_evict_healthy_consumer(monkeypatch):
     monkeypatch.setattr(stream, "MAX_CONSUMERS", 2)
+    # Sem a thread de envio nao ha poda periodica: so a poda do _adopt age,
+    # e o teste fica deterministico.
+    monkeypatch.setattr(stream.InkStreamPublisher, "_send_loop", lambda self: None)
     pub = stream.InkStreamPublisher(port=0, token=TOKEN, log=lambda *_: None)
     try:
         healthy = _connect(pub.port)
+        assert _wait(lambda: len(pub._sinks) == 1)
+        healthy_sink = pub._sinks[0]
         gone = _connect(pub.port)
         assert _wait(lambda: len(pub._sinks) == 2)
+        gone_sink = pub._sinks[1]
         gone.close()
         time.sleep(0.05)
-        again = _connect(pub.port)  # reconecta antes da poda periodica
-        assert _wait(lambda: len(pub._sinks) == 2)
+        again = _connect(pub.port)
+        assert _wait(lambda: gone_sink not in pub._sinks and len(pub._sinks) == 2)
+        assert healthy_sink in pub._sinks and len(pub._sinks) == 2
         healthy.settimeout(0.3)
         with pytest.raises(TimeoutError):
             healthy.recv(1)  # segue aberto, sem EOF
@@ -450,6 +457,14 @@ def test_reconnect_at_capacity_does_not_evict_healthy_consumer(monkeypatch):
         again.close()
     finally:
         pub.close()
+
+
+def test_recording_refused_without_private_files(monkeypatch, tmp_path):
+    monkeypatch.setattr(stream, "_PRIVATE_FILES", False)
+    path = tmp_path / "w.drawink"
+    with pytest.raises(RuntimeError, match="privada"):
+        stream.InkStreamPublisher(port=None, record_path=path, log=lambda *_: None)
+    assert not path.exists()
 
 
 def test_close_reports_recording_flush_failure(tmp_path):

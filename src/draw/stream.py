@@ -47,6 +47,7 @@ SEND_TIMEOUT_S = 2.0
 # autenticados: o excedente e fechado, o laco do Draw nunca paga por isso.
 MAX_PENDING_HANDSHAKES = 8
 MAX_CONSUMERS = 8
+_PRIVATE_FILES = hasattr(os, "fchmod")
 
 
 @dataclass(frozen=True, slots=True)
@@ -296,13 +297,17 @@ class InkStreamPublisher:
 
     @staticmethod
     def _open_record(path):
-        # 0600: a tinta gravada nao pode depender do token do socket.
+        # 0600: a tinta gravada nao pode depender do token do socket. Sem
+        # fchmod (Windows nativo) nao ha como garantir isso (chmod nao aplica
+        # ACL): recusa em vez de gravar a tinta legivel para outros usuarios.
+        if not _PRIVATE_FILES:
+            raise RuntimeError(
+                "gravacao privada do stream nao e garantida sem os.fchmod "
+                "(Windows nativo); grave de dentro do WSL"
+            )
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         try:
-            if hasattr(os, "fchmod"):  # ausente no Windows nativo
-                os.fchmod(fd, 0o600)
-            else:
-                os.chmod(path, 0o600)
+            os.fchmod(fd, 0o600)
             handle = os.fdopen(fd, "wb")
         except BaseException:
             os.close(fd)
