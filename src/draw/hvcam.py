@@ -3,8 +3,9 @@
 O hvcam é o transporte nativo para a webcam que mora no lado Windows:
 hvcam-host.exe captura por Media Foundation e serve o quadro mais novo
 por AF_HYPERV (vsock) na porta 8765 — sem IP, sem firewall, sem usbipd.
-Dentro do WSL o cliente fala vsock direto; fora dele, hvcam+tcp://host
-usa o fallback TCP do host.
+`hvcam://` conecta ao host (requer o serviço vsock registrado uma vez no
+Windows); `hvcam+reverse://` escuta no WSL para `hvcam-host.exe --reverse`
+e não requer registro; fora do WSL, `hvcam+tcp://host` usa TCP.
 
 O cliente ctypes abaixo é vendored de santleme/hvcam
 (bindings/python/hvcam.py). A libhvcam.so é um artefato do build do
@@ -20,6 +21,7 @@ LatestFrameCapture usa na telemetria.
 """
 
 import ctypes
+import errno
 import os
 from urllib.parse import urlparse
 
@@ -54,6 +56,7 @@ def _load():
     for cand in (
         os.path.join(here, "libhvcam.so"),
         os.path.join(here, "..", "..", "build", "libhvcam.so"),
+        os.path.expanduser("~/hvcam/build/libhvcam.so"),
         "libhvcam.so",
     ):
         try:
@@ -69,6 +72,13 @@ def _load():
         )
     lib.hvcam_connect.argtypes = [ctypes.c_uint32]
     lib.hvcam_connect.restype = ctypes.c_int
+    # Older builds can still use direct vsock/TCP. Reverse mode needs the
+    # listener symbol added by hvcam's no-admin connection path.
+    try:
+        lib.hvcam_listen.argtypes = [ctypes.c_uint32]
+        lib.hvcam_listen.restype = ctypes.c_int
+    except AttributeError:
+        pass
     lib.hvcam_connect_tcp.argtypes = [ctypes.c_char_p, ctypes.c_uint16]
     lib.hvcam_connect_tcp.restype = ctypes.c_int
     lib.hvcam_grab_next.argtypes = [
@@ -103,14 +113,39 @@ class Camera:
     repartida no ':' — que quebrava IPv6 (`[::1]` -> "::1:8765").
     """
 
-    def __init__(self, port=DEFAULT_PORT, host=None):
+    def __init__(self, port=DEFAULT_PORT, host=None, listen=False):
         lib = _lib()
+        if host is not None and listen:
+            raise ValueError("hvcam: listen mode cannot use a TCP host")
         if host is not None:
             self.fd = lib.hvcam_connect_tcp(host.encode(), port)
+        elif listen:
+            listen_fn = getattr(lib, "hvcam_listen", None)
+            if listen_fn is None:
+                raise OSError(
+                    "libhvcam.so sem hvcam_listen; reconstrua a biblioteca "
+                    "com a versao atual de santleme/hvcam"
+                )
+            self.fd = listen_fn(port)
         else:
             self.fd = lib.hvcam_connect(port)
         if self.fd < 0:
-            raise OSError(f"hvcam: connect failed ({self.fd})")
+            operation = "listen" if listen else "connect"
+            detail = f"hvcam: {operation} failed ({self.fd})"
+            if not listen and self.fd == -errno.ETIMEDOUT:
+                reverse_source = (
+                    "hvcam+reverse://"
+                    if port == DEFAULT_PORT
+                    else f"hvcam+reverse://:{port}"
+                )
+                detail += (
+                    "; timeout: hvcam-host.exe nao respondeu. No Windows, "
+                    f"inicie hvcam-host.exe --reverse --port {port} e use "
+                    f"--source {reverse_source} no Draw, ou registre o "
+                    "servico uma vez como administrador com "
+                    f"hvcam-host.exe --register-vsock --port {port}"
+                )
+            raise OSError(detail)
         self._buf = (ctypes.c_ubyte * _MAX_PAYLOAD)()
         self._hdr = HvFrameHeader()
         self._last = ctypes.c_uint64(0xFFFFFFFFFFFFFFFF)
@@ -209,29 +244,35 @@ class Camera:
 
 
 def is_hvcam_source(source):
-    """True para `hvcam://` (vsock) ou `hvcam+tcp://host` (TCP)."""
+    """True para fontes vsock, reverse-vsock ou TCP do hvcam."""
     if not isinstance(source, str):
         return False
     lower = source.strip().lower()
-    return lower.startswith("hvcam://") or lower.startswith("hvcam+tcp://")
+    return lower.startswith(("hvcam://", "hvcam+tcp://", "hvcam+reverse://"))
 
 
 def parse_hvcam_endpoint(source):
     """Extrai (host, porta) da URL hvcam. host None = vsock.
 
     `hvcam://` e `hvcam://:porta` falam vsock com o host Windows da
-    propria maquina (o vsock nao tem host — um hostname ali e erro de
-    digitacao). `hvcam+tcp://host[:porta]` usa o fallback TCP.
+    propria maquina; `hvcam+reverse://[:porta]` escuta por uma conexao
+    iniciada pelo hvcam-host. Vsock nao tem hostname. `hvcam+tcp://host[:porta]`
+    usa o fallback TCP.
     """
     text = source.strip()
     parsed = urlparse(text)
     port = parsed.port if parsed.port is not None else DEFAULT_PORT
     if port < 1:
         raise ValueError(f"porta hvcam invalida: {source!r}")
-    if text.lower().startswith("hvcam+tcp://"):
+    if parsed.scheme.lower() == "hvcam+tcp":
         if not parsed.hostname:
             raise ValueError(f"hvcam+tcp sem host: {source!r}")
         return parsed.hostname, port
+    if parsed.scheme.lower() == "hvcam+reverse" and parsed.hostname:
+        raise ValueError(
+            f"hvcam+reverse nao aceita host ({parsed.hostname!r}); "
+            "use hvcam:// para conexao direta"
+        )
     if parsed.hostname:
         raise ValueError(
             f"vsock nao tem host ({parsed.hostname!r}); para TCP use "
@@ -241,7 +282,7 @@ def parse_hvcam_endpoint(source):
 
 
 class HvcamCapture:
-    """Adaptador compativel com VideoCapture sobre hvcam://.
+    """Adaptador compativel com VideoCapture sobre fontes hvcam.
 
     Alem de read() -> (ok, frame), expoe last_frame_id,
     last_capture_ts_ms e source_dropped (saltos de seq do emissor)
@@ -271,11 +312,13 @@ class HvcamCapture:
             self.open_error = error
             return
         try:
-            self._cam = (
-                camera_factory(host=host, port=port)
-                if host is not None
-                else camera_factory(port=port)
-            )
+            scheme = urlparse(self.source).scheme.lower()
+            if host is not None:
+                self._cam = camera_factory(host=host, port=port)
+            elif scheme == "hvcam+reverse":
+                self._cam = camera_factory(port=port, listen=True)
+            else:
+                self._cam = camera_factory(port=port)
         except OSError as error:
             self._cam = None
             self.open_error = error

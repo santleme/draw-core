@@ -14,6 +14,7 @@ Uso:
   python -m draw --source tcp://192.168.0.10      # ajudante ao vivo
       --helper-token-file token.txt               # token do ajudante
   python -m draw --source hvcam://                # webcam do Windows via vsock
+  python -m draw --source hvcam+reverse://        # conexao sem registro/admin
   python -m draw --source hvcam+tcp://10.0.0.2    # idem, fallback TCP
 
 Sem nenhuma flag, o caminho e o de producao: folha pelo detector
@@ -31,6 +32,8 @@ enxerga webcams USB do Windows por padrao, mas enxerga streams de rede.
 A alternativa nativa e a fonte hvcam://, que puxa os quadros da webcam
 do Windows por Hyper-V socket (hvcam-host.exe, santleme/hvcam) — sem
 IP, sem firewall e sem usbipd.
+Para evitar o registro de servico do Windows, inicie `hvcam-host.exe
+--reverse` no Windows e rode o Draw com `--source hvcam+reverse://`.
 Assim todo o processamento (e o ML futuro) fica no Linux. A camera so
 envia os frames. Ela pode ser um celular, outro computador ou uma camera IP.
 
@@ -1718,7 +1721,8 @@ def main():
         help="indice da webcam local (0, 1...), URL do stream "
         "(ex.: http://192.168.0.10:8080/video), gravacao .drawcap, "
         "stream tcp://host[:porta] do ajudante ou camera do Windows "
-        "via hvcam:// (hvcam+tcp://host fora do WSL). Padrao: 0",
+        "via hvcam://, hvcam+reverse:// (com hvcam-host --reverse) "
+        "ou hvcam+tcp://host. Padrao: 0",
     )
     parser.add_argument(
         "--helper-token-file",

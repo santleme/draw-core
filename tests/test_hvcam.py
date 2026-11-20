@@ -8,6 +8,8 @@ o contrato read()/release() do adaptador e a fiacao de open_capture
 e _check_hvcam_source.
 """
 
+import errno
+
 import cv2
 import numpy as np
 import pytest
@@ -83,6 +85,7 @@ def _info(seq=1, ts_us=100_000):
         ("hvcam://", True),
         ("hvcam://:9100", True),
         ("hvcam+tcp://10.0.0.5", True),
+        ("hvcam+reverse://", True),
         ("HVCAM://", True),
         ("hvcam://10.0.0.5", True),  # prefixo casa; o host e recusado no parse
         ("tcp://10.0.0.5", False),
@@ -102,6 +105,8 @@ def test_is_hvcam_source(source, expected):
         ("hvcam://:9100", (None, 9100)),
         ("hvcam+tcp://10.0.0.5", ("10.0.0.5", 8765)),
         ("hvcam+tcp://10.0.0.5:9999", ("10.0.0.5", 9999)),
+        ("hvcam+reverse://", (None, 8765)),
+        ("hvcam+reverse://:9100", (None, 9100)),
     ],
 )
 def test_parse_hvcam_endpoint(url, expected):
@@ -113,6 +118,7 @@ def test_parse_hvcam_endpoint(url, expected):
     [
         "hvcam://10.0.0.5",  # vsock nao tem host
         "hvcam+tcp://",  # tcp sem host
+        "hvcam+reverse://10.0.0.5",  # reverse e listener sem hostname
         "hvcam://:0",
     ],
 )
@@ -138,6 +144,13 @@ def test_hvcam_capture_vsock_port_passed():
     seen = []
     HvcamCapture("hvcam://:9100", camera_factory=_factory(cam, seen))
     assert seen == [{"port": 9100}]
+
+
+def test_hvcam_capture_reverse_uses_listener():
+    cam = FakeCamera([])
+    seen = []
+    HvcamCapture("hvcam+reverse://:9100", camera_factory=_factory(cam, seen))
+    assert seen == [{"port": 9100, "listen": True}]
 
 
 def test_hvcam_capture_tcp_endpoint_passed():
@@ -221,14 +234,15 @@ def test_hvcam_capture_release_without_open():
     capture.release()
 
 
-def test_open_capture_accepts_hvcam(monkeypatch):
+@pytest.mark.parametrize("source", ["hvcam://", "hvcam+reverse://"])
+def test_open_capture_accepts_hvcam(monkeypatch, source):
     cam = FakeCamera([(_info(), _payload())])
     monkeypatch.setattr(
         camera_module,
         "HvcamCapture",
         lambda source: HvcamCapture(source, camera_factory=_factory(cam)),
     )
-    capture = camera_module.open_capture("hvcam://")
+    capture = camera_module.open_capture(source)
     try:
         ok, frame = capture.read()
         assert ok and frame.shape == (48, 64, 3)
@@ -289,6 +303,10 @@ class _FakeLib:
         self.calls.append(("vsock", port))
         return self.fd
 
+    def hvcam_listen(self, port):
+        self.calls.append(("listen", port))
+        return self.fd
+
     def hvcam_connect_tcp(self, host, port):
         self.calls.append((host, port))
         return self.fd
@@ -315,11 +333,27 @@ def test_camera_vsock_connect_without_host(monkeypatch):
     cam.close()
 
 
+def test_camera_vsock_listen(monkeypatch):
+    lib = _FakeLib()
+    monkeypatch.setattr(hvcam_module, "_LIB", lib)
+    cam = hvcam_module.Camera(port=9100, listen=True)
+    assert lib.calls == [("listen", 9100)]
+    cam.close()
+
+
 def test_camera_connect_failure_raises_oserror(monkeypatch):
     lib = _FakeLib(fd=-1)
     monkeypatch.setattr(hvcam_module, "_LIB", lib)
     with pytest.raises(OSError, match="connect failed"):
         hvcam_module.Camera(port=8765)
+
+
+def test_camera_timeout_suggests_reverse_mode(monkeypatch):
+    lib = _FakeLib(fd=-errno.ETIMEDOUT)
+    monkeypatch.setattr(hvcam_module, "_LIB", lib)
+    with pytest.raises(OSError, match=r"hvcam\+reverse://:9100") as error:
+        hvcam_module.Camera(port=9100)
+    assert "--register-vsock --port 9100" in str(error.value)
 
 
 def test_camera_to_bgr_mjpeg_honors_bottom_up():
