@@ -410,6 +410,77 @@ def test_gate_off_arbitration_sees_the_same_covered_map_as_the_vote(fast):
 
 
 @pytest.mark.slow
+@pytest.mark.parametrize(
+    ("raw_shift", "decision"), [(0.0, "unregistered"), (-2.5, "correct")]
+)
+def test_camera_coverage_stays_in_camera_geometry_when_vote_changes(
+    monkeypatch, raw_shift, decision
+):
+    # O quad acompanha a folha: o registro da camera desloca 6 px,
+    # mas o portao escolhe o warp cru (e pode corrigi-lo). A cobertura
+    # da arbitragem precisa continuar na geometria da camera, incluindo
+    # a excecao da tinta ja confirmada fora da cobertura.
+    now = [1000.0]
+    worker = worker_mod.PageCleanWorker(
+        _InkFromWarp(),
+        config=InkConfig(motion_veto=True, anchor_follow=False),
+        clock=lambda: now[0],
+    )
+    worker.set_hand_presence(True)
+    generation = worker.new_generation()
+    page = _page(seed=4)
+    for _ in range(4):
+        worker.submit(WarpedPage(_bgr(page), generation, BASE))
+        assert worker.pump()
+        now[0] += 1.0
+    anchor_ink = worker.poll_display(generation, 0).confirmed > 0
+    assert anchor_ink.any()
+
+    camera_maps, votes = [], []
+    real_arb = worker._anchor_arbitration_step
+    real_add = worker._accumulator.add
+
+    def arb(*args):
+        camera_maps.append(args[7].copy())
+        return real_arb(*args)
+
+    def add(prob, *args, **kwargs):
+        votes.append(prob.copy())
+        return real_add(prob, *args, **kwargs)
+
+    monkeypatch.setattr(worker, "_anchor_arbitration_step", arb)
+    monkeypatch.setattr(worker._accumulator, "add", add)
+    coverage = np.zeros(SHAPE, bool)
+    coverage[:, 600:] = True
+    raw = _InkFromWarp().ink_prob(_bgr(_shift(page, raw_shift, 0.0)))
+    worker.set_hand_presence(True, moved=True)
+    worker.submit(
+        WarpedPage(
+            _bgr(_shift(page, raw_shift, 0.0)),
+            generation,
+            BASE + np.float32([6.0, 0.0]),
+            coverage=coverage,
+        )
+    )
+    assert worker.pump()
+    assert worker.telemetry_snapshot()["records"][-1]["motion_decision"] == decision
+    # Registro de camera conhecido: translacao de +6 px, borda zero.
+    matrix = np.float32([[1, 0, 6], [0, 1, 0]])
+    size = (SHAPE[1], SHAPE[0])
+    camera = cv2.warpAffine(raw, matrix, size, flags=cv2.INTER_LINEAR)
+    camera_coverage = (
+        cv2.warpAffine(coverage.astype(np.uint8), matrix, size, flags=cv2.INTER_NEAREST)
+        > 0
+    )
+    allowed = camera_coverage | anchor_ink
+    expected = np.where(allowed, camera, 0.0)
+    assert np.count_nonzero(camera[~allowed]) > 0  # gate exercitado
+    assert np.count_nonzero(camera[anchor_ink & ~camera_coverage]) > 0
+    assert np.allclose(camera_maps[0], expected)
+    assert not np.allclose(camera_maps[0], votes[0])
+
+
+@pytest.mark.slow
 def test_default_path_never_builds_the_gate(fast, monkeypatch):
     # Paridade com o canvas anterior: com motion_veto desligado o portao
     # nem existe — nenhum caminho novo roda (review do PR #67).
