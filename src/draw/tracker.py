@@ -799,7 +799,7 @@ class DetectWakeGate:
     def settled(self):
         return self._settled
 
-    def wake(self, *, force_next=False):
+    def wake(self, *, force_next=True):
         """Sai do estado assentado e volta a cadencia normal imediatamente."""
         if self._settled:
             self.wake_events += 1
@@ -896,7 +896,7 @@ class DetectWakeGate:
             return bool(base_should_detect)
         now = float(captured_at)
         if wake_signal or self._sentinel_triggered(frame, hand_mask=hand_mask):
-            self.wake()
+            self.wake(force_next=False)
             self._last_submit_at = now
             return True
         last_ref = (
