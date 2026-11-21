@@ -293,11 +293,12 @@ def test_plausibility_guard_accepts_clip_that_truncates_short_edge_corner():
 
 
 def test_plausibility_guard_tries_all_borders_for_corner_cut():
-    # Perto do canto, o corte vizinho cabe na tolerancia de duas bordas.
-    # A mascara so suporta a segunda (coluna da direita, linha 0 vazia):
-    # checar so a primeira rejeitaria uma folha clipada valida.
+    # Perto do canto, o corte vizinho cabe na tolerancia de duas bordas
+    # (aqui topo e direita). A mascara so suporta a segunda: a linha 0 e
+    # vazia mas a coluna 127 tem papel. Checar so a primeira rejeitaria
+    # uma folha clipada valida.
     quad = np.array(
-        [[1279.0, 10.0], [1100.0, 25.0], [640.0, 400.0], [1275.0, 4.0]],
+        [[1267.0, 7.0], [1274.0, 13.0], [1150.0, 60.0], [700.0, 90.0]],
         dtype=np.float32,
     )
     mask = np.zeros((72, 128), np.uint8)
