@@ -86,6 +86,7 @@ class LatestFrameCapture:
         # deteccao, quad, warp, tinta e o 's' de salvar enxergam o
         # mesmo espaco ja orientado (nada de coordenada desalinhada).
         self._rotation = rotation
+        self._frame_rotation = rotation
         self._condition = threading.Condition()
         self._thread = threading.Thread(
             target=self._pump, name="draw-capture", daemon=True
@@ -112,6 +113,20 @@ class LatestFrameCapture:
     def start(self):
         self._thread.start()
         return self
+
+    @property
+    def rotation(self):
+        with self._condition:
+            return self._rotation
+
+    def set_rotation(self, rotation):
+        """Atualiza a rotacao de entrada (0 ou 180) em tempo de execucao."""
+        if rotation not in INPUT_ROTATIONS:
+            raise ValueError(
+                f"rotacao de entrada {rotation!r} invalida; aceitas: {INPUT_ROTATIONS}"
+            )
+        with self._condition:
+            self._rotation = rotation
 
     def _pump(self):
         # Um driver que levanta (cv2 levanta em varios modos de falha)
@@ -144,7 +159,9 @@ class LatestFrameCapture:
                 # rotacao: o HUD de latencia mede da leitura em
                 # diante, e o tempo de girar o quadro e latencia.
                 captured_at = time.monotonic()
-                if self._rotation == 180:
+                with self._condition:
+                    rotation = self._rotation
+                if rotation == 180:
                     frame = cv2.rotate(frame, cv2.ROTATE_180)
                 # Identidade do emissor quando a fonte a expõe
                 # (HelperCapture): entra no pacote e alimenta a
@@ -158,6 +175,7 @@ class LatestFrameCapture:
                         self._dropped += 1
                     self._seq += 1
                     self._frame = frame
+                    self._frame_rotation = rotation
                     self._captured_at = captured_at
                     self._source_frame_id = source_frame_id
                     self._source_ts_ms = source_ts_ms
@@ -184,10 +202,14 @@ class LatestFrameCapture:
         """
         with self._condition:
             self._condition.wait_for(
-                lambda: self._seq > after_seq or self._dead or self._stopped,
+                lambda: (
+                    (self._seq > after_seq and self._frame_rotation == self._rotation)
+                    or self._dead
+                    or self._stopped
+                ),
                 timeout=timeout,
             )
-            if self._seq > after_seq:
+            if self._seq > after_seq and self._frame_rotation == self._rotation:
                 self._taken_seq = self._seq
                 return FramePacket(
                     image=self._frame,

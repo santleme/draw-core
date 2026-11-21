@@ -138,8 +138,8 @@ export default function SiteHeader({ onRepeatProduct }: SiteHeaderProps) {
   const headerWidth = useMotionTemplate`min(calc(100% - ${headerGutter}px), ${headerMaxWidth}px)`;
   const navHeight = useTransform(progress, (amount) => {
     const mobile = window.matchMedia('(max-width: 640px)').matches;
-    const initial = mobile ? 44 : 56;
-    const compact = mobile ? 38 : 44;
+    const initial = mobile ? 52 : 64;
+    const compact = mobile ? 46 : 52;
     return initial + (compact - initial) * amount;
   });
   const themeButtonScale = useTransform(progress, (amount) => {

@@ -68,6 +68,7 @@ from . import config
 from . import paper as paper_module
 from . import perception as neural_module
 from . import view as view_module
+from .auto_orient import AutoPageOrientation, AutoRotationDetector
 from .camera import (
     LatestFrameCapture,
     PngWriter,
@@ -1193,6 +1194,8 @@ def run(
     stream_port=None,
     stream_token_file=None,
     stream_record=None,
+    auto_rotate=False,
+    auto_orientation=False,
 ):
     _apply_opencv_thread_cap()
     _require_gui_backend()
@@ -1492,8 +1495,18 @@ def run(
         ui_signature = None
 
         _camera_menu["current"] = parse_source(source)
+        base_rotation = rotation
         seq_offset = 0
         reset_source = False
+        auto_rotator = (
+            AutoRotationDetector() if (auto_rotate and not markers_mode) else None
+        )
+        auto_orienter = (
+            AutoPageOrientation(initial=config.PAPER_ORIENTATION)
+            if (auto_orientation and not markers_mode)
+            else None
+        )
+        last_auto_rot_det_seq = 0
         switch = {"thread": None, "result": None}
 
         def start_switch(target):
@@ -1501,8 +1514,10 @@ def run(
 
             def work():
                 try:
+                    # Nova fonte abre com a rotacao base da CLI (nao herda
+                    # o flip automatico inferido para a camera anterior).
                     candidate = _open_ready_source(
-                        target, helper_token_file, rotation=rotation
+                        target, helper_token_file, rotation=base_rotation
                     )
                     switch["result"] = (target, candidate, None)
                 except Exception as error:
@@ -1512,7 +1527,7 @@ def run(
             switch["thread"].start()
 
         def service_camera_switch():
-            nonlocal frame_source, last_seq, seq_offset, reset_source
+            nonlocal frame_source, last_seq, seq_offset, reset_source, rotation
             target = _camera_menu["request"]
             if target is not None and switch["thread"] is None:
                 _camera_menu["request"] = None
@@ -1532,6 +1547,11 @@ def run(
             old.stop(force=False)
             seq_offset += last_seq
             last_seq = 0
+            rotation = base_rotation
+            if auto_rotator is not None:
+                auto_rotator.reset()
+            if auto_orienter is not None:
+                auto_orienter.reset_streak()
             reset_source = True
             _camera_menu["current"] = target
             print(f"Camera trocada para {_camera_label(target)}.")
@@ -1649,6 +1669,37 @@ def run(
                 tel_detect_ms = pipeline.detect_ms
                 sheet_present = pipeline.sheet_present
                 tel_sheet_present = sheet_present
+                if (
+                    auto_rotator is not None
+                    and pipeline.last_det_seq != last_auto_rot_det_seq
+                ):
+                    last_auto_rot_det_seq = pipeline.last_det_seq
+                    if auto_rotator.observe_mask(pipeline.last_hand_mask):
+                        rotation = 180 if frame_source.rotation == 0 else 0
+                        frame_source.set_rotation(rotation)
+                        reset_source = True
+                        if auto_orienter is not None:
+                            auto_orienter.reset_streak()
+                        print(
+                            "Camera invertida detectada automaticamente pela mao; "
+                            f"girando entrada em {rotation}°."
+                        )
+                if (
+                    auto_orienter is not None
+                    and not reset_source
+                    and sheet_present
+                    and tracker.corners is not None
+                ):
+                    new_orient = auto_orienter.observe(tracker.corners, frame.shape)
+                    if new_orient is not None:
+                        config.apply_format(config.PAPER_FORMAT, new_orient)
+                        if ink_stream is not None:
+                            ink_stream.set_paper_mm(config.paper_mm())
+                        reset_source = True
+                        print(
+                            "Orientacao da folha ajustada automaticamente para "
+                            f"{new_orient} ({config.PAPER_W}x{config.PAPER_H})."
+                        )
                 if loop_outcome == INK_WORKER_FAILED:
                     _show(
                         view_module.error_view(
@@ -1890,19 +1941,20 @@ def main():
         "--rotate",
         type=int,
         choices=camera_module.INPUT_ROTATIONS,
-        default=0,
+        default=None,
         help=(
             "gira o quadro da camera na captura (180 = webcam invertida na "
-            "mesa); preview, quad e canvas giram juntos"
+            "mesa); sem a flag, detecta e gira automaticamente quando a "
+            "mascara semantica de mao esta disponivel"
         ),
     )
     parser.add_argument(
         "--orientation",
         choices=config.ORIENTATIONS,
-        default="retrato",
+        default=None,
         help=(
             "orientacao da grade da pagina: paisagem para caderno aberto ou "
-            "folha deitada (evita espremer o conteudo largo na grade em pe)"
+            "folha deitada; sem a flag, adapta automaticamente entre retrato e paisagem"
         ),
     )
     parser.add_argument(
@@ -1971,11 +2023,12 @@ def main():
             "manifesto serao carregados apenas com aviso."
         )
     try:
-        if args.markers and args.orientation != "retrato":
+        orientation = "retrato" if args.orientation is None else args.orientation
+        if args.markers and orientation != "retrato":
             parser.error(
                 "--orientation paisagem nao combina com --markers (folha-modelo A4 em pe)"
             )
-        config.apply_format(args.format or "a4", args.orientation)
+        config.apply_format(args.format or "a4", orientation)
     except ValueError as error:
         parser.error(str(error))
     # Validado ANTES do --check: o mesmo nivel invalido impede a sessao ao
@@ -2039,6 +2092,9 @@ def main():
         page_clean_model = None  # padrao: models/page_clean_unet.onnx
     if hand_model is not None and not hand_model:
         hand_model = None  # padrao: models/hand_landmarker.task
+    rotation = 0 if args.rotate is None else args.rotate
+    auto_rotate = args.rotate is None and not args.markers
+    auto_orientation = args.orientation is None and not args.markers
     try:
         run(
             source=args.source,
@@ -2049,7 +2105,9 @@ def main():
             page_clean_model=page_clean_model,
             helper_token_file=args.helper_token_file,
             fullscreen=args.fullscreen,
-            rotation=args.rotate,
+            rotation=rotation,
+            auto_rotate=auto_rotate,
+            auto_orientation=auto_orientation,
             pipeline_config=pipeline_config,
             stream_port=args.stream_port,
             stream_token_file=args.stream_token_file,

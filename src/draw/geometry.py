@@ -106,6 +106,90 @@ def _largest_contour(mask_bin):
     return max(contours, key=cv2.contourArea)
 
 
+def _is_two_page_spread(contour_a, contour_b):
+    """True quando dois contornos grandes formam um caderno aberto (2 paginas).
+
+    Projeta os dois contornos no referencial proprio da pagina maior
+    (eixos do `minAreaRect`) para reconhecer cadernos girados na mesa,
+    onde caixas alinhadas aos eixos da camera se sobrepoem falsamente.
+    """
+    area_a = float(cv2.contourArea(contour_a))
+    area_b = float(cv2.contourArea(contour_b))
+    if area_a <= 0 or area_b < 0.35 * area_a:
+        return False
+
+    (_cx, _cy), (rw, rh), angle_deg = cv2.minAreaRect(contour_a)
+    if min(rw, rh) <= 0:
+        return False
+    rad = np.deg2rad(angle_deg)
+    u = np.array([np.cos(rad), np.sin(rad)], dtype=np.float64)
+    v = np.array([-np.sin(rad), np.cos(rad)], dtype=np.float64)
+
+    pts_a = contour_a.reshape(-1, 2).astype(np.float64)
+    pts_b = contour_b.reshape(-1, 2).astype(np.float64)
+    ua, va = pts_a @ u, pts_a @ v
+    ub, vb = pts_b @ u, pts_b @ v
+
+    ua_min, ua_max = float(ua.min()), float(ua.max())
+    va_min, va_max = float(va.min()), float(va.max())
+    ub_min, ub_max = float(ub.min()), float(ub.max())
+    vb_min, vb_max = float(vb.min()), float(vb.max())
+
+    wa, ha = ua_max - ua_min, va_max - va_min
+    wb, hb = ub_max - ub_min, vb_max - vb_min
+    if min(wa, ha, wb, hb) <= 0:
+        return False
+
+    # Separadas ao longo de u, alinhadas ao longo de v.
+    v_overlap = min(va_max, vb_max) - max(va_min, vb_min)
+    u_gap = max(ua_min, ub_min) - min(ua_max, ub_max)
+    if (
+        v_overlap >= 0.55 * min(ha, hb)
+        and min(ha, hb) >= 0.65 * max(ha, hb)
+        and -0.15 * min(wa, wb) <= u_gap <= 0.25 * max(wa, wb)
+    ):
+        return True
+
+    # Separadas ao longo de v, alinhadas ao longo de u.
+    u_overlap = min(ua_max, ub_max) - max(ua_min, ub_min)
+    v_gap = max(va_min, vb_min) - min(va_max, vb_max)
+    return (
+        u_overlap >= 0.55 * min(wa, wb)
+        and min(wa, wb) >= 0.65 * max(wa, wb)
+        and -0.15 * min(ha, hb) <= v_gap <= 0.25 * max(ha, hb)
+    )
+
+
+def _sheet_contour_with_spread(mask_bin):
+    """Devolve `(contorno, is_spread, contour_area)` para distinguir folha unica
+    de caderno aberto sem duplicar a extracao de contorno no detector."""
+    contours, _ = cv2.findContours(mask_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    if not contours:
+        return None, False, 0.0
+    if len(contours) == 1:
+        return contours[0], False, float(cv2.contourArea(contours[0]))
+    ranked = sorted(contours, key=cv2.contourArea, reverse=True)
+    if _is_two_page_spread(ranked[0], ranked[1]):
+        hull = cv2.convexHull(np.vstack([ranked[0], ranked[1]]))
+        # Densifica o contorno do casco desenhando-o preenchido numa mascara:
+        # cv2.convexHull devolve apenas ~4-8 vertices e faria _refit_corners
+        # desistir (<8 pontos/aresta), perdendo o refino e a memoria de arestas.
+        merged_mask = np.zeros(mask_bin.shape[:2], dtype=np.uint8)
+        cv2.drawContours(merged_mask, [hull], -1, 255, cv2.FILLED)
+        dense, _ = cv2.findContours(
+            merged_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE
+        )
+        merged = max(dense, key=cv2.contourArea) if dense else hull
+        return merged, True, float(cv2.contourArea(merged))
+    return ranked[0], False, float(cv2.contourArea(ranked[0]))
+
+
+def _sheet_contour(mask_bin):
+    """Contorno da folha: maior contorno ou uniao densa das 2 paginas do caderno."""
+    contour, _is_spread, _area = _sheet_contour_with_spread(mask_bin)
+    return contour
+
+
 def _approx_quad(contour):
     perimeter = cv2.arcLength(contour, True)
     for epsilon in _paper._SHEET_EPSILON_LADDER:
@@ -181,6 +265,95 @@ def _line_normal_shift_at(point, line_ref):
     normal = np.array([-dir_ref[1], dir_ref[0]], dtype=np.float64)
     normal /= max(float(np.linalg.norm(normal)), 1e-9)
     return abs(float((point - pt_ref) @ normal))
+
+
+_RECTIFIED_EDGE_UNCERTAINTY_PX = 2.5
+
+
+def _rectified_translation_consistent(
+    fallback_lines, out_i, out_mid, out_norm, in_i, in_mid, in_norm
+):
+    """Confere se dois saltos em arestas opostas sao iguais e opostos no plano
+    retificado da pagina anterior (invariante a perspectiva de camera inclinada).
+
+    A tolerancia absoluta projeta a incerteza por aresta em pixels nativos da
+    mascara (_RECTIFIED_EDGE_UNCERTAINTY_PX) atraves da homografia nos pontos
+    medidos, sem encolher com a resolucao da camera. Retorna True/False quando
+    o quadrilatero anterior e valido, ou None quando faltam retas de fallback.
+    """
+    if any(line is None for line in fallback_lines):
+        return None
+    prev_corners = []
+    for k in range(4):
+        corner = _intersect(fallback_lines[k - 1], fallback_lines[k])
+        if corner is None:
+            return None
+        prev_corners.append(corner)
+    prev_quad = np.asarray(prev_corners, dtype=np.float32)
+    if not cv2.isContourConvex(prev_quad.reshape(4, 1, 2)):
+        return None
+    unit_sq = np.float32([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]])
+    homography = cv2.getPerspectiveTransform(prev_quad, unit_sq)
+
+    def _outward_offset(edge_idx, point):
+        p = homography @ np.array([point[0], point[1], 1.0], dtype=np.float64)
+        if abs(p[2]) < 1e-9:
+            return None
+        u, v = float(p[0] / p[2]), float(p[1] / p[2])
+        if edge_idx == 0:
+            return -v
+        if edge_idx == 1:
+            return u - 1.0
+        if edge_idx == 2:
+            return v - 1.0
+        return -u
+
+    out_off = _outward_offset(out_i, out_mid)
+    in_off = _outward_offset(in_i, in_mid)
+    if out_off is None or in_off is None:
+        return None
+    if out_off <= 0.0 or in_off >= 0.0:
+        return False
+    err_px = _RECTIFIED_EDGE_UNCERTAINTY_PX
+    out_pert = _outward_offset(out_i, out_mid + err_px * out_norm)
+    in_pert = _outward_offset(in_i, in_mid + err_px * in_norm)
+    if out_pert is None or in_pert is None:
+        return None
+    abs_tol = abs(out_pert - out_off) + abs(in_pert - in_off)
+    mag = max(abs(out_off), abs(in_off))
+    return abs(out_off + in_off) <= max(abs_tol, 0.35 * mag)
+
+
+def _is_interior_pivot(edge_idx, new_line, new_start, new_end, fallback_lines):
+    """Retorna True se a reta nova cruza a reta anterior no INTERIOR do trecho
+    compartilhado entre a aresta velha e a nova (pivo real sob oclusao).
+
+    Quando a intersecao ocorre na extremidade do trecho compartilhado (ex.: uma
+    aresta previamente cortada em diagonal desentorta ao ser revelada), retorna
+    False para nao travar a borda revelada. Retorna None se faltam vizinhos.
+    """
+    prev_line = fallback_lines[edge_idx]
+    prev_left = fallback_lines[(edge_idx - 1) % 4]
+    prev_right = fallback_lines[(edge_idx + 1) % 4]
+    if prev_line is None or prev_left is None or prev_right is None:
+        return None
+    old_start = _intersect(prev_left, prev_line)
+    old_end = _intersect(prev_line, prev_right)
+    pivot = _intersect(new_line, prev_line)
+    if old_start is None or old_end is None or pivot is None:
+        return False
+    dir_prev = prev_line[0] / max(float(np.linalg.norm(prev_line[0])), 1e-9)
+    old_a = float(old_start @ dir_prev)
+    old_b = float(old_end @ dir_prev)
+    new_a = float(np.asarray(new_start, dtype=np.float64) @ dir_prev)
+    new_b = float(np.asarray(new_end, dtype=np.float64) @ dir_prev)
+    lo = max(min(old_a, old_b), min(new_a, new_b))
+    hi = min(max(old_a, old_b), max(new_a, new_b))
+    span = hi - lo
+    if span <= 1e-6:
+        return False
+    t = (float(pivot @ dir_prev) - lo) / span
+    return 0.15 < t < 0.85
 
 
 def _best_inlier_seed_line(side, along, pixel_scale=1.0):
@@ -367,12 +540,82 @@ def _refit_corners(contour, quad, frame_shape, fallback_lines=None, scale=(1.0, 
                 ang > _MEMORY_SINGLE_OUTLIER_ANGLE_DEG
                 or shf > _MEMORY_SINGLE_OUTLIER_SHIFT_PX * pixel_scale
             ):
-                jumped.append(i)
+                dir_prev, pt_prev = prev
+                norm_out = np.array([-dir_prev[1], dir_prev[0]], dtype=np.float64)
+                norm_out /= max(float(np.linalg.norm(norm_out)), 1e-9)
+                if float((centroid - pt_prev) @ norm_out) > 0:
+                    norm_out = -norm_out
+                shift_outward = float((proj_mid - pt_prev) @ norm_out)
+                jumped.append((i, shift_outward, ang, proj_mid, norm_out))
         if len(steady) >= 2 and len(jumped) == 1:
-            bad = jumped[0]
-            lines[bad] = fallback_lines[bad]
-            locked[bad] = True
-            trusted[bad] = False
+            bad, shift_outward, ang, _proj_mid, _norm_out = jumped[0]
+            # Desobstrucao/expansao genuina move a aresta para fora do centroide
+            # (sem giro extremo); oclusao move para dentro ou gira no lugar.
+            is_outward_reveal = (
+                shift_outward > 2.0 * pixel_scale
+                and ang <= _MEMORY_SINGLE_OUTLIER_ANGLE_DEG
+            )
+            if not is_outward_reveal:
+                lines[bad] = fallback_lines[bad]
+                locked[bad] = True
+                trusted[bad] = False
+        elif len(steady) >= 2 and len(jumped) == 2:
+            # Classifica deslocamento para fora, para dentro e pivo puramente
+            # angular no interior do trecho compartilhado (nao na extremidade,
+            # onde uma borda revelada pode desentortar passando pelo canto velho).
+            outward_edges = [entry for entry in jumped if entry[1] > 2.0 * pixel_scale]
+            inward_edges = [entry for entry in jumped if entry[1] < -2.0 * pixel_scale]
+            pivot_edges = []
+            for entry in jumped:
+                e_i, e_shift, e_ang, _e_mid, _e_norm = entry
+                if (
+                    abs(e_shift) <= 2.0 * pixel_scale
+                    and e_ang > _MEMORY_SINGLE_OUTLIER_ANGLE_DEG
+                ):
+                    interior = _is_interior_pivot(
+                        e_i,
+                        lines[e_i],
+                        quad[e_i],
+                        quad[(e_i + 1) % 4],
+                        fallback_lines,
+                    )
+                    if interior is not False:
+                        pivot_edges.append(entry)
+            if len(outward_edges) == 1 and len(pivot_edges) == 1:
+                piv_i = pivot_edges[0][0]
+                lines[piv_i] = fallback_lines[piv_i]
+                locked[piv_i] = True
+                trusted[piv_i] = False
+            elif len(outward_edges) == 1 and len(inward_edges) == 1:
+                out_i, out_shift, out_ang, out_mid, out_norm = outward_edges[0]
+                in_i, in_shift, in_ang, in_mid, in_norm = inward_edges[0]
+                opposite = (out_i + 2) % 4 == in_i
+                angles_ok = (
+                    out_ang <= _MEMORY_SINGLE_OUTLIER_ANGLE_DEG
+                    and in_ang <= _MEMORY_SINGLE_OUTLIER_ANGLE_DEG
+                )
+                consistent_translation = False
+                if opposite and angles_ok:
+                    rect_ok = _rectified_translation_consistent(
+                        fallback_lines,
+                        out_i,
+                        out_mid,
+                        out_norm,
+                        in_i,
+                        in_mid,
+                        in_norm,
+                    )
+                    if rect_ok is not None:
+                        consistent_translation = rect_ok
+                    else:
+                        mag = max(abs(out_shift), abs(in_shift))
+                        consistent_translation = abs(out_shift + in_shift) <= max(
+                            12.0 * pixel_scale, 0.35 * mag
+                        )
+                if not consistent_translation:
+                    lines[in_i] = fallback_lines[in_i]
+                    locked[in_i] = True
+                    trusted[in_i] = False
 
     refined = quad.copy()
     for i in range(4):
@@ -409,14 +652,17 @@ def _refine_inside(frame, corners):
     return refined.astype(np.float32)
 
 
-def _fit_quad_impl(mask_bin, frame, fallback_lines, scale_x=1.0, scale_y=1.0):
+def _fit_quad_impl(
+    mask_bin, frame, fallback_lines, scale_x=1.0, scale_y=1.0, *, contour=None
+):
     """O ajuste completo sobre a máscara, com herança opcional.
 
     Retorna (quadrilatero ou None, retas usadas ou None, confiavel
     por aresta ou None). fallback_lines são as retas confiáveis da
     chamada anterior, oferecidas às arestas sem cobertura.
     """
-    contour = _largest_contour(mask_bin)
+    if contour is None:
+        contour = _sheet_contour(mask_bin)
     if contour is None:
         return None, None, None
     frame_area = float(mask_bin.shape[0] * mask_bin.shape[1])

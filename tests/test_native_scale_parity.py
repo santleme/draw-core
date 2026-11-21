@@ -222,9 +222,9 @@ def test_memory_is_native_and_resets_when_frame_scale_changes(monkeypatch):
     original_fit = geometry._fit_quad_impl
     fallbacks = []
 
-    def fit(mask, frame, fallback, scale_x, scale_y):
+    def fit(mask, frame, fallback, scale_x, scale_y, **kwargs):
         fallbacks.append(fallback)
-        return original_fit(mask, frame, fallback, scale_x, scale_y)
+        return original_fit(mask, frame, fallback, scale_x, scale_y, **kwargs)
 
     monkeypatch.setattr(geometry, "_fit_quad_impl", fit)
     detector._fit(mask, **scale)

@@ -496,7 +496,7 @@ body.dark .sketch-canvas { cursor: url("data:image/svg+xml,%3Csvg xmlns='http://
 .webcam-lens, .webcam-status { fill: var(--accent); }
 .webcam-aperture { fill: var(--ink); stroke: none; }
 .webcam-rec { fill: #e5322d; stroke: none; opacity: 0; }
-.webcam-trigger:hover .webcam-rec, .webcam-trigger:focus-visible .webcam-rec { animation: webcam-rec 1.1s ease-in-out infinite; }
+.webcam-trigger.is-rec .webcam-rec, .webcam-trigger:hover .webcam-rec, .webcam-trigger:focus-visible .webcam-rec { animation: webcam-rec 1.1s ease-in-out infinite; }
 @keyframes webcam-rec { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
 .webcam-card-anchor {
   position: absolute;
@@ -727,7 +727,7 @@ body:not(.dark) .construction-art::before {
   .archive-card:hover .archive-art-surface, .archive-card:focus-visible .archive-art-surface { transform: none; }
   .archive-trace { display: none; }
   .wordmark { animation: none; }
-  .webcam-trigger:hover .webcam-rec, .webcam-trigger:focus-visible .webcam-rec { animation: none; opacity: 1; }
+  .webcam-trigger.is-rec .webcam-rec, .webcam-trigger:hover .webcam-rec, .webcam-trigger:focus-visible .webcam-rec { animation: none; opacity: 1; }
 }
 
 ::view-transition-old(root), ::view-transition-new(root) { animation: none; mix-blend-mode: normal; }
@@ -766,7 +766,9 @@ body.is-falling::before {
 .studio-stage { display: grid; flex: 1; min-height: 200px; grid-template-columns: 1fr 1fr; gap: 14px; } /* piso de altura: em janelas curtas ou com zoom a folha continua desenhavel e o estudio rola */
 .studio-pane { position: relative; margin: 0; min-height: 0; border-radius: 20px; overflow: hidden; border: 1px solid color-mix(in srgb, var(--ink) 14%, transparent); background: color-mix(in srgb, var(--paper) 82%, transparent); backdrop-filter: blur(14px); box-shadow: 0 10px 30px rgba(34, 35, 31, .08); }
 .studio-pane.is-digital { background: color-mix(in srgb, var(--accent) 10%, var(--paper)); }
-.studio-pane figcaption { position: absolute; z-index: 1; top: 12px; left: 16px; font: 400 10px 'DM Mono', monospace; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); pointer-events: none; }
+.studio-pane figcaption { position: absolute; z-index: 1; top: 12px; left: 16px; right: 16px; display: flex; align-items: center; justify-content: space-between; gap: 10px; font: 400 10px 'DM Mono', monospace; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); pointer-events: none; }
+.studio-pane-focus { padding: 5px 9px; border: 1px solid color-mix(in srgb, var(--ink) 20%, transparent); border-radius: 999px; background: color-mix(in srgb, var(--paper) 85%, transparent); color: var(--ink); font: inherit; letter-spacing: 0; text-transform: none; cursor: pointer; pointer-events: auto; }
+.studio-pane-focus:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .studio-canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: crosshair; }
 .is-digital .studio-canvas { touch-action: pan-y; cursor: default; }
 .studio-canvas.is-cam { touch-action: pan-y; cursor: default; }
@@ -1142,21 +1144,53 @@ body:not(.dark) .papers-detail { border: 1.5px solid color-mix(in srgb, var(--in
 }
 .lang-anchor:hover .lang-menu,
 .lang-anchor:focus-within .lang-menu { opacity: 1; pointer-events: auto; }
+@media (max-width: 640px) {
+  .lang-menu { z-index: 40; top: 100%; right: 0; left: auto; transform: none; flex-direction: column; align-items: flex-end; gap: 4px; padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--ink) 18%, transparent); border-radius: 12px; background: var(--paper); font-size: 12px; }
+}
 .lang-menu button { background: none; border: 0; padding: 2px 0; color: var(--muted, inherit); cursor: pointer; }
 .lang-menu button:hover, .lang-menu button:focus-visible { color: var(--ink, inherit); outline: none; text-decoration: underline; }
 .lang-menu button[aria-pressed='true'] { color: var(--ink, inherit); }
 
-/* Moldura única: o contorno passa ao contêiner, que envolve o botão de tema e o menu de idioma. */
-.lang-anchor {
-  border: 1px solid color-mix(in srgb, var(--ink) 15%, transparent);
-  border-radius: 999px;
-  padding-right: 6px;
-  align-items: center;
+/* Estúdio: um painel grande (em foco) e outro menor; o botão acessível troca o foco. */
+.studio-stage { transition: grid-template-columns .35s ease; }
+.studio-stage.is-focus-paper { grid-template-columns: 2.2fr 1fr; }
+.studio-stage.is-focus-digital { grid-template-columns: 1fr 2.2fr; }
+@media (max-width: 640px) {
+  .studio-stage.is-focus-paper { grid-template-columns: 1fr; grid-template-rows: 2.2fr 1fr; }
+  .studio-stage.is-focus-digital { grid-template-columns: 1fr; grid-template-rows: 1fr 2.2fr; }
 }
-.lang-anchor > .theme-toggle { border-color: transparent; background: transparent; }
-.lang-anchor:hover { border-color: color-mix(in srgb, var(--ink) 38%, transparent); }
-.lang-menu {
-  position: static;
-  transform: none;
-  padding: 0 0 0 6px;
+
+.hub-mascot-art .webcam-rec { opacity: 1; }
+
+/* Balão do mascote: ao lado da câmera, canto inferior esquerdo reto (sem triângulo), fonte mono, pontinhos antes do texto. */
+.hub-mascot { position: relative; }
+.hub-bubble {
+  position: absolute; bottom: calc(100% + 24px); right: 42%; left: auto; z-index: 1; margin: 0; padding: 11px 16px 11px 14px;
+  border-radius: 18px 18px 4px 18px; border-color: color-mix(in srgb, var(--accent) 55%, var(--ink));
+  font: 400 13px/1.3 'DM Mono', monospace; letter-spacing: 0; text-align: left; transform-origin: bottom right;
+  animation: hub-bubble-up .8s cubic-bezier(.2, .9, .25, 1.1) .4s backwards;
 }
+.hub-bubble::after { display: none; }
+.hub-bubble::before { position: absolute; right: 7px; bottom: -14px; width: 7px; height: 7px; content: ''; border-radius: 50%; background: color-mix(in srgb, var(--accent) 55%, var(--ink)); box-shadow: 6px 9px 0 -1px color-mix(in srgb, var(--accent) 55%, var(--ink)); }
+.hub-bubble-ghost { visibility: hidden; }
+.hub-bubble-text, .hub-bubble-dots { position: absolute; left: 14px; top: 11px; white-space: nowrap; }
+.hub-bubble-dots { display: inline-flex; gap: 5px; top: 50%; transform: translateY(-50%); }
+.hub-bubble-dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--ink); animation: hub-dot 1s ease-in-out infinite; }
+.hub-bubble-dots i:nth-child(2) { animation-delay: .15s; }
+.hub-bubble-dots i:nth-child(3) { animation-delay: .3s; }
+.hub-bubble-caret { display: inline-block; width: 1px; height: 1em; margin-left: 1px; vertical-align: -2px; background: var(--ink); animation: hub-caret .7s steps(1) infinite; }
+@keyframes hub-bubble-up { from { opacity: 0; transform: translateY(26px) scale(.7); } }
+@keyframes hub-dot { 0%, 60%, 100% { opacity: .3; transform: translateY(0); } 30% { opacity: 1; transform: translateY(-4px); } }
+@keyframes hub-caret { 50% { opacity: 0; } }
+@media (max-width: 640px) {
+  .hub-bubble { right: auto; left: 50%; width: min(284px, calc(100vw - 36px)); box-sizing: border-box; transform: translateX(-50%); font-size: 12px; }
+  .hub-bubble-ghost { display: block; white-space: normal; }
+  .hub-bubble-text, .hub-bubble-dots { right: 14px; white-space: normal; }
+}
+@media (prefers-reduced-motion: reduce) { .hub-bubble, .hub-bubble-dots i, .hub-bubble-caret { animation: none; } }
+body:not(.dark) .hub-bubble::before { background: rgba(34, 35, 31, .5); box-shadow: 6px 9px 0 -1px rgba(34, 35, 31, .5); }
+
+/* Formulário de novo projeto: mesma sombra suave dos painéis; no foco, o anel de destaque vem somado a ela. */
+.hub-form input, .hub-form textarea, .hub-primary { box-shadow: 0 10px 30px rgba(34, 35, 31, .08); }
+body:not(.dark) .hub-form input, body:not(.dark) .hub-form textarea { box-shadow: 0 14px 36px rgba(34, 35, 31, .16), 0 2px 6px rgba(34, 35, 31, .1); }
+.hub-form input:focus-visible, .hub-form textarea:focus-visible { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 45%, transparent), 0 10px 30px rgba(34, 35, 31, .1); }
