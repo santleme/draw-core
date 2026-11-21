@@ -364,7 +364,8 @@ def test_consumer_cap_evicts_oldest(monkeypatch):
     try:
         socks = [_connect(pub.port) for _ in range(3)]
         assert _wait(lambda: len(pub._sinks) == 2)
-        socks[0].settimeout(2)
+        # len==2 ja vale antes da 3a conexao entrar; espera o EOF com folga.
+        socks[0].settimeout(10)
         assert socks[0].recv(1) == b""
         for s in socks:
             s.close()

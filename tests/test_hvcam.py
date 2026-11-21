@@ -9,6 +9,7 @@ e _check_hvcam_source.
 """
 
 import errno
+import os
 
 import cv2
 import numpy as np
@@ -1600,3 +1601,132 @@ def test_sanitize_mjpeg_zero_copy_on_clean_ndarray():
     assert ok
     arr = np.frombuffer(encoded.tobytes(), dtype=np.uint8)
     assert hvcam_module._sanitize_mjpeg(arr) is arr
+
+
+class _ScriptedProc:
+    def __init__(self, cmd):
+        self.cmd = cmd
+        self.stdout = self.stderr = self.stdin = None
+        self._rc = None
+
+    def poll(self):
+        return self._rc
+
+    def terminate(self):
+        self._rc = 0
+
+    def wait(self, timeout=None):
+        return 0
+
+    def kill(self):
+        self._rc = -9
+
+
+def _scripted_open(tmp_path, behave):
+    """Roda open_managed_reverse com uma camera cujo comportamento depende do
+    comando e do indice da tentativa: behave(cmd, n) -> (corrupto, passo_ms)."""
+    fake_exe = tmp_path / "hvcam-host.exe"
+    fake_exe.write_bytes(b"MZ")
+    cmds = []
+
+    def fake_popen(cmd, **_kw):
+        cmds.append(list(cmd))
+        return _ScriptedProc(cmd)
+
+    class _Cap:
+        def __init__(self, url, **kw):
+            self.mjpeg_decode_errors = 0
+            self.last_capture_ts_ms = None
+            kw["on_listening"]()
+            self._cmd = cmds[-1]
+            self._corrupt, self._step = behave(self._cmd, len(cmds))
+            self._opened = True
+            self._n = 0
+
+        def isOpened(self):
+            return self._opened
+
+        def read(self):
+            if self._corrupt:
+                self.mjpeg_decode_errors += 1
+                return False, None
+            self._n += 1
+            self.last_capture_ts_ms = self._n * self._step
+            return True, _frame()
+
+        def release(self):
+            self._opened = False
+
+    cap, _idx, _name = hvcam_module.open_managed_reverse(
+        device=0,
+        try_all=True,
+        host_exe=fake_exe,
+        devices=[(0, "Scripted Cam")],
+        popen=fake_popen,
+        capture_cls=_Cap,
+    )
+    return cap, cmds
+
+
+def test_reopened_720p_with_corrupt_mjpeg_falls_back_to_raw(tmp_path):
+    def behave(cmd, n):
+        raw = "--format" in cmd
+        if n == 1:
+            return False, 67  # 720p MJPEG limpo, 15 FPS
+        if "--width" not in cmd:
+            return False, 67  # nativo: sem ganho
+        return (not raw), 67  # 720p reaberto: MJPEG corrompido, raw ok
+
+    cap, cmds = _scripted_open(tmp_path, behave)
+    assert cap is not None
+    assert "--format" in cap._cmd and "--width" in cap._cmd
+
+
+def test_native_raw_slower_than_clean_720p_is_not_adopted(tmp_path):
+    def behave(cmd, n):
+        if "--width" in cmd and "--format" not in cmd:
+            return False, 67  # 720p MJPEG limpo, 15 FPS
+        if "--width" not in cmd and "--format" not in cmd:
+            return True, 67  # nativo MJPEG corrompido
+        if "--width" not in cmd:
+            return False, 200  # nativo raw: 5 FPS
+        return False, 67
+
+    cap, _cmds = _scripted_open(tmp_path, behave)
+    assert cap is not None
+    assert "--width" in cap._cmd and "--format" not in cap._cmd
+
+
+def _open_fd_count():
+    return len(os.listdir("/proc/self/fd"))
+
+
+@pytest.mark.skipif(not os.path.isdir("/proc/self/fd"), reason="requer /proc")
+def test_strict_decoder_does_not_leak_fd_when_tempfile_fails(monkeypatch):
+    img = np.full((16, 16, 3), 90, dtype=np.uint8)
+    ok, enc = cv2.imencode(".jpg", img)
+    assert ok
+
+    def boom(*_a, **_k):
+        raise OSError("sem espaco")
+
+    monkeypatch.setattr(hvcam_module.tempfile, "TemporaryFile", boom)
+    before = _open_fd_count()
+    for _ in range(20):
+        hvcam_module._imdecode_mjpeg_strict(enc)
+    assert _open_fd_count() == before
+
+
+def test_strict_decoder_ignores_extraneous_bytes_warning(monkeypatch):
+    img = np.full((16, 16, 3), 90, dtype=np.uint8)
+    real = cv2.imdecode
+
+    def noisy(buf, flags):
+        os.write(2, b"Corrupt JPEG data: 2 extraneous bytes before marker 0xd9\n")
+        return real(buf, flags)
+
+    monkeypatch.setattr(hvcam_module.cv2, "imdecode", noisy)
+    ok, enc = cv2.imencode(".jpg", img)
+    assert ok
+    out = hvcam_module._imdecode_mjpeg_strict(enc)
+    assert out.shape == img.shape

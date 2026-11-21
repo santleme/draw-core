@@ -1059,8 +1059,8 @@ def _imdecode_mjpeg_strict(buf):
                 sys.stderr.flush()
             except Exception:  # noqa: BLE001
                 pass
-            saved_fd = os.dup(2)
             with tempfile.TemporaryFile() as tmp:
+                saved_fd = os.dup(2)
                 try:
                     os.dup2(tmp.fileno(), 2)
                     img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
@@ -1073,7 +1073,11 @@ def _imdecode_mjpeg_strict(buf):
         img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
     if warn:
         lower = warn.lower()
-        if "corrupt jpeg" in lower or "premature end" in lower:
+        # "extraneous bytes before marker" e emitido por varias webcams UVC em
+        # todo quadro e a imagem decodifica completa: nao e corrupcao.
+        if ("corrupt jpeg" in lower and "extraneous bytes" not in lower) or (
+            "premature end" in lower
+        ):
             raise ValueError(f"hvcam: payload MJPEG corrompido ({warn.strip()})")
         try:
             sys.stderr.write(warn)
@@ -1732,14 +1736,14 @@ def open_managed_reverse(
     def _try_raw_formats(dev_idx, mode_prefix):
         err_last = None
         for fallback_fmt in ("nv12", "yuy2"):
-            raw_cap, _raw_mjpeg, _raw_fps, raw_err = _attempt(
+            raw_cap, _raw_mjpeg, raw_fps, raw_err = _attempt(
                 dev_idx, [*mode_prefix, "--format", fallback_fmt]
             )
             if raw_cap is not None:
-                return raw_cap, None
+                return raw_cap, None, raw_fps
             if raw_err:
                 err_last = raw_err
-        return None, err_last
+        return None, err_last, None
 
     last_host_error = None
     for dev_idx, dev_name in order:
@@ -1763,24 +1767,36 @@ def open_managed_reverse(
                 if nat_cap is not None:
                     nat_cap.release()
                 elif nat_mjpeg:
-                    raw_cap, raw_err = _try_raw_formats(dev_idx, [])
+                    raw_cap, raw_err, raw_fps = _try_raw_formats(dev_idx, [])
                     if raw_cap is not None:
-                        return raw_cap, dev_idx, dev_name
-                    if raw_err:
+                        # Raw nativo costuma ser mais lento (USB2): so troca o
+                        # 720p MJPEG limpo se a taxa medida for claramente maior.
+                        if raw_fps is None or raw_fps > measured_fps * 1.15:
+                            return raw_cap, dev_idx, dev_name
+                        raw_cap.release()
+                    elif raw_err:
                         last_host_error = raw_err
                 if nat_err:
                     last_host_error = nat_err
                 # Nativo nao superou 720p: reabre 720p (menor carga de CPU).
-                cap2, _m2, _f2, _e2 = _attempt(dev_idx, base_mode)
+                cap2, mjpeg2, _f2, err2 = _attempt(dev_idx, base_mode)
                 if cap2 is not None:
                     return cap2, dev_idx, dev_name
+                if err2:
+                    last_host_error = err2
+                if mjpeg2:
+                    raw_cap, raw_err, _rf = _try_raw_formats(dev_idx, base_mode)
+                    if raw_cap is not None:
+                        return raw_cap, dev_idx, dev_name
+                    if raw_err:
+                        last_host_error = raw_err
                 continue
             return cap, dev_idx, dev_name
         if err:
             last_host_error = err
         # Se a camera abriu mas o fluxo MJPEG veio corrompido, tenta NV12/YUY2 (sem JPEG).
         if mjpeg_failed:
-            raw_cap, raw_err = _try_raw_formats(dev_idx, base_mode)
+            raw_cap, raw_err, _rf = _try_raw_formats(dev_idx, base_mode)
             if raw_cap is not None:
                 return raw_cap, dev_idx, dev_name
             if raw_err:
