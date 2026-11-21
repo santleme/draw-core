@@ -797,7 +797,10 @@ def test_hand_vote_abstains_on_resized_side_entry_with_two_blank_model_cols():
     mask = cv2.resize(small, (1280, 720), interpolation=cv2.INTER_NEAREST)
     assert not mask[:, :6].any() and mask[2:4, 7:].any()
     assert hand_mask_orientation_vote(mask) is None
-    assert hand_mask_orientation_vote(mask[::-1, ::-1].copy()) is None
+    mirrored = cv2.resize(
+        small[::-1, ::-1].copy(), (1280, 720), interpolation=cv2.INTER_NEAREST
+    )
+    assert hand_mask_orientation_vote(mirrored) is None
 
 
 @pytest.mark.parametrize("h", [480, 720, 1280])
