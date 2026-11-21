@@ -818,7 +818,8 @@ def test_short_side_entry_reaching_top_slack_abstains_through_observe_mask():
     # (~12 linhas de contato, ~146 colunas na faixa). O braco colado na
     # lateral e entrada lateral, nao "topo com toque breve" (rev. PR #97).
     small = np.zeros((384, 384), dtype=np.uint8)
-    small[1:7, 1:46] = 255
+    small[1:7, 1:46] = 255  # contato lateral curto alcancando a folga do topo
+    small[7:60, 10:46] = 255  # massa interior: passa de min_area sem mudar o perfil
     mask = cv2.resize(small, (1280, 720), interpolation=cv2.INTER_NEAREST)
     assert hand_mask_orientation_vote(mask) is None
 
