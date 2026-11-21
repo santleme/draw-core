@@ -118,6 +118,17 @@ def test_auto_page_orientation_hysteresis_and_oblique_portrait_guard():
     tall = np.array([[440, 60], [840, 60], [840, 660], [440, 660]], np.float32)
     square = np.array([[440, 160], [840, 160], [840, 560], [440, 560]], np.float32)
 
+    # Folha paisagem centralizada com inclinacao em um unico eixo (pitch 12°):
+    # arestas horizontais paralelas (um ponto de fuga no infinito) -> deve
+    # confirmar paisagem em vez de ficar presa em retrato.
+    tilted_landscape = np.array(
+        [[288, 117], [992, 117], [1033, 632], [247, 632]], dtype=np.float32
+    )
+    orient_tilted = AutoPageOrientation(initial="retrato", confirm_frames=3)
+    assert orient_tilted.observe(tilted_landscape, frame_shape) is None
+    assert orient_tilted.observe(tilted_landscape, frame_shape) is None
+    assert orient_tilted.observe(tilted_landscape, frame_shape) == "paisagem"
+
     assert quad_aspect_ratio(wide, frame_shape) > 1.5
     assert orient.observe(square, frame_shape) is None
     assert orient.observe(wide, frame_shape) is None
@@ -200,3 +211,27 @@ def test_ink_stream_publisher_updates_paper_mm_on_orientation_change(tmp_path):
     canvas.apply(fulls[-1])
     assert (fulls[-1].width, fulls[-1].height) == (120, 85)
     assert canvas.paper_mm == (297.0, 210.0)
+
+
+def test_neural_detector_expands_from_single_page_to_gradually_uncovered_spread():
+    """Quando a segunda pagina aparece gradualmente, a memoria de arestas da
+    pagina unica NAO pode prender a borda direita na lombada."""
+    from draw.perception import NeuralSheetDetector
+
+    det = NeuralSheetDetector("unused.onnx", verify=None)
+    # 1. Comeca enxergando apenas a pagina esquerda (222x240).
+    mask = np.zeros((400, 600), dtype=np.uint8)
+    mask[80:320, 70:292] = 255
+    q1 = det._fit(mask)
+    assert q1 is not None
+    assert q1[:, 0].max() <= 300.0
+
+    # 2. Segunda pagina entra gradualmente (86 px, +30, +30, +30, +46 px)
+    #    com lombada de 16 px (x=292..308).
+    for right_w in (86, 116, 146, 176, 222):
+        step_mask = np.zeros((400, 600), dtype=np.uint8)
+        step_mask[80:320, 70:292] = 255
+        step_mask[80:320, 308 : 308 + right_w] = 255
+        q = det._fit(step_mask)
+        assert q is not None
+        assert q[:, 0].max() >= 308 + right_w - 12.0

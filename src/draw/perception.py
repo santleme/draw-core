@@ -379,8 +379,19 @@ class NeuralSheetDetector:
         if geometry != self._memory_geometry:
             self._edge_lines = None
             self._memory_mask = None
+            self._memory_is_spread = False
+            self._memory_spread_ratio = 0.0
             self._memory_geometry = geometry
-        fallback = self._fallback_lines(mask)
+        _contour, is_spread, spread_ratio = _geometry._sheet_contour_with_spread(mask)
+        prev_spread = getattr(self, "_memory_is_spread", False)
+        prev_ratio = getattr(self, "_memory_spread_ratio", 0.0)
+        # Nao reutiliza retas da pagina unica quando o contorno passa a ser um
+        # caderno aberto (ou enquanto a segunda pagina ainda esta expandindo),
+        # senao o guarda de outlier mantem a borda antiga presa na lombada.
+        spread_changed = is_spread != prev_spread or (
+            is_spread and abs(spread_ratio - prev_ratio) > 0.05
+        )
+        fallback = None if spread_changed else self._fallback_lines(mask)
         corners, lines, trusted = _geometry._fit_quad_impl(
             mask, frame, fallback, scale_x, scale_y
         )
@@ -409,6 +420,8 @@ class NeuralSheetDetector:
                     stored[i] = self._edge_lines[i]
             self._edge_lines = stored
         self._memory_mask = mask[::_MEMORY_MASK_STRIDE, ::_MEMORY_MASK_STRIDE] > 0
+        self._memory_is_spread = is_spread
+        self._memory_spread_ratio = spread_ratio
         return corners
 
     def predict(self, frame, *, native=False):

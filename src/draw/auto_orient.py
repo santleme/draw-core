@@ -106,13 +106,54 @@ class AutoRotationDetector:
         return self.observe_vote(hand_mask_orientation_vote(hand_mask))
 
 
-def quad_aspect_ratio(corners, frame_shape=None):
+def _ratio_for_focal(centered_quad, focal):
+    matrix = cv2.getPerspectiveTransform(
+        np.float32([[0, 0], [1, 0], [1, 1], [0, 1]]),
+        centered_quad.astype(np.float32),
+    )
+    inv_f2 = 1.0 / (focal * focal)
+    omega = np.diag([inv_f2, inv_f2, 1.0])
+    h1, h2 = matrix[:, 0], matrix[:, 1]
+    denom = float(h2 @ omega @ h2)
+    num = float(h1 @ omega @ h1)
+    if denom <= 0 or num <= 0 or not np.isfinite(num / denom):
+        return None
+    return float(np.sqrt(num / denom))
+
+
+def _single_vp_ratio_bounds(quad, frame_shape):
+    """Faixa [r_min, r_max] de razao fisica para f em [0.5*W, 3.0*W].
+
+    Quando a camera inclina em torno de um unico eixo (ex.: pitch puro sobre
+    a mesa), um par de arestas segue paralelo (ponto de fuga no infinito) e
+    `paper.estimate_format` se abstem. Como a razao fisica w/h e monotonica
+    em f^2, avaliar nos extremos da faixa plausivel de distancia focal decide
+    com seguranca quando toda a faixa cai do mesmo lado do limiar.
+    """
+    height, width = frame_shape[:2]
+    centered = quad - np.array([width / 2.0, height / 2.0], dtype=np.float64)
+    r_low_f = _ratio_for_focal(centered, 0.5 * width)
+    r_high_f = _ratio_for_focal(centered, 3.0 * width)
+    if r_low_f is None or r_high_f is None:
+        return None
+    return min(r_low_f, r_high_f), max(r_low_f, r_high_f)
+
+
+def quad_aspect_ratio(
+    corners,
+    frame_shape=None,
+    *,
+    landscape_ratio=1.18,
+    portrait_ratio=0.85,
+):
     """Razao largura / altura de um quadrilatero TL/TR/BR/BL.
 
     Quando `frame_shape` e informado, usa a estimativa corrigida de
     perspectiva de `paper.estimate_format` para que uma folha em pe vista
     em angulo obliquo (encurtamento vertical) nao seja confundida com
-    paisagem; devolve None quando a projecao e ambigua/degenerada.
+    paisagem. No regime de inclinacao em um unico eixo (um ponto de fuga no
+    infinito), avalia a faixa plausivel de distancia focal [0.5*W, 3.0*W] e
+    so decide quando toda a faixa concorda; caso contrario se abstem (None).
     """
     quad = np.asarray(corners, dtype=np.float64)
     if quad.shape != (4, 2) or not np.all(np.isfinite(quad)):
@@ -120,9 +161,21 @@ def quad_aspect_ratio(corners, frame_shape=None):
     if frame_shape is not None:
         est = paper_module.estimate_format(quad, frame_shape)
         ratio = est.get("ratio")
-        if ratio is None or not np.isfinite(ratio) or ratio <= 0:
-            return None
-        return float(ratio)
+        if ratio is not None and np.isfinite(ratio) and ratio > 0:
+            return float(ratio)
+        if est.get("reason") == "single_vp_at_infinity":
+            bounds = _single_vp_ratio_bounds(quad, frame_shape)
+            if bounds is None:
+                return None
+            r_min, r_max = bounds
+            # So decide quando toda a faixa plausivel de distancia focal
+            # [0.5*W, 3.0*W] fica estritamente do mesmo lado da fronteira
+            # quadrado (1.0) e o extremo atinge o limiar da orientacao.
+            if r_min >= 1.05 and r_max >= landscape_ratio:
+                return r_max
+            if r_max <= 0.95 and r_min <= portrait_ratio:
+                return r_min
+        return None
     top = float(np.linalg.norm(quad[1] - quad[0]))
     bottom = float(np.linalg.norm(quad[2] - quad[3]))
     left = float(np.linalg.norm(quad[3] - quad[0]))
@@ -170,7 +223,12 @@ class AutoPageOrientation:
 
     def observe(self, corners, frame_shape=None):
         """Observa cantos rastreados; devolve a nova orientacao ou None."""
-        ratio = quad_aspect_ratio(corners, frame_shape=frame_shape)
+        ratio = quad_aspect_ratio(
+            corners,
+            frame_shape=frame_shape,
+            landscape_ratio=self._landscape_ratio,
+            portrait_ratio=self._portrait_ratio,
+        )
         if ratio is None:
             return None
         target = None

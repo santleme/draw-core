@@ -160,15 +160,19 @@ def _is_two_page_spread(contour_a, contour_b):
     )
 
 
-def _sheet_contour(mask_bin):
-    """Contorno da folha: maior contorno ou uniao densa das 2 paginas do caderno."""
+def _sheet_contour_with_spread(mask_bin):
+    """Devolve `(contorno, is_spread, spread_ratio)` para distinguir folha unica
+    de caderno aberto (e detectar quando a segunda pagina ainda esta crescendo)."""
     contours, _ = cv2.findContours(mask_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     if not contours:
-        return None
+        return None, False, 0.0
     if len(contours) == 1:
-        return contours[0]
+        return contours[0], False, 0.0
     ranked = sorted(contours, key=cv2.contourArea, reverse=True)
     if _is_two_page_spread(ranked[0], ranked[1]):
+        area0 = float(cv2.contourArea(ranked[0]))
+        area1 = float(cv2.contourArea(ranked[1]))
+        ratio = area1 / area0 if area0 > 0 else 0.0
         hull = cv2.convexHull(np.vstack([ranked[0], ranked[1]]))
         # Densifica o contorno do casco desenhando-o preenchido numa mascara:
         # cv2.convexHull devolve apenas ~4-8 vertices e faria _refit_corners
@@ -179,9 +183,15 @@ def _sheet_contour(mask_bin):
             merged_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE
         )
         if dense:
-            return max(dense, key=cv2.contourArea)
-        return hull
-    return ranked[0]
+            return max(dense, key=cv2.contourArea), True, ratio
+        return hull, True, ratio
+    return ranked[0], False, 0.0
+
+
+def _sheet_contour(mask_bin):
+    """Contorno da folha: maior contorno ou uniao densa das 2 paginas do caderno."""
+    contour, _is_spread, _ratio = _sheet_contour_with_spread(mask_bin)
+    return contour
 
 
 def _approx_quad(contour):
