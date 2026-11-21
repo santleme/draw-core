@@ -393,15 +393,20 @@ class NeuralSheetDetector:
             is_spread and prev_area > 0 and contour_area > prev_area * 1.05
         )
         fallback = None if spread_expanded else self._fallback_lines(mask)
-        # Dublês de teste antigos nao aceitam `contour`; decide pela assinatura
-        # em vez de capturar TypeError (que mascararia erros reais do ajuste).
+        # Dublês de teste antigos nao aceitam `contour`/`support_mask`;
+        # decide pela assinatura em vez de capturar TypeError (que
+        # mascararia erros reais do ajuste).
         impl = _geometry._fit_quad_impl
-        if "contour" in inspect.signature(impl).parameters:
-            corners, lines, trusted = impl(
-                mask, frame, fallback, scale_x, scale_y, contour=contour
-            )
-        else:
-            corners, lines, trusted = impl(mask, frame, fallback, scale_x, scale_y)
+        params = inspect.signature(impl).parameters
+        kwargs = {}
+        if "contour" in params:
+            kwargs["contour"] = contour
+        if "support_mask" in params:
+            coverage = getattr(self, "last_coverage_mask", None)
+            kwargs["support_mask"] = coverage if coverage is not None else mask
+        corners, lines, trusted = impl(
+            mask, frame, fallback, scale_x, scale_y, **kwargs
+        )
         ref_shape = (
             frame.shape
             if frame is not None
