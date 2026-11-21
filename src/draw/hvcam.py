@@ -32,7 +32,9 @@ import shutil
 import socket
 import struct
 import subprocess
+import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -972,30 +974,41 @@ _MJPEG_STANDARD_DHT = bytes(
 )
 
 
+_STDERR_REDIRECT_LOCK = threading.Lock()
+
+
 def _sanitize_mjpeg(frame):
     """Valida e saneia um payload MJPEG antes do `cv2.imdecode`.
 
+    - Inspeciona marcadores diretamente sobre um `memoryview` zero-copy; quadros
+      MJPEG limpos (SOI em 0, DHT presente e EOI no fim) sao devolvidos sem copia.
     - Rejeita quadros truncados sem SOI (0xFFD8), SOS (0xFFDA) ou EOI (0xFFD9)
       antes do libjpeg, evitando quadros metade-cinza e spam "Corrupt JPEG".
     - Apara lixo antes do SOI e padding UVC apos o EOI.
     - Injeta o segmento DHT padrao de MJPEG quando a webcam o omite.
     """
-    raw = frame.tobytes() if isinstance(frame, np.ndarray) else bytes(frame)
-    soi = raw.find(b"\xff\xd8")
-    if soi < 0:
-        raise ValueError("hvcam: payload MJPEG sem marcador SOI")
-    n = len(raw)
+    view = memoryview(frame).cast("B")
+    n = len(view)
+    if n < 4:
+        raise ValueError("hvcam: payload MJPEG curto demais")
+    if view[0] == 0xFF and view[1] == 0xD8:
+        soi = 0
+    else:
+        raw = bytes(view)
+        soi = raw.find(b"\xff\xd8")
+        if soi < 0:
+            raise ValueError("hvcam: payload MJPEG sem marcador SOI")
     pos = soi + 2
     has_dht = False
     sos = -1
     while pos + 1 < n:
-        if raw[pos] != 0xFF:
+        if view[pos] != 0xFF:
             raise ValueError("hvcam: cabecalho MJPEG desalinhado")
-        while pos < n and raw[pos] == 0xFF:
+        while pos < n and view[pos] == 0xFF:
             pos += 1
         if pos >= n:
             break
-        marker = raw[pos]
+        marker = view[pos]
         pos += 1
         if marker == 0xDA:  # SOS
             sos = pos - 2
@@ -1006,7 +1019,7 @@ def _sanitize_mjpeg(frame):
             continue
         if pos + 1 >= n:
             raise ValueError("hvcam: segmento MJPEG truncado")
-        seg_len = (raw[pos] << 8) | raw[pos + 1]
+        seg_len = (view[pos] << 8) | view[pos + 1]
         if seg_len < 2 or pos + seg_len > n:
             raise ValueError("hvcam: tamanho de segmento MJPEG invalido")
         if marker == 0xC4:
@@ -1014,15 +1027,61 @@ def _sanitize_mjpeg(frame):
         pos += seg_len
     if sos < 0:
         raise ValueError("hvcam: payload MJPEG sem marcador SOS")
-    eoi = raw.rfind(b"\xff\xd9", sos + 2)
-    if eoi < 0:
-        raise ValueError("hvcam: payload MJPEG truncado (sem marcador EOI)")
+    # Caminho rapido zero-copy: EOI exatamente no fim do buffer.
+    if view[n - 2] == 0xFF and view[n - 1] == 0xD9 and n - 2 >= sos + 2:
+        eoi = n - 2
+    else:
+        raw_tail = bytes(view[sos + 2 :])
+        rel_eoi = raw_tail.rfind(b"\xff\xd9")
+        if rel_eoi < 0:
+            raise ValueError("hvcam: payload MJPEG truncado (sem marcador EOI)")
+        eoi = sos + 2 + rel_eoi
     if not has_dht:
-        clean = raw[soi:sos] + _MJPEG_STANDARD_DHT + raw[sos : eoi + 2]
+        clean = bytes(view[soi:sos]) + _MJPEG_STANDARD_DHT + bytes(view[sos : eoi + 2])
         return np.frombuffer(clean, dtype=np.uint8)
     if soi == 0 and eoi + 2 == n and isinstance(frame, np.ndarray):
         return frame
-    return np.frombuffer(raw[soi : eoi + 2], dtype=np.uint8)
+    return np.frombuffer(bytes(view[soi : eoi + 2]), dtype=np.uint8)
+
+
+def _imdecode_mjpeg_strict(buf):
+    """Decodifica MJPEG e falha se o libjpeg emitir aviso de scan corrompido.
+
+    Quando um scan MJPEG termina prematuramente mas mantem `FF D9` no fim,
+    `cv2.imdecode` devolve uma imagem metade-cinza acompanhada de aviso
+    `Corrupt JPEG data` no stderr C (fd 2). Capturar o fd 2 sob lock transforma
+    esse aviso em `ValueError` para que o fallback NV12/YUY2 seja acionado.
+    """
+    warn = ""
+    try:
+        with _STDERR_REDIRECT_LOCK:
+            try:
+                sys.stderr.flush()
+            except Exception:  # noqa: BLE001
+                pass
+            saved_fd = os.dup(2)
+            with tempfile.TemporaryFile() as tmp:
+                try:
+                    os.dup2(tmp.fileno(), 2)
+                    img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+                finally:
+                    os.dup2(saved_fd, 2)
+                    os.close(saved_fd)
+                tmp.seek(0)
+                warn = tmp.read(4096).decode("utf-8", errors="replace")
+    except OSError:
+        img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+    if warn:
+        lower = warn.lower()
+        if "corrupt jpeg" in lower or "premature end" in lower:
+            raise ValueError(f"hvcam: payload MJPEG corrompido ({warn.strip()})")
+        try:
+            sys.stderr.write(warn)
+        except Exception:  # noqa: BLE001
+            pass
+    if img is None or img.size == 0:
+        raise ValueError("hvcam: payload MJPEG falhou no decode")
+    return img
 
 
 class Camera:
@@ -1170,9 +1229,7 @@ class Camera:
             )
         elif fmt == 4:
             clean = _sanitize_mjpeg(frame)
-            img = cv2.imdecode(clean, cv2.IMREAD_COLOR)
-            if img is None or img.size == 0:
-                raise ValueError("hvcam: payload MJPEG falhou no decode")
+            img = _imdecode_mjpeg_strict(clean)
         else:
             img = cv2.cvtColor(frame.reshape(hgt, w, 4), cv2.COLOR_BGRA2BGR)
         return cv2.flip(img, 0) if flags & 2 else img
@@ -1649,13 +1706,18 @@ def open_managed_reverse(
                     needs_probe = try_all or (
                         capture_cls is None and hasattr(cap, "read")
                     )
-                    if not needs_probe or _probe_hvcam_frame(cap):
+                    if not needs_probe:
                         cap._host_proc = proc_box[0]
                         proc_box[0] = None
-                        return cap, False, None
+                        return cap, False, None, None
+                    ok_probe, measured_fps = _probe_hvcam_stream(cap)
                     mjpeg_failed = getattr(cap, "mjpeg_decode_errors", 0) > 0
+                    if ok_probe and not mjpeg_failed:
+                        cap._host_proc = proc_box[0]
+                        proc_box[0] = None
+                        return cap, False, measured_fps, None
                     cap.release()
-                    return None, mjpeg_failed, None
+                    return None, mjpeg_failed, None, None
                 if _aborted():
                     size = stderr_log.seek(0, os.SEEK_END)
                     stderr_log.seek(max(0, size - 16_384))
@@ -1663,36 +1725,100 @@ def open_managed_reverse(
                     if err_msg.strip():
                         host_error = err_msg.strip()
                 cap.release()
-                return None, False, host_error
+                return None, False, None, host_error
             finally:
                 _terminate_host_process(proc_box[0])
 
+    def _try_raw_formats(dev_idx, mode_prefix):
+        err_last = None
+        for fallback_fmt in ("nv12", "yuy2"):
+            raw_cap, _raw_mjpeg, _raw_fps, raw_err = _attempt(
+                dev_idx, [*mode_prefix, "--format", fallback_fmt]
+            )
+            if raw_cap is not None:
+                return raw_cap, None
+            if raw_err:
+                err_last = raw_err
+        return None, err_last
+
     last_host_error = None
     for dev_idx, dev_name in order:
-        cap, mjpeg_failed, err = _attempt(dev_idx, base_mode)
+        cap, mjpeg_failed, measured_fps, err = _attempt(dev_idx, base_mode)
         if cap is not None:
+            # Se 720p reduziu o FPS abaixo de 75% do alvo (ex.: camera so oferece
+            # 720p@15fps e 1080p@30fps), testa o modo nativo (rate-first) e fica
+            # com ele se entregar taxa mais alta.
+            if (
+                base_mode
+                and fps is not None
+                and measured_fps is not None
+                and measured_fps < 0.75 * float(fps)
+            ):
+                cap.release()
+                nat_cap, nat_mjpeg, nat_fps, nat_err = _attempt(dev_idx, [])
+                if nat_cap is not None and (
+                    nat_fps is None or nat_fps > measured_fps * 1.15
+                ):
+                    return nat_cap, dev_idx, dev_name
+                if nat_cap is not None:
+                    nat_cap.release()
+                elif nat_mjpeg:
+                    raw_cap, raw_err = _try_raw_formats(dev_idx, [])
+                    if raw_cap is not None:
+                        return raw_cap, dev_idx, dev_name
+                    if raw_err:
+                        last_host_error = raw_err
+                if nat_err:
+                    last_host_error = nat_err
+                # Nativo nao superou 720p: reabre 720p (menor carga de CPU).
+                cap2, _m2, _f2, _e2 = _attempt(dev_idx, base_mode)
+                if cap2 is not None:
+                    return cap2, dev_idx, dev_name
+                continue
             return cap, dev_idx, dev_name
         if err:
             last_host_error = err
         # Se a camera abriu mas o fluxo MJPEG veio corrompido, tenta NV12/YUY2 (sem JPEG).
         if mjpeg_failed:
-            for fallback_fmt in ("nv12", "yuy2"):
-                cap, _mjpeg2, err2 = _attempt(
-                    dev_idx, [*base_mode, "--format", fallback_fmt]
-                )
-                if cap is not None:
-                    return cap, dev_idx, dev_name
-                if err2:
-                    last_host_error = err2
+            raw_cap, raw_err = _try_raw_formats(dev_idx, base_mode)
+            if raw_cap is not None:
+                return raw_cap, dev_idx, dev_name
+            if raw_err:
+                last_host_error = raw_err
     if last_host_error:
         raise RuntimeError(last_host_error)
     return None, None, None
 
 
-def _probe_hvcam_frame(capture, attempts=3):
-    """Confirma que a fonte hvcam entrega ao menos um quadro valido."""
+def _probe_hvcam_stream(capture, attempts=3):
+    """Confirma que a fonte hvcam entrega quadros limpos e mede o FPS real.
+
+    Falha imediatamente se ocorrer qualquer erro de decode MJPEG (mesmo que
+    outra leitura funcione), para acionar o fallback de formato cru. Quando a
+    fonte expoe `last_capture_ts_ms`, coleta ate `attempts` quadros para medir
+    o FPS entregue sem depender de clock local.
+    """
+    timestamps = []
+    got_frame = False
     for _ in range(attempts):
         ok, frame = capture.read()
+        if getattr(capture, "mjpeg_decode_errors", 0) > 0:
+            return False, None
         if ok and frame is not None:
-            return True
-    return False
+            got_frame = True
+            ts = getattr(capture, "last_capture_ts_ms", None)
+            if ts is None:
+                return True, None
+            timestamps.append(ts)
+    if not got_frame:
+        return False, None
+    measured_fps = None
+    if len(timestamps) >= 2 and timestamps[-1] > timestamps[0]:
+        measured_fps = (len(timestamps) - 1) * 1000.0 / (timestamps[-1] - timestamps[0])
+    return True, measured_fps
+
+
+def _probe_hvcam_frame(capture, attempts=3):
+    """Confirma que a fonte hvcam entrega ao menos um quadro valido."""
+    ok, _fps = _probe_hvcam_stream(capture, attempts=attempts)
+    return ok

@@ -1403,3 +1403,200 @@ def test_open_managed_reverse_requests_720p_and_falls_back_to_nv12_on_mjpeg_erro
     # Segunda tentativa cai para NV12 (sem JPEG) no mesmo dispositivo.
     assert "--format" in cmds[1] and "nv12" in cmds[1]
     assert cmds[1][-2:] == ["--device", "0"]
+
+
+def test_premature_mjpeg_scan_with_eoi_rejected_by_real_decoder_and_triggers_nv12(
+    tmp_path,
+):
+    """Scan MJPEG cortado no meio mantendo FF D9 no fim (imagem metade-cinza
+    com aviso do libjpeg) deve ser rejeitado pelo caminho real de `to_bgr` e
+    acionar o fallback NV12 em `open_managed_reverse`."""
+    img = np.random.default_rng(42).integers(0, 255, (128, 192, 3), dtype=np.uint8)
+    ok, encoded = cv2.imencode(".jpg", img)
+    assert ok
+    raw = encoded.tobytes()
+    sos = raw.find(b"\xff\xda")
+    assert sos > 0
+    half_scan_with_eoi = raw[: sos + (len(raw) - sos) // 2] + b"\xff\xd9"
+    arr = np.frombuffer(half_scan_with_eoi, dtype=np.uint8)
+
+    # 1. Caminho real de Camera.to_bgr rejeita o quadro metade-cinza.
+    real_cam = object.__new__(hvcam_module.Camera)
+    with pytest.raises(ValueError, match="corrompido"):
+        real_cam.to_bgr({"width": 192, "height": 128, "format": 4, "flags": 1}, arr)
+
+    # 2. Acoplado no HvcamCapture + open_managed_reverse, cai para NV12.
+    fake_exe = tmp_path / "hvcam-host.exe"
+    fake_exe.write_bytes(b"MZ")
+    cmds = []
+
+    class _FakeProc:
+        def __init__(self, cmd):
+            self.cmd = cmd
+            self.stdout = self.stderr = self.stdin = None
+            self._rc = None
+
+        def poll(self):
+            return self._rc
+
+        def terminate(self):
+            self._rc = 0
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            self._rc = -9
+
+    def fake_popen(cmd, **_kw):
+        cmds.append(list(cmd))
+        return _FakeProc(cmd)
+
+    class _StreamCam:
+        def __init__(self, cmd):
+            self._cmd = cmd
+            self._seq = 0
+
+        def grab(self, _timeout_ms):
+            self._seq += 1
+            if "--format" in self._cmd and "nv12" in self._cmd:
+                nv12 = np.full((64 * 3 // 2) * 64, 128, dtype=np.uint8)
+                return {
+                    "seq": self._seq,
+                    "ts_us": self._seq * 33_000,
+                    "flags": 1,
+                    "width": 64,
+                    "height": 64,
+                    "format": 3,
+                }, nv12
+            return {
+                "seq": self._seq,
+                "ts_us": self._seq * 33_000,
+                "flags": 1,
+                "width": 192,
+                "height": 128,
+                "format": 4,
+            }, arr
+
+        def to_bgr(self, info, payload):
+            return real_cam.to_bgr(info, payload)
+
+        def close(self):
+            pass
+
+    def _cap_factory(url, **kw):
+        def _cam_factory(**_cam_kw):
+            kw["on_listening"]()
+            return _StreamCam(cmds[-1])
+
+        return HvcamCapture(url, camera_factory=_cam_factory)
+
+    cap, dev_idx, _name = hvcam_module.open_managed_reverse(
+        device=0,
+        try_all=True,
+        host_exe=fake_exe,
+        devices=[(0, "Half-Gray MJPEG Cam")],
+        popen=fake_popen,
+        capture_cls=_cap_factory,
+    )
+    assert cap is not None
+    assert dev_idx == 0
+    assert len(cmds) == 2
+    assert "--format" in cmds[1] and "nv12" in cmds[1]
+
+
+def test_open_managed_reverse_negotiates_native_30fps_when_720p_is_15fps(tmp_path):
+    """Quando 720p entrega apenas 15 FPS e o modo nativo (ex.: 1080p) entrega
+    30 FPS, `open_managed_reverse` detecta a taxa baixa no probe e prefere o
+    modo de 30 FPS."""
+    fake_exe = tmp_path / "hvcam-host.exe"
+    fake_exe.write_bytes(b"MZ")
+    cmds = []
+
+    class _FakeProc:
+        def __init__(self, cmd):
+            self.cmd = cmd
+            self.stdout = self.stderr = self.stdin = None
+            self._rc = None
+
+        def poll(self):
+            return self._rc
+
+        def terminate(self):
+            self._rc = 0
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            self._rc = -9
+
+    def fake_popen(cmd, **_kw):
+        cmds.append(list(cmd))
+        return _FakeProc(cmd)
+
+    class _TwoModeCap:
+        def __init__(self, url, **kw):
+            self.url = url
+            self._host_proc = None
+            self.mjpeg_decode_errors = 0
+            self.last_capture_ts_ms = None
+            kw["on_listening"]()
+            self._cmd = cmds[-1]
+            self._opened = True
+            self._n = 0
+
+        def isOpened(self):
+            return self._opened
+
+        def read(self):
+            self._n += 1
+            # 720p -> 15 FPS (67 ms/frame); nativo -> 30 FPS (33 ms/frame).
+            step_ms = 67 if "--width" in self._cmd else 33
+            self.last_capture_ts_ms = self._n * step_ms
+            return True, _frame()
+
+        def release(self):
+            self._opened = False
+
+    cap, dev_idx, _name = hvcam_module.open_managed_reverse(
+        device=0,
+        try_all=True,
+        host_exe=fake_exe,
+        devices=[(0, "Two-Mode Cam")],
+        popen=fake_popen,
+        capture_cls=_TwoModeCap,
+    )
+    assert cap is not None
+    assert dev_idx == 0
+    assert len(cmds) == 2
+    assert "--width" in cmds[0]
+    assert "--width" not in cmds[1]
+    assert "--width" not in cap._cmd
+
+
+def test_probe_rejects_mjpeg_stream_after_any_decode_error():
+    class _IntermittentMjpegCap:
+        def __init__(self):
+            self.calls = 0
+            self.mjpeg_decode_errors = 0
+            self.last_capture_ts_ms = None
+
+        def read(self):
+            self.calls += 1
+            if self.calls == 1:
+                self.mjpeg_decode_errors += 1
+                return False, None
+            self.last_capture_ts_ms = self.calls * 33
+            return True, _frame()
+
+    ok, _fps = hvcam_module._probe_hvcam_stream(_IntermittentMjpegCap(), attempts=3)
+    assert ok is False
+
+
+def test_sanitize_mjpeg_zero_copy_on_clean_ndarray():
+    img = np.full((32, 48, 3), 150, dtype=np.uint8)
+    ok, encoded = cv2.imencode(".jpg", img)
+    assert ok
+    arr = np.frombuffer(encoded.tobytes(), dtype=np.uint8)
+    assert hvcam_module._sanitize_mjpeg(arr) is arr
