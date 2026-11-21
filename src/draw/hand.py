@@ -50,6 +50,19 @@ _DEFAULT_CANDIDATES = (
 _MIN_CONFIDENCE = 0.3
 _HULL_SCALE = 1.30
 _DILATE_PX = 15
+# The image worker receives several passes per second; short detector
+# dropouts must not turn the last hand footprint into visible paper.
+_MASK_HOLD_FRAMES = 3
+_MASK_HOLD_GROW_PX = 10
+# MediaPipe's palm detector is sensitive to very dark camera frames. Keep
+# this correction local to its input; the page-clean model keeps its own
+# calibrated image domain. The LUT is applied only to low-light frames.
+_LOW_LIGHT_LUMA = 80.0
+_LOW_LIGHT_GAMMA = 0.65
+_LOW_LIGHT_LUT = np.array(
+    [round(255.0 * (value / 255.0) ** _LOW_LIGHT_GAMMA) for value in range(256)],
+    dtype=np.uint8,
+)
 # Largura maxima do frame na deteccao de PRESENCA (assinatura):
 # presenca nao precisa dos pixels, so da geometria dos marcos.
 _PRESENCE_MAX_WIDTH = 640
@@ -145,6 +158,8 @@ class HandMasker:
         self._warned = False
         self._closed = False
         self._lock = threading.RLock()
+        self._last_hand_mask = None
+        self._mask_misses = 0
 
     def close(self):
         """Fecha os landmarkers criados; chamadas futuras degradam.
@@ -185,6 +200,8 @@ class HandMasker:
         self._video_landmarker = None
         self._unavailable = True
         self._video_unavailable = True
+        self._last_hand_mask = None
+        self._mask_misses = 0
 
     def _dispose_fresh(self, landmarker):
         """Fecha um landmarker recem-criado que nao pode publicar."""
@@ -337,6 +354,17 @@ class HandMasker:
                 (max_width, int(round(frame.shape[0] * scale))),
                 interpolation=cv2.INTER_AREA,
             )
+        # cv2.mean scans once and is much cheaper than building a separate
+        # luminance image. Dark scenes get a gamma lift before RGB conversion;
+        # well-lit frames remain byte-identical and avoid the LUT pass.
+        channels = cv2.mean(work)
+        if work.ndim == 2:
+            luminance = channels[0]
+        else:
+            blue, green, red = channels[:3]
+            luminance = 0.114 * blue + 0.587 * green + 0.299 * red
+        if luminance < _LOW_LIGHT_LUMA:
+            work = cv2.LUT(work, _LOW_LIGHT_LUT)
         rgb = cv2.cvtColor(work, cv2.COLOR_BGR2RGB)
         image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
         result = None
@@ -375,21 +403,52 @@ class HandMasker:
             )
         return hands
 
-    def mask(self, frame):
-        """A máscara de mão do frame, ou None se indisponível."""
-        hands = self._landmarks(frame)
-        if hands is None:
-            return None
-        mask = np.zeros(frame.shape[:2], dtype=np.uint8)
-        for points in hands:
-            for polygon in _hand_polygons(points, frame.shape):
-                cv2.fillPoly(mask, [polygon], 255)
-        if not hands:
+    def mask(self, frame, timestamp_ms=None):
+        """Máscara atual de mão, com retenção curta em falhas do detector.
+
+        `timestamp_ms` permite que o caminho de tinta use o landmarker VIDEO
+        em cada passada. Sem ele, mantém o comportamento IMAGE existente.
+        Em até três resultados sem mão/indisponíveis, a última máscara é
+        mantida e cresce um pouco para cobrir movimento durante a falha.
+        """
+        with self._lock:
+            hands = self._landmarks(frame, timestamp_ms=timestamp_ms)
+            if hands is None or not hands:
+                held = self._held_mask(frame.shape[:2])
+                if held is not None:
+                    return held
+                if hands is None:
+                    return None
+                return np.zeros(frame.shape[:2], dtype=np.uint8)
+
+            mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+            for points in hands:
+                for polygon in _hand_polygons(points, frame.shape):
+                    cv2.fillPoly(mask, [polygon], 255)
+            kernel = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE, (2 * _DILATE_PX + 1, 2 * _DILATE_PX + 1)
+            )
+            mask = cv2.dilate(mask, kernel)
+            self._last_hand_mask = mask.copy()
+            self._mask_misses = 0
             return mask
+
+    def _held_mask(self, shape):
+        """Retém a última região por poucos misses; nunca por tempo ilimitado."""
+        if (
+            self._last_hand_mask is None
+            or self._last_hand_mask.shape != tuple(shape)
+            or self._mask_misses >= _MASK_HOLD_FRAMES
+        ):
+            self._last_hand_mask = None
+            self._mask_misses = 0
+            return None
+        self._mask_misses += 1
+        grow = _MASK_HOLD_GROW_PX * self._mask_misses
         kernel = cv2.getStructuringElement(
-            cv2.MORPH_ELLIPSE, (2 * _DILATE_PX + 1, 2 * _DILATE_PX + 1)
+            cv2.MORPH_ELLIPSE, (2 * grow + 1, 2 * grow + 1)
         )
-        return cv2.dilate(mask, kernel)
+        return cv2.dilate(self._last_hand_mask, kernel)
 
     def presence_signature(self, frame, timestamp_ms=None):
         """Assinatura de presenca sem construir mascara nenhuma.

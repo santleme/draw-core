@@ -82,12 +82,16 @@ class LayeredInkAccumulator:
             np.logical_or(seen, item > self.threshold, out=seen)
         return score, hits, seen
 
-    def add(self, prob, visible=None, *, removal_allowed=True):
+    def add(self, prob, visible=None, *, removal_allowed=True, paper_exposed=None):
         prob = np.asarray(prob, dtype=np.float32)
         if visible is not None:
             visible = np.asarray(visible, dtype=bool)
             if visible.shape != prob.shape:
                 visible = None
+        if paper_exposed is not None:
+            paper_exposed = np.asarray(paper_exposed, dtype=bool)
+            if paper_exposed.shape != prob.shape:
+                paper_exposed = None
         if self._confirmed is None or self._confirmed.shape != prob.shape:
             self._removal_streak = None
             self._confirmed = np.zeros(prob.shape, dtype=np.uint8)
@@ -182,7 +186,12 @@ class LayeredInkAccumulator:
                 self._removal_streak = np.zeros(prob.shape, dtype=np.uint8)
             # Sem máscara de visibilidade não há evidência negativa confiável.
             witnessed = False
-            if removal_allowed and visible is not None and canvas_before:
+            if (
+                removal_allowed
+                and visible is not None
+                and paper_exposed is not None
+                and canvas_before
+            ):
                 retained = np.count_nonzero(confirmed_before & visible & mask_now)
                 witnessed = (
                     retained >= registration._REMOVAL_RETAINED_FRACTION * canvas_before
@@ -192,6 +201,7 @@ class LayeredInkAccumulator:
                 missing = (
                     confirmed_before
                     & visible
+                    & paper_exposed
                     & np.isfinite(prob)
                     & (prob <= registration._REMOVAL_LOW_PROB)
                 )
@@ -205,7 +215,8 @@ class LayeredInkAccumulator:
                 # mão oscilam em cena real — medido: retained
                 # 1,5k~13,9k alternando no sim-hand, streak nunca
                 # completava).
-                resettable = visible & ~missing
+                exposed = visible & paper_exposed
+                resettable = exposed & ~missing
                 self._removal_streak[resettable] = 0
                 self._removal_streak[missing] = np.minimum(
                     self._removal_streak[missing].astype(np.uint16) + 1,
