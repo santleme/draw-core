@@ -224,6 +224,55 @@ def test_coverage_mask_gates_votes_off_sheet():
     assert gated[-1][:, : int(page_w * 0.30)].all()
 
 
+def test_paper_mean_bgr_hits_integer_boundary():
+    """cv2.mean pode devolver um inteiro exato 1 ulp abaixo (recíproco
+    arredondado); o cast antigo truncaria um nível a menos. A soma é
+    recuperada exata e dividida direto."""
+    from draw.pipeline import _paper_mean_bgr
+
+    image = np.full((1200, 850, 3), 80, np.uint8)
+    image[:, :750] = (235, 235, 235)
+    coverage = np.zeros((1200, 850), bool)
+    coverage[:, :750] = True  # 900.000 px — caso que desvia no cv2
+    assert cv2.mean(image, coverage.astype(np.uint8))[0] < 235.0
+    assert (_paper_mean_bgr(image, coverage) == [235, 235, 235]).all()
+
+
+def test_paper_mean_bgr_still_truncates_fractional_mean():
+    """Média fracionária segue truncando como o astype(uint8) antigo."""
+    from draw.pipeline import _paper_mean_bgr
+
+    image = np.zeros((4, 4, 3), np.uint8)
+    image[0, 0] = (200, 200, 200)
+    image[0, 1] = (201, 201, 201)  # média 200,5 -> 200
+    coverage = np.zeros((4, 4), bool)
+    coverage[0, :2] = True
+    assert (_paper_mean_bgr(image, coverage) == [200, 200, 200]).all()
+
+
+def test_coverage_fill_uses_the_paper_mean_bgr():
+    """O fora-da-folha recebe a cor média do próprio papel por canal.
+
+    Pinca o contrato do preenchimento (a aresta folha->preto vira a
+    cor do papel, não um branco fixo): cada pixel fora da cobertura
+    sai igual à média BGR dos pixels cobertos do mesmo warp.
+    """
+    frame = np.full((720, 1280, 3), 220, np.uint8)  # mesa clara
+    frame[100:400, 100:350] = (30, 100, 170)  # papel cor própria
+    coverage = _mask_block(100, 400, 100, 350)
+    loop, _det, ink = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", {"coverage_mask": coverage})
+    )
+    _drive(loop, 40, frame=frame)
+    page = ink.pages[-1]
+    assert page.coverage is not None and page.coverage.any()
+    inside = page.image[page.coverage]
+    expected = inside.mean(axis=0).astype(np.uint8)
+    outside = page.image[~page.coverage]
+    assert outside.size, "o teste precisa de região fora da folha"
+    assert (outside == expected).all()
+
+
 def test_coverage_config_off_ignores_the_mask():
     """coverage=False: a máscara publicada não entra no voto."""
     mask = _coverage_mask()
