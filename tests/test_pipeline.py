@@ -42,9 +42,7 @@ def test_covered_mean_color_matches_fancy_index_parity():
     image = rng.integers(0, 256, (120, 160, 3), dtype=np.uint8)
     mask = rng.random((120, 160)) < 0.6
     expected = image[mask].mean(axis=0).astype(np.uint8)
-    assert np.array_equal(
-        pipeline_module._covered_mean_color(image, mask), expected
-    )
+    assert np.array_equal(pipeline_module._covered_mean_color(image, mask), expected)
 
 
 class _SyncDetectionWorker:
