@@ -60,22 +60,24 @@ def hand_mask_orientation_vote(hand_mask):
     # (nao so a coluna 0), pois a mascara neural redimensionada deixa colunas
     # vazias na borda. Forca de contato em pixels ocupados.
     slack = max(_HAND_EDGE_MIN_SLACK, int(round(h * _HAND_EDGE_SLACK_RATIO)))
-    side_w = max(_HAND_EDGE_MIN_SLACK, int(round(w * _HAND_EDGE_TOL_RATIO)))
+    side_w = max(_HAND_EDGE_MIN_SLACK, int(round(w * _HAND_EDGE_SLACK_RATIO)))
     side_strength = max(
         int(np.count_nonzero(comp[:, :side_w].any(axis=1))),
         int(np.count_nonzero(comp[:, w - side_w :].any(axis=1))),
     )
     if side_strength > 0:
-        # Mao tambem perto de uma lateral: o contato com topo/base so vale se
-        # dominar a evidencia lateral (mais exigente quando ha folga, sem toque
-        # exato na borda). Evita falso giro por entrada lateral e perda do voto
-        # por toque lateral breve.
+        # Mao tambem perto de uma lateral: o contato exato na linha externa
+        # precisa dominar por 2x; se for so na faixa de folga, exige 5x
+        # para evitar falso giro por toque estreito de canto.
         for is_top in (True, False):
+            outer_row = comp[0, :] if is_top else comp[h - 1, :]
             band = comp[:slack, :] if is_top else comp[h - slack :, :]
-            exact = bool(comp[0, :].any() if is_top else comp[h - 1, :].any())
-            strength = int(np.count_nonzero(band.any(axis=0)))
-            need = _HAND_SIDE_DOMINANCE_EXACT if exact else _HAND_SIDE_DOMINANCE_SLACK
-            if strength < need * side_strength:
+            exact_strength = int(np.count_nonzero(outer_row))
+            slack_strength = int(np.count_nonzero(band.any(axis=0)))
+            if (
+                exact_strength < _HAND_SIDE_DOMINANCE_EXACT * side_strength
+                and slack_strength < _HAND_SIDE_DOMINANCE_SLACK * side_strength
+            ):
                 if is_top:
                     top_contact = 0
                 else:

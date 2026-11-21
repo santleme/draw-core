@@ -773,6 +773,23 @@ def test_hand_vote_abstains_on_dominant_side_entry_near_top():
     assert hand_mask_orientation_vote(mask_slack) is None
 
 
+def test_hand_vote_abstains_on_side_entry_with_narrow_corner_touch():
+    # Review PR #96: toque estreito na linha 0 nao pode liberar limiar 2x para a banda.
+    small = np.zeros((384, 384), dtype=np.uint8)
+    small[0:1, 0:3] = 255
+    small[1:32, 0:66] = 255
+    mask = cv2.resize(small, (1280, 720), interpolation=cv2.INTER_NEAREST)
+    assert hand_mask_orientation_vote(mask) is None
+    assert hand_mask_orientation_vote(mask[::-1].copy()) is None
+
+
+def test_hand_vote_top_entry_near_but_not_touching_side_still_votes():
+    # Review PR #96: braco a 20 px da lateral nao conta como evidencia lateral.
+    mask = np.zeros((720, 1280), dtype=np.uint8)
+    mask[0:180, 20:140] = 255
+    assert hand_mask_orientation_vote(mask) == "inverted"
+
+
 @pytest.mark.parametrize("h", [480, 720, 1280])
 def test_wide_lateral_hand_inside_top_slack_band_abstains(h):
     from draw.auto_orient import hand_mask_orientation_vote
