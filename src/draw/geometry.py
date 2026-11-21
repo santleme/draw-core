@@ -267,12 +267,16 @@ def _line_normal_shift_at(point, line_ref):
     return abs(float((point - pt_ref) @ normal))
 
 
-def _rectified_translation_consistent(fallback_lines, out_i, out_mid, in_i, in_mid):
+def _rectified_translation_consistent(
+    fallback_lines, out_i, out_mid, out_norm, in_i, in_mid, in_norm, pixel_scale=1.0
+):
     """Confere se dois saltos em arestas opostas sao iguais e opostos no plano
     retificado da pagina anterior (invariante a perspectiva de camera inclinada).
 
-    Retorna True/False quando o quadrilatero anterior e valido, ou None quando
-    faltam retas de fallback para montar a homografia.
+    A tolerancia absoluta e derivada do erro de ajuste de borda em pixels de
+    mascara projetado pela homografia nos pontos medidos (nao uma fracao fixa
+    da pagina). Retorna True/False quando o quadrilatero anterior e valido, ou
+    None quando faltam retas de fallback para montar a homografia.
     """
     if any(line is None for line in fallback_lines):
         return None
@@ -307,8 +311,14 @@ def _rectified_translation_consistent(fallback_lines, out_i, out_mid, in_i, in_m
         return None
     if out_off <= 0.0 or in_off >= 0.0:
         return False
+    err_px = max(1.5, 4.0 * pixel_scale)
+    out_pert = _outward_offset(out_i, out_mid + err_px * out_norm)
+    in_pert = _outward_offset(in_i, in_mid + err_px * in_norm)
+    if out_pert is None or in_pert is None:
+        return None
+    abs_tol = abs(out_pert - out_off) + abs(in_pert - in_off)
     mag = max(abs(out_off), abs(in_off))
-    return abs(out_off + in_off) <= max(0.04, 0.35 * mag)
+    return abs(out_off + in_off) <= max(abs_tol, 0.35 * mag)
 
 
 def _best_inlier_seed_line(side, along, pixel_scale=1.0):
@@ -501,9 +511,9 @@ def _refit_corners(contour, quad, frame_shape, fallback_lines=None, scale=(1.0, 
                 if float((centroid - pt_prev) @ norm_out) > 0:
                     norm_out = -norm_out
                 shift_outward = float((proj_mid - pt_prev) @ norm_out)
-                jumped.append((i, shift_outward, ang, proj_mid))
+                jumped.append((i, shift_outward, ang, proj_mid, norm_out))
         if len(steady) >= 2 and len(jumped) == 1:
-            bad, shift_outward, ang, _proj_mid = jumped[0]
+            bad, shift_outward, ang, _proj_mid, _norm_out = jumped[0]
             # Desobstrucao/expansao genuina move a aresta para fora do centroide
             # (sem giro extremo); oclusao move para dentro ou gira no lugar.
             is_outward_reveal = (
@@ -515,14 +525,24 @@ def _refit_corners(contour, quad, frame_shape, fallback_lines=None, scale=(1.0, 
                 locked[bad] = True
                 trusted[bad] = False
         elif len(steady) >= 2 and len(jumped) == 2:
-            # Classifica deslocamento para fora vs para dentro pelo sinal de
-            # shift_outward (nao pela negacao do limiar angular), para que uma
-            # aresta que reaparece e desentorta nao seja confundida com oclusao.
+            # Classifica deslocamento para fora, para dentro e pivo puramente
+            # angular (deslocamento normal desprezivel com giro > limiar).
             outward_edges = [entry for entry in jumped if entry[1] > 2.0 * pixel_scale]
             inward_edges = [entry for entry in jumped if entry[1] < -2.0 * pixel_scale]
-            if len(outward_edges) == 1 and len(inward_edges) == 1:
-                out_i, out_shift, out_ang, out_mid = outward_edges[0]
-                in_i, in_shift, in_ang, in_mid = inward_edges[0]
+            pivot_edges = [
+                entry
+                for entry in jumped
+                if abs(entry[1]) <= 2.0 * pixel_scale
+                and entry[2] > _MEMORY_SINGLE_OUTLIER_ANGLE_DEG
+            ]
+            if len(outward_edges) == 1 and len(pivot_edges) == 1:
+                piv_i = pivot_edges[0][0]
+                lines[piv_i] = fallback_lines[piv_i]
+                locked[piv_i] = True
+                trusted[piv_i] = False
+            elif len(outward_edges) == 1 and len(inward_edges) == 1:
+                out_i, out_shift, out_ang, out_mid, out_norm = outward_edges[0]
+                in_i, in_shift, in_ang, in_mid, in_norm = inward_edges[0]
                 opposite = (out_i + 2) % 4 == in_i
                 angles_ok = (
                     out_ang <= _MEMORY_SINGLE_OUTLIER_ANGLE_DEG
@@ -531,7 +551,14 @@ def _refit_corners(contour, quad, frame_shape, fallback_lines=None, scale=(1.0, 
                 consistent_translation = False
                 if opposite and angles_ok:
                     rect_ok = _rectified_translation_consistent(
-                        fallback_lines, out_i, out_mid, in_i, in_mid
+                        fallback_lines,
+                        out_i,
+                        out_mid,
+                        out_norm,
+                        in_i,
+                        in_mid,
+                        in_norm,
+                        pixel_scale,
                     )
                     if rect_ok is not None:
                         consistent_translation = rect_ok

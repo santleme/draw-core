@@ -536,3 +536,56 @@ def test_neural_detector_uncovering_two_edges_with_angle_change_recovers_both():
         assert q2 is not None
         assert abs(q2[:, 1].min() - 64.0) <= 5.0
         assert abs(q2[:, 0].min() - 75.0) <= 5.0
+
+
+def test_neural_detector_pivoting_occlusion_during_edge_reveal_is_guarded():
+    """Quando a borda esquerda reaparece (x=80 -> x=70) enquanto a borda
+    superior gira em torno do proprio ponto medio (y=100 -> diagonal (70,80)..(310,120),
+    ~9,5 graus), a guarda deve proteger a borda superior em vez de salvar a diagonal."""
+    from draw.perception import NeuralSheetDetector
+
+    det = NeuralSheetDetector("unused.onnx", verify=None)
+    scale_x, scale_y = 1280.0 / 384.0, 720.0 / 384.0
+
+    # Quadro 1: x=80..310, y=100..310.
+    m1 = np.zeros((384, 384), dtype=np.uint8)
+    m1[100:310, 80:310] = 255
+    q1 = det._fit(m1, scale_x=scale_x, scale_y=scale_y)
+    assert q1 is not None
+
+    # Quadro 2+: esquerda revela x=70, topo gira ~9,5 graus ao redor de y=100.
+    poly2 = np.array([[70, 80], [310, 120], [310, 310], [70, 310]], dtype=np.int32)
+    m2 = np.zeros((384, 384), dtype=np.uint8)
+    cv2.fillPoly(m2, [poly2], 255)
+    for _ in range(3):
+        q2 = det._fit(m2, scale_x=scale_x, scale_y=scale_y)
+        assert q2 is not None
+        # Esquerda recupera para ~70 * scale_x; topo permanece horizontal perto de 100 * scale_y.
+        assert abs(q2[:, 0].min() - 70.0 * scale_x) <= 10.0
+        assert abs(q2[0, 1] - 100.0 * scale_y) <= 10.0
+        assert abs(q2[1, 1] - 100.0 * scale_y) <= 10.0
+
+
+def test_neural_detector_unequal_opposite_edge_shifts_not_mistaken_for_slide():
+    """Em pagina frontal 384x384 (x=80..330), expor 7 colunas na direita
+    enquanto cobre 16 na esquerda (diferenca de 9 px > 35% de 16 px) NAO pode
+    ser aceito como translacao: a esquerda deve permanecer em x=80."""
+    from draw.perception import NeuralSheetDetector
+
+    det = NeuralSheetDetector("unused.onnx", verify=None)
+    scale_x, scale_y = 1280.0 / 384.0, 720.0 / 384.0
+
+    m1 = np.zeros((384, 384), dtype=np.uint8)
+    m1[80:310, 80:330] = 255
+    q1 = det._fit(m1, scale_x=scale_x, scale_y=scale_y)
+    assert q1 is not None
+    assert abs(q1[:, 0].min() - 80.0 * scale_x) <= 8.0
+
+    # Direita expoe +7 colunas (330 -> 337); esquerda cobre 16 colunas (80 -> 96).
+    m2 = np.zeros((384, 384), dtype=np.uint8)
+    m2[80:310, 96:337] = 255
+    for _ in range(3):
+        q2 = det._fit(m2, scale_x=scale_x, scale_y=scale_y)
+        assert q2 is not None
+        assert abs(q2[:, 0].min() - 80.0 * scale_x) <= 10.0
+        assert abs(q2[:, 0].max() - 337.0 * scale_x) <= 10.0
