@@ -573,3 +573,19 @@ def test_uneven_shadow_shoulders_do_not_exempt_the_whole_fold():
             prob[y : y + 6, 640:642] = 0.95
     out = ruling.RulingFilter().apply(prob.copy())
     assert (out[:, 566:634] > 0.5).sum() == 0
+
+
+def test_an_extrapolated_line_seen_only_in_the_last_partial_window_is_kept():
+    """Linha inclinada que so entra na imagem nas ultimas 35 colunas da trilha
+    e tem tinta nas ultimas 24 (a janela parcial final): o suporte conta essa
+    janela pela largura real (review #139)."""
+    xs = np.arange(600)
+    paths = np.stack([np.full(600, 100.0), 599.0 - (xs - 565.0)]).astype(np.float32)
+    seg = ruling.Segment(0, 600, paths, 40.0, np.array([False, True]))
+    prob = np.zeros((600, 600), np.float32)
+    prob[99:101, :] = 0.95
+    for x in range(576, 600):
+        y = int(round(paths[1, x]))
+        prob[y : y + 2, x] = 0.95
+    out = ruling._drop_unsupported(prob, seg)
+    assert out.paths.shape[0] == 2

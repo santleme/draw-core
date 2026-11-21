@@ -353,8 +353,13 @@ def estimate(prob, visible=None):
         seg = _segment(score, c_lo, c_hi, w, h)
         if seg is not None:
             segments.append(seg)
-    segments = [seg for seg in segments if _support(prob, seg) >= _MIN_SUPPORT]
-    segments = [_drop_unsupported(prob, seg) for seg in segments]
+    marks = [_ink_on_path(prob, seg) for seg in segments]  # um remap por segmento
+    kept = [
+        (seg, has)
+        for seg, has in zip(segments, marks, strict=True)
+        if _support(prob, seg, has) >= _MIN_SUPPORT
+    ]
+    segments = [_drop_unsupported(prob, seg, has) for seg, has in kept]
     if not segments:
         return None
     h_pauta = _estimate_h(prob, segments)
@@ -472,16 +477,22 @@ def _dilate_cols(mask, pad):
     return out
 
 
-def _support(prob, seg):
+def _ink_on_path(prob, seg):
+    """(K, X) bool: há tinta fina sobre o caminho. Um remap por segmento."""
+    ink = (prob > _T_RUN).view(np.uint8)
+    pattern, _ = _Track(seg, prob.shape).window(ink)
+    return _lut()[0][pattern] >= 1
+
+
+def _support(prob, seg, has=None):
     """Fração das janelas de _SUPPORT_W px, ao longo da pagina, em que a linha
     tem tinta fina sobre o caminho (mediana das linhas).
 
     Pauta de verdade corre a largura da folha; um tracejado de caneta, ou
     qualquer coisa periodica numa faixa so, nao: seu suporte e local.
     """
-    ink = (prob > _T_RUN).view(np.uint8)
-    pattern, _ = _Track(seg, prob.shape).window(ink)
-    has = _lut()[0][pattern] >= 1  # (K, X)
+    if has is None:
+        has = _ink_on_path(prob, seg)  # (K, X)
     if seg.extended is not None and not seg.extended.all():
         has = has[~seg.extended]  # só as linhas medidas decidem o segmento
     k, x = has.shape
@@ -499,7 +510,7 @@ def _support(prob, seg):
     return min(frac, span / _MIN_SPAN * _MIN_SUPPORT)
 
 
-def _drop_unsupported(prob, seg):
+def _drop_unsupported(prob, seg, has=None):
     """Tira as linhas extrapoladas sem suporte próprio ao longo da folha.
 
     Mesmo critério do segmento (janelas de _SUPPORT_W px com tinta fina e
@@ -510,15 +521,19 @@ def _drop_unsupported(prob, seg):
     if seg.extended is None or not seg.extended.any():
         return seg
     h = prob.shape[0]
-    ink = (prob > _T_RUN).view(np.uint8)
-    pattern, _ = _Track(seg, prob.shape).window(ink)
-    has = _lut()[0][pattern] >= 1  # (K, X)
+    if has is None:
+        has = _ink_on_path(prob, seg)
     inside = (seg.paths >= 0) & (seg.paths <= h - 1)
-    has &= inside
+    has = has & inside
     k, x = has.shape
-    n = max(1, x // _SUPPORT_W)
-    win_has = has[:, : n * _SUPPORT_W].reshape(k, n, _SUPPORT_W).any(axis=2)
-    win_in = inside[:, : n * _SUPPORT_W].reshape(k, n, _SUPPORT_W).mean(axis=2) >= 0.5
+    # janelas de _SUPPORT_W px incluindo a última, parcial: uma linha inclinada
+    # que só entra no fim da trilha tem o suporte justamente ali
+    n = -(-x // _SUPPORT_W)
+    pad = ((0, 0), (0, n * _SUPPORT_W - x))
+    win_has = np.pad(has, pad).reshape(k, n, _SUPPORT_W).any(axis=2)
+    cnt_in = np.pad(inside, pad).reshape(k, n, _SUPPORT_W).sum(axis=2)
+    width = np.minimum(_SUPPORT_W, x - np.arange(n) * _SUPPORT_W)  # largura real
+    win_in = cnt_in >= 0.5 * width[None, :]
     n_in = np.maximum(win_in.sum(axis=1), 1)
     frac = (win_has & win_in).sum(axis=1) / n_in
     first = has.argmax(axis=1)
