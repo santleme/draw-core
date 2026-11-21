@@ -21,6 +21,29 @@ import numpy as np
 
 from .contracts import DetectionResult, GateInfo
 
+# Os limites em pixels deste modulo (_SHEET_*_PX) foram calibrados
+# na mesa de referencia — webcam 1280x720 MJPG quase perpendicular,
+# folha dentro do quadro — e vivem em px DESSE quadro: 40 px sao
+# 3,1% da largura a 720p, ~1% num quadro 4K. O denominador que
+# torna o limiar invariante a resolucao e a DIAGONAL do quadro
+# (issue #105): o limiar efetivo e constante * pixel_scale, com
+# pixel_scale vindo de camera_pixel_scale (1,0 em 1280x720 — a
+# calibracao preservada e o comportamento de sempre).
+_CAMERA_REF_DIAGONAL_PX = float(np.hypot(1280.0, 720.0))
+
+
+def camera_pixel_scale(frame_shape):
+    """Escala de pixel da camera para um quadro (h, w[, c]).
+
+    Diagonal do quadro sobre a diagonal de referencia 1280x720:
+    1,0 na resolucao calibrada, 0,5 a 640x360, 2,0 a 2560x1440.
+    A diagonal ignora orientacao (retrato da o mesmo valor que
+    paisagem) e mistura largura e altura num denominador so.
+    """
+    frame_h, frame_w = frame_shape[:2]
+    return float(np.hypot(frame_w, frame_h)) / _CAMERA_REF_DIAGONAL_PX
+
+
 _SHEET_NEAR_LIMIT_PX = 40.0
 
 
@@ -35,9 +58,10 @@ _SHEET_BLEND_ALPHA = 0.3
 # parada "se mexia" na tela. Tres defesas, nesta ordem:
 # (1) a deteccao que alimenta o rastreador e a mediana das ultimas
 # _SHEET_FILTER_WINDOW deteccoes, que apaga o salto isolado de um
-# frame so; (2) deteccao filtrada a ate _SHEET_DEADBAND_PX do quad
-# atual confirma presenca SEM mover o quad — abaixo disso e ruido
-# de medida, nao movimento, e a folha parada fica bit-estavel;
+# frame so; (2) deteccao filtrada a ate _SHEET_DEADBAND_PX (px da
+# referencia, vezes pixel_scale) do quad atual confirma presenca
+# SEM mover o quad — abaixo disso e ruido de medida, nao
+# movimento, e a folha parada fica bit-estavel;
 # (3) o candidato a salto fica FIXO na primeira deteccao que o
 # abriu: antes ele era misturado a cada deteccao nova e "andava"
 # ate confirmar um salto que nenhuma posicao sustentou pelo tempo
@@ -48,8 +72,9 @@ _SHEET_FILTER_WINDOW = 3
 _SHEET_DEADBAND_PX = 2.0
 
 
-# Salto GRANDE (candidato a mais de _SHEET_BIG_JUMP_PX do quad
-# atual) exige persistencia maior: e a assinatura do detector
+# Salto GRANDE (candidato a mais de _SHEET_BIG_JUMP_PX — px da
+# referencia, vezes pixel_scale — do quad atual) exige
+# persistencia maior: e a assinatura do detector
 # trocando de modo num ajuste biestavel (a folha cortada pela
 # borda do quadro projeta cantos a ~100 px frame a frame), e um
 # modo errado raramente se sustenta por 1 s em captura real, com
@@ -154,6 +179,11 @@ class SheetTracker:
     confirmacao por tempo esfomeia o relogio e a folha cai no meio
     da janela da mao (medido no replay: 11 quadros sem folha e
     atraso de remocao de 0,30 s, contra 0,53 s com a renovacao).
+
+    Os limites em px (_SHEET_NEAR_LIMIT_PX, _SHEET_DEADBAND_PX,
+    _SHEET_BIG_JUMP_PX) vivem no quadro de referencia 1280x720; o
+    limiar efetivo e a constante vezes o pixel_scale recebido no
+    update corrente (ver camera_pixel_scale, issue #105).
     """
 
     def __init__(self):
@@ -181,6 +211,10 @@ class SheetTracker:
         self._last_seen_at = None
         self._recent = deque(maxlen=_SHEET_FILTER_WINDOW)
         self._absent_calls = 0
+        # Escala de px do quadro dos cantos (camera_pixel_scale):
+        # multiplica os limites _SHEET_*_PX da referencia. O update
+        # a renova a cada resultado; 1,0 = referencia 1280x720.
+        self._pixel_scale = 1.0
 
     def reset(self):
         """Volta ao estado inicial: sem folha, sem candidato, sem historico."""
@@ -205,6 +239,7 @@ class SheetTracker:
             "frames_since_seen": int(self._frames_since_seen),
             "last_seen_at": self._last_seen_at,
             "absent_calls": int(self._absent_calls),
+            "pixel_scale": float(self._pixel_scale),
         }
 
     def should_detect(self, frame_number):
@@ -217,9 +252,12 @@ class SheetTracker:
         return self._absent_calls % _SHEET_ABSENT_BACKOFF_INTERVAL == 0
 
     def _confirm(self, corners, verdict, now):
+        # Limites em px da referencia escalados pelo quadro atual.
+        near_px = _SHEET_NEAR_LIMIT_PX * self._pixel_scale
+        big_jump_px = _SHEET_BIG_JUMP_PX * self._pixel_scale
         if self.corners is not None:
             jump_distance = corner_distance(self.corners, corners)
-            if jump_distance > _SHEET_BIG_JUMP_PX:
+            if jump_distance > big_jump_px:
                 self.big_jump_seq += 1
                 self.last_big_jump = {
                     "seq": self.big_jump_seq,
@@ -234,9 +272,7 @@ class SheetTracker:
         # salto) recomeca a janela do filtro na posicao nova: sem
         # isso, a mediana das proximas deteccoes misturaria a
         # posicao velha com a nova e arrastaria o quad confirmado.
-        if self.corners is None or (
-            corner_distance(self.corners, corners) > _SHEET_NEAR_LIMIT_PX
-        ):
+        if self.corners is None or (corner_distance(self.corners, corners) > near_px):
             self._recent.clear()
             self._recent.append(np.asarray(corners, dtype=np.float32).copy())
         self.corners = corners
@@ -253,15 +289,27 @@ class SheetTracker:
         self._recent.append(np.asarray(detected, dtype=np.float32).copy())
         return np.median(np.stack(self._recent), axis=0).astype(np.float32)
 
-    def update(self, detected, verdict, ran_detection, now):
+    def update(self, detected, verdict, ran_detection, now, pixel_scale=1.0):
         """Alimenta o rastreador com o resultado do quadro.
 
         detected e o quadrilatero detectado ou None; ran_detection
         diz se a deteccao rodou neste quadro; now e um relogio
-        monotonico em segundos. Retorna "seen" quando uma deteccao
-        confirma a folha, "drop" quando a folha e descartada e None
-        nos demais quadros (so para diagnostico).
+        monotonico em segundos. pixel_scale e a escala do quadro em
+        que os cantos vivem (camera_pixel_scale do frame; 1,0 =
+        referencia 1280x720) e multiplica os limites _SHEET_*_PX.
+        Retorna "seen" quando uma deteccao confirma a folha, "drop"
+        quando a folha e descartada e None nos demais quadros (so
+        para diagnostico).
         """
+        if not isinstance(pixel_scale, (int, float)) or not np.isfinite(pixel_scale):
+            raise ValueError(f"pixel_scale precisa ser float finito: {pixel_scale!r}")
+        if pixel_scale <= 0:
+            raise ValueError(f"pixel_scale precisa ser > 0: {pixel_scale}")
+        self._pixel_scale = float(pixel_scale)
+        # Limites em px da referencia escalados pelo quadro atual.
+        deadband_px = _SHEET_DEADBAND_PX * self._pixel_scale
+        near_px = _SHEET_NEAR_LIMIT_PX * self._pixel_scale
+        big_jump_px = _SHEET_BIG_JUMP_PX * self._pixel_scale
         event = None
         if (
             detected is None
@@ -286,7 +334,7 @@ class SheetTracker:
                 event = "seen"
             elif (
                 self.corners is not None
-                and corner_distance(self.corners, detected) <= _SHEET_DEADBAND_PX
+                and corner_distance(self.corners, detected) <= deadband_px
             ):
                 # Dentro da banda morta: presenca confirmada, quad
                 # NAO se move. Folha parada fica bit-estavel em vez
@@ -295,7 +343,7 @@ class SheetTracker:
                 event = "seen"
             elif (
                 self.corners is not None
-                and corner_distance(self.corners, detected) <= _SHEET_NEAR_LIMIT_PX
+                and corner_distance(self.corners, detected) <= near_px
             ):
                 self._confirm(_blend_corners(self.corners, detected), verdict, now)
                 event = "seen"
@@ -311,8 +359,7 @@ class SheetTracker:
                 if (
                     self.corners is not None
                     and self._pending is not None
-                    and corner_distance(self.corners, self._pending)
-                    > _SHEET_BIG_JUMP_PX
+                    and corner_distance(self.corners, self._pending) > big_jump_px
                 ):
                     confirm_seconds = max(
                         confirm_seconds, _SHEET_BIG_JUMP_PERSIST_SECONDS
@@ -324,7 +371,7 @@ class SheetTracker:
                     self._episode_discontinuous = True
                 if (
                     self._pending is not None
-                    and corner_distance(self._pending, detected) <= _SHEET_NEAR_LIMIT_PX
+                    and corner_distance(self._pending, detected) <= near_px
                 ):
                     # Candidato FIXO: a deteccao nova sustenta o
                     # candidato que ja existe, sem move-lo. Misturar

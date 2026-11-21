@@ -15,6 +15,7 @@ laboratório pelo agente). Estes testes pinam as três defesas:
 """
 
 import numpy as np
+import pytest
 
 from draw import tracker as tracker_module
 
@@ -189,3 +190,101 @@ def test_returning_sheet_does_not_inherit_stale_candidate_corners():
         f"candidato novo nasceu {distance:.1f} px longe da deteccao: "
         "a janela do filtro herdou os cantos antigos"
     )
+
+
+def test_camera_pixel_scale_uses_the_frame_diagonal():
+    """(h, w) -> diagonal do quadro / diagonal de referencia 1280x720."""
+    scale = tracker_module.camera_pixel_scale
+    assert scale((720, 1280)) == pytest.approx(1.0)
+    assert scale((360, 640)) == pytest.approx(0.5)
+    assert scale((1440, 2560)) == pytest.approx(2.0)
+    # Retrato: a diagonal ignora a orientacao do quadro.
+    assert scale((1280, 720)) == pytest.approx(1.0)
+
+
+def test_deadband_scales_with_pixel_scale():
+    """Com pixel_scale=2.0 a banda morta efetiva e 4 px: uma
+    deteccao a 3 px confirma presenca sem mover o quad. Na
+    referencia (1,0) os mesmos 3 px passam da banda de 2 px e
+    misturam."""
+    tracker = tracker_module.SheetTracker()
+    tracker.update(BASE.copy(), "paper", True, 0.0)
+    shifted = BASE + np.array([3.0, 0.0], dtype=np.float32)
+    # Deteccoes repetidas: a mediana devolve os 3 px inteiros.
+    for i in range(1, 4):
+        event = tracker.update(shifted.copy(), "paper", True, i * 0.2, pixel_scale=2.0)
+        assert event == "seen"
+    assert tracker_module.corner_distance(tracker.corners, BASE) == 0.0
+    # Referencia 1,0: fora da banda, os 3 px misturam e o quad anda.
+    tracker_ref = tracker_module.SheetTracker()
+    tracker_ref.update(BASE.copy(), "paper", True, 0.0)
+    for i in range(1, 4):
+        tracker_ref.update(shifted.copy(), "paper", True, i * 0.2)
+    assert tracker_module.corner_distance(tracker_ref.corners, BASE) > 0.0
+
+
+def test_near_limit_scales_with_pixel_scale():
+    """Deteccao a ~60 px: com pixel_scale=2.0 cabe no limite de
+    vizinhanca escalado (80 px) e mistura sem candidato; na
+    referencia passa dos 40 px e abre candidato a salto."""
+    tracker = tracker_module.SheetTracker()
+    tracker.update(BASE.copy(), "paper", True, 0.0)
+    shifted = BASE + np.array([60.0, 0.0], dtype=np.float32)
+    for t in (0.1, 0.2, 0.3):
+        event = tracker.update(shifted.copy(), "paper", True, t, pixel_scale=2.0)
+        assert event == "seen"
+    assert not tracker.has_pending
+    assert tracker_module.corner_distance(tracker.corners, BASE) > 10.0
+    # Referencia 1,0: 60 px > 40 abre candidato que pede persistencia.
+    tracker_ref = tracker_module.SheetTracker()
+    tracker_ref.update(BASE.copy(), "paper", True, 0.0)
+    for t in (0.1, 0.2, 0.3):
+        tracker_ref.update(shifted.copy(), "paper", True, t)
+    assert tracker_ref.has_pending
+    assert tracker_module.corner_distance(tracker_ref.corners, BASE) <= 15.0
+
+
+def test_big_jump_threshold_scales_with_pixel_scale():
+    """Candidato a ~150 px: com pixel_scale=2.0 fica abaixo do
+    salto grande escalado (200 px) e confirma em 0,3 s; na
+    referencia passa dos 100 px e exige 1,0 s de persistencia."""
+    tracker = tracker_module.SheetTracker()
+    tracker.update(BASE.copy(), "paper", True, 0.0)
+    moved = BASE + np.array([150.0, 0.0], dtype=np.float32)
+    events = [
+        tracker.update(moved.copy(), "paper", True, t, pixel_scale=2.0)
+        for t in (0.1, 0.2, 0.3, 0.4, 0.5)
+    ]
+    # O candidato fixa em t=0,2 e confirma ~0,3 s depois; a
+    # distancia de confirmacao (~127 px) nao marca salto grande.
+    assert events[-1] == "seen"
+    assert tracker.big_jump_seq == 0
+    # Referencia 1,0: o mesmo candidato e salto grande — pendente
+    # em 0,5 s, confirma so depois de 1,0 s de persistencia.
+    tracker_ref = tracker_module.SheetTracker()
+    tracker_ref.update(BASE.copy(), "paper", True, 0.0)
+    for t in (0.1, 0.2, 0.3, 0.4, 0.5):
+        tracker_ref.update(moved.copy(), "paper", True, t)
+    assert tracker_ref.has_pending
+    event = tracker_ref.update(moved.copy(), "paper", True, 1.3)
+    assert event == "seen"
+    assert tracker_ref.big_jump_seq == 1
+
+
+def test_update_rejects_non_positive_or_non_finite_pixel_scale():
+    tracker = tracker_module.SheetTracker()
+    for bad in (0.0, -1.5, float("nan"), float("inf"), "dois"):
+        with pytest.raises(ValueError):
+            tracker.update(BASE.copy(), "paper", True, 0.0, pixel_scale=bad)
+    # Escala invalida nao altera o estado nem a escala corrente.
+    assert tracker.corners is None
+    assert tracker.diagnostic_state()["pixel_scale"] == 1.0
+
+
+def test_diagnostic_state_reports_pixel_scale():
+    tracker = tracker_module.SheetTracker()
+    assert tracker.diagnostic_state()["pixel_scale"] == 1.0
+    tracker.update(BASE.copy(), "paper", True, 0.0, pixel_scale=2.0)
+    assert tracker.diagnostic_state()["pixel_scale"] == 2.0
+    tracker.update(BASE.copy(), "paper", True, 0.2)
+    assert tracker.diagnostic_state()["pixel_scale"] == 1.0
