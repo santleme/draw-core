@@ -21,6 +21,7 @@ from . import paper as paper_module
 
 _HAND_MIN_AREA_RATIO = 0.005
 _HAND_EDGE_TOL_RATIO = 0.02
+_HAND_EDGE_SLACK_RATIO = 0.005
 _HAND_EDGE_MIN_PIXELS = 12
 _HAND_BORDER_DOMINANCE = 3.0
 
@@ -52,19 +53,22 @@ def hand_mask_orientation_vote(hand_mask):
     tol = max(3, int(round(h * _HAND_EDGE_TOL_RATIO)))
     top_contact = int(np.count_nonzero(comp[:tol, :]))
     bot_contact = int(np.count_nonzero(comp[h - tol :, :]))
-    # Contato lateral: uma mao que entra de lado pode sobrepor a faixa de
-    # tolerancia do topo sem tocar a borda. Exige toque real na linha extrema e
-    # abstem-se quando o contato lateral e tao forte quanto o vertical.
+    # "Toque" na borda: a segmentacao pode deixar uma folga de 1-2 px, mas uma
+    # mao que so sobrepoe a faixa de tolerancia (entrando de lado, a varias
+    # linhas da borda) nao toca. Folga curta, separada da faixa de contagem.
+    slack = max(2, int(round(h * _HAND_EDGE_SLACK_RATIO)))
+    top_edge = int(np.count_nonzero(comp[:slack, :]))
+    bot_edge = int(np.count_nonzero(comp[h - slack :, :]))
     side_contact = max(
-        int(np.count_nonzero(comp[:, 0])), int(np.count_nonzero(comp[:, w - 1]))
+        int(np.count_nonzero(comp[:, :slack])) // slack,
+        int(np.count_nonzero(comp[:, w - slack :])) // slack,
     )
-    top_edge = int(np.count_nonzero(comp[0, :]))
-    bot_edge = int(np.count_nonzero(comp[h - 1, :]))
     if top_edge == 0:
         top_contact = 0
     if bot_edge == 0:
         bot_contact = 0
-    if side_contact >= max(top_edge, bot_edge):
+    # Entrada lateral: contato lateral (por linha) tao forte quanto o vertical.
+    if side_contact >= max(top_edge // slack, bot_edge // slack, 1):
         return None
 
     if top_contact >= _HAND_EDGE_MIN_PIXELS and top_contact >= (

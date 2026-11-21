@@ -1,5 +1,7 @@
 """Testes de orientacao automatica (180°, retrato/paisagem) e caderno de 2 paginas."""
 
+import os
+
 import cv2
 import numpy as np
 import pytest
@@ -729,3 +731,30 @@ def test_fit_does_not_swallow_typeerror_from_geometry(monkeypatch):
     m[80:300, 80:300] = 255
     with pytest.raises(TypeError, match="erro real"):
         det._fit(m)
+
+
+def test_hand_vote_tolerates_narrow_segmentation_gap_at_top_edge():
+    from draw.auto_orient import hand_mask_orientation_vote
+
+    mask = np.zeros((1280, 720), dtype=np.uint8)
+    mask[2:300, 300:420] = 255  # segmentacao deixou 2 linhas vazias no topo
+    assert hand_mask_orientation_vote(mask) == "inverted"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="modos POSIX")
+def test_png_writer_and_private_dir_are_owner_only(tmp_path):
+    from draw.camera import PngWriter
+    from draw.infra.safe_io import ensure_private_dir
+
+    old = os.umask(0o022)
+    try:
+        folder = ensure_private_dir(tmp_path / "capturas")
+        writer = PngWriter()
+        out = folder / "x.png"
+        writer.save(out, np.zeros((4, 4, 3), np.uint8))
+        writer.close()
+    finally:
+        os.umask(old)
+    assert out.exists()
+    assert (folder.stat().st_mode & 0o077) == 0
+    assert (out.stat().st_mode & 0o077) == 0

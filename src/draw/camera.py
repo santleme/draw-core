@@ -279,6 +279,19 @@ class LatestFrameCapture:
         self._thread.join(timeout=2.0)
 
 
+def _precreate_private(path):
+    """Cria o arquivo com modo 0600 antes do imwrite (que usaria o umask).
+
+    Melhor esforco: em Windows/FS sem modos o modo e ignorado; arquivo ja
+    existente mantem o modo que tem.
+    """
+    try:
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT, 0o600)
+    except OSError:
+        return
+    os.close(fd)
+
+
 class PngWriter:
     """Escritora de PNG em thread unica, para o imwrite sair do laco.
 
@@ -315,6 +328,7 @@ class PngWriter:
             # na fila para sempre, com o close() esperando o teto de
             # _PNG_DRAIN_SECONDS.
             try:
+                _precreate_private(path)
                 written = cv2.imwrite(str(path), image)
             except Exception as error:  # noqa: BLE001 - vira aviso
                 written = False

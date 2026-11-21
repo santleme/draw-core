@@ -218,7 +218,9 @@ def iter_jsonl(
 def ensure_private_dir(path):
     """Cria a pasta e garante um .gitignore "*" nela. Devolve o Path."""
     path = Path(path)
-    path.mkdir(parents=True, exist_ok=True)
+    # Capturas sao desenhos/quadros privados: a pasta que NOS criamos nasce so
+    # do dono (0700). Pasta ja existente nao tem o modo alterado.
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
     marker = path / ".gitignore"
     if not marker.exists():
         try:
