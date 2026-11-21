@@ -1873,3 +1873,45 @@ def test_no_native_retry_when_requested_mode_never_connects(tmp_path):
     )
     assert cap is None
     assert len(cmds) == 1
+
+
+def test_native_retry_when_requested_host_exits_without_stderr(tmp_path):
+    fake_exe = tmp_path / "hvcam-host.exe"
+    fake_exe.write_bytes(b"MZ")
+    cmds = []
+
+    def fake_popen(cmd, **_kw):
+        cmds.append(list(cmd))
+        proc = _ScriptedProc(cmd)
+        if "--width" in cmd:
+            proc._rc = 1
+        return proc
+
+    class _Capture:
+        def __init__(self, _url, *, on_listening, abort_check, **_kw):
+            self._host_proc = None
+            on_listening()
+            self.opened = "--width" not in cmds[-1]
+            assert self.opened != abort_check()
+
+        def isOpened(self):
+            return self.opened
+
+        def release(self):
+            hvcam_module._terminate_host_process(self._host_proc)
+
+    cap, idx, name = hvcam_module.open_managed_reverse(
+        host_exe=fake_exe,
+        devices=[(0, "Native-only camera")],
+        popen=fake_popen,
+        capture_cls=_Capture,
+    )
+    try:
+        assert cap is not None
+        assert (idx, name) == (0, "Native-only camera")
+        assert len(cmds) == 2
+        assert "--width" in cmds[0]
+        assert "--width" not in cmds[1]
+    finally:
+        if cap is not None:
+            cap.release()
