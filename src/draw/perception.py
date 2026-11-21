@@ -446,7 +446,13 @@ class NeuralSheetDetector:
             else (mask.shape[0] * scale_y, mask.shape[1] * scale_x)
         )
         if corners is not None and not _geometry.fit_plausible(
-            corners, ref_shape, mask, scale_x=scale_x, scale_y=scale_y
+            corners,
+            ref_shape,
+            mask,
+            scale_x=scale_x,
+            scale_y=scale_y,
+            contour=contour,
+            hand=self.last_hand_mask,
         ):
             self._note_rejected_fit()
             return None

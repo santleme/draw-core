@@ -119,23 +119,28 @@ def _edge_border_sides(p, q, border_gap, width, height):
     return sides
 
 
-def _mask_supports_cut(mask, side, p, q, scale_x, scale_y):
-    """O recorte declarado em `side` tem suporte no contorno da máscara?"""
-    mh, mw = mask.shape
+def _mask_supports_cut(evidence, observable, side, p, q, scale_x, scale_y):
+    """O recorte declarado em `side` tem suporte no contorno observado?"""
+    mh, mw = evidence.shape
     if side in ("left", "right"):
         i = 0 if side == "left" else mw - 1
         a = int(min(p[1], q[1]) // scale_y)
         b = int(max(p[1], q[1]) // scale_y)
-        strip = mask[max(0, a) : min(mh, b + 1), i]
+        st_e = evidence[max(0, a) : min(mh, b + 1), i]
+        st_o = observable[max(0, a) : min(mh, b + 1), i]
     else:
         i = 0 if side == "top" else mh - 1
         a = int(min(p[0], q[0]) // scale_x)
         b = int(max(p[0], q[0]) // scale_x)
-        strip = mask[i, max(0, a) : min(mw, b + 1)]
-    return strip.size > 0 and np.count_nonzero(strip) * 2 >= strip.size
+        st_e = evidence[i, max(0, a) : min(mw, b + 1)]
+        st_o = observable[i, max(0, a) : min(mw, b + 1)]
+    obs = int(np.count_nonzero(st_o))
+    return obs > 0 and int(np.count_nonzero(st_e)) * 2 >= obs
 
 
-def _frame_cut(quad, u, v, border_gap, width, height, mask, scale_x, scale_y):
+def _frame_cut(
+    quad, u, v, border_gap, width, height, evidence, observable, scale_x, scale_y
+):
     """A aresta quad[u]→quad[v] e corte de frame?
 
     A aresta precisa correr ao longo de uma borda do quadro e, quando a
@@ -145,12 +150,23 @@ def _frame_cut(quad, u, v, border_gap, width, height, mask, scale_x, scale_y):
     p, q = quad[u % 4], quad[v % 4]
     sides = _edge_border_sides(p, q, border_gap, width, height)
     return bool(sides) and (
-        mask is None
-        or any(_mask_supports_cut(mask, side, p, q, scale_x, scale_y) for side in sides)
+        evidence is None
+        or any(
+            _mask_supports_cut(evidence, observable, side, p, q, scale_x, scale_y)
+            for side in sides
+        )
     )
 
 
-def fit_plausible(corners, frame_shape, mask=None, scale_x=1.0, scale_y=1.0):
+def fit_plausible(
+    corners,
+    frame_shape,
+    mask=None,
+    scale_x=1.0,
+    scale_y=1.0,
+    contour=None,
+    hand=None,
+):
     """True se o quadrilátero passa na guarda de plausibilidade.
 
     A primeira regra é finitude. Toda comparação com NaN é falsa, e
@@ -159,6 +175,12 @@ def fit_plausible(corners, frame_shape, mask=None, scale_x=1.0, scale_y=1.0):
     ajuste mais inválido possível. Infinito já era recusado pela
     comparação com a margem do quadro, mas a regra explícita cobre
     os dois casos com a mesma mensagem.
+
+    `mask`, `scale_x` e `scale_y` trazem a máscara nativa e a escala
+    frame→máscara para validar os cortes de frame que isentam a razão
+    entre arestas opostas; `contour` restringe a evidência aos pixels
+    do componente ajustado e `hand` marca pixels de mão como não
+    observáveis. Sem `mask` a isenção é só geométrica (vértices).
     """
     quad = np.asarray(corners, dtype=np.float64)
     if quad.shape != (4, 2):
@@ -170,6 +192,23 @@ def fit_plausible(corners, frame_shape, mask=None, scale_x=1.0, scale_y=1.0):
         return False
     height, width = frame_shape[:2]
     border_gap = _FIT_EDGE_BORDER_GAP_FRAC * min(width, height)
+    evidence = observable = None
+    if mask is not None:
+        # Evidencia do corte = pixels reais da mascara dentro do contorno
+        # escolhido para o ajuste: foreground destacado ou preenchimento
+        # de casco nao conta como contato com a borda. Mao e "nao
+        # observavel" — nem evidencia nem falha — mas so dentro do
+        # contorno selecionado.
+        if contour is None:
+            region = np.ones(mask.shape, bool)
+        else:
+            region = np.zeros(mask.shape, np.uint8)
+            cv2.fillPoly(region, [contour], 255)
+            region = region.astype(bool)
+        evidence = (mask > 0) & region
+        observable = (
+            region if hand is None or hand.shape != mask.shape else (hand == 0) & region
+        )
     for a, b in ((0, 2), (3, 1)):
         ratio = max(edges[a], edges[b]) / min(edges[a], edges[b])
         if ratio <= _FIT_OPPOSITE_RATIO_MAX:
@@ -184,7 +223,18 @@ def fit_plausible(corners, frame_shape, mask=None, scale_x=1.0, scale_y=1.0):
         # o corte precisa de suporte no contorno nativo: aresta de papel
         # passando perto da borda nao isenta um colapsado.
         if not any(
-            _frame_cut(quad, u, v, border_gap, width, height, mask, scale_x, scale_y)
+            _frame_cut(
+                quad,
+                u,
+                v,
+                border_gap,
+                width,
+                height,
+                evidence,
+                observable,
+                scale_x,
+                scale_y,
+            )
             for u, v in (
                 (short, short + 1),
                 (other, other + 1),

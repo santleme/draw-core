@@ -323,6 +323,41 @@ def test_plausibility_guard_accepts_sheet_clipped_along_long_edge():
     assert fit_plausible(quad, (720, 1280), mask, 10.0, 10.0) is False
 
 
+def test_plausibility_guard_ignores_detached_strip_on_border():
+    # Uma faixa de papel destacada tocando a borda no mesmo trecho nao
+    # prova que a FOLHA ajustada alcanca a borda: a evidencia do corte
+    # e restrita aos pixels dentro do contorno selecionado para o fit.
+    quad = np.array(
+        [[80.0, 40.0], [340.0, 60.0], [1180.0, 9.0], [100.0, 9.0]],
+        dtype=np.float32,
+    )
+    mask = np.zeros((72, 128), np.uint8)
+    mask[0, 10:118] = 255  # faixa destacada na linha do topo
+    mask[2:61, 8:118] = 255  # a folha ajustada, um componente separado
+    contour = np.array([[[8, 2]], [[117, 2]], [[117, 60]], [[8, 60]]], dtype=np.int32)
+    # Sem o contorno a faixa fornecia suporte falso; com ele, rejeita.
+    assert fit_plausible(quad, (720, 1280), mask, 10.0, 10.0) is True
+    assert fit_plausible(quad, (720, 1280), mask, 10.0, 10.0, contour=contour) is False
+
+
+def test_plausibility_guard_treats_hand_on_border_as_unobserved():
+    # Mao cobrindo o meio do trecho de borda: os pixels de mao sao
+    # "nao observaveis" — o corte segue valido se a metade observada
+    # e papel; mas mao sozinha nao estabelece corte nenhum.
+    quad = np.array(
+        [[100.0, 9.0], [1180.0, 9.0], [400.0, 300.0], [80.0, 280.0]],
+        dtype=np.float32,
+    )
+    mask = np.zeros((72, 128), np.uint8)
+    mask[0:30, 10:118] = 255  # folha clipada pelo topo
+    mask[0:6, 40:100] = 0  # a mao apaga o meio do trecho na borda
+    hand = np.zeros((72, 128), np.uint8)
+    hand[0:6, 40:100] = 255
+    assert fit_plausible(quad, (720, 1280), mask, 10.0, 10.0, hand=hand) is True
+    mask[0:6, :] = 0  # sem papel observado na borda, mao nao basta
+    assert fit_plausible(quad, (720, 1280), mask, 10.0, 10.0, hand=hand) is False
+
+
 def test_plausibility_guard_refuses_paper_edge_passing_near_border():
     # Uma aresta de papel a ~12 px da borda NAO e corte de frame: a
     # mascara nativa nao alcanca a borda ali, entao a aresta vizinha
