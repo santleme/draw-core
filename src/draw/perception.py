@@ -303,9 +303,14 @@ class NeuralSheetDetector:
         self._memory_geometry = None
         self._reject_streak = 0
         self.last_presence_logit = None
-        # Por que o último _fit não fechou quadrilátero, quando
-        # falhou: {"reason": ..., "area_ratio": ...}. None quando
-        # fechou ou quando o _fit não rodou na chamada.
+        # Por que a última chamada não devolveu quadrilátero:
+        # {"reason": ..., "area_ratio": ...} — no_contour|min_area|
+        # fit_failed|implausible|unsupported vêm do _fit; low_presence
+        # cobre as chamadas em que a presença não-positiva nem deixou ajustar
+        # (a razão de área da máscara vai junto, para a folha
+        # pequena vetada não ser indistinguível de quadro vazio).
+        # None quando o _fit fechou ou quando a chamada nem chegou
+        # a prever (frame vazio).
         self.last_fit_reject = None
         # Cobertura de folha da última previsão (0/255, resolução da
         # máscara devolvida): classes de folha sob qualquer ocupante
@@ -662,9 +667,6 @@ class NeuralSheetDetector:
         frame_h, frame_w = frame.shape[:2]
         mask_h, mask_w = mask.shape
         corners = None
-        # O motivo de rejeição só vale para o _fit desta chamada:
-        # presença não-positiva não ajusta e não pode herdar o
-        # motivo de uma chamada anterior.
         self.last_fit_reject = None
         if presence > 0:
             corners = self._fit(
@@ -675,6 +677,15 @@ class NeuralSheetDetector:
             # pode estar vazia ou com a folha sob a mão — zerar a
             # sequência para frames assim não esvaziarem a memória.
             self._reject_streak = 0
+            # Presença não-positiva não ajusta, mas a razão de área
+            # da máscara sobe mesmo assim: no modelo só-segmentação
+            # o logit ausente é fixo, e sem a área uma folha
+            # pequena sob o piso é indistinguível de quadro vazio
+            # (issue #105).
+            self.last_fit_reject = {
+                "reason": "low_presence",
+                "area_ratio": float(np.count_nonzero(mask) / mask.size),
+            }
         verdict = "paper" if corners is not None else None
         if return_mask:
             mask = cv2.resize(mask, (frame_w, frame_h), interpolation=cv2.INTER_NEAREST)

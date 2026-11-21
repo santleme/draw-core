@@ -35,6 +35,22 @@ class _DummySession:
         return [self._logits, self._presence]
 
 
+class _DummySegSession:
+    """Sessão só-segmentação: uma saída 'logits' [1,4,H,W], sem cabeça de presença."""
+
+    def __init__(self, logits):
+        self._logits = logits
+
+    def get_inputs(self):
+        return [_DummyInput()]
+
+    def get_outputs(self):
+        return [_DummyOutput("logits")]
+
+    def run(self, _outputs, feed):
+        return [self._logits]
+
+
 def _poly_mask(shape, pts):
     mask = np.zeros(shape, dtype=np.uint8)
     cv2.fillPoly(mask, [np.round(pts).astype(np.int32)], 255)
@@ -225,6 +241,37 @@ def test_fit_implausivel_reporta_implausible():
     assert reject["area_ratio"] > geometry._MIN_CONTOUR_AREA_RATIO
 
 
+def test_presenca_baixa_registra_area_da_mascara():
+    """No modelo só-segmentação o logit ausente é fixo: a razão de
+    área é o que separa folha pequena sob o piso de quadro vazio."""
+    size = 100
+    frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+    det = perception.NeuralSheetDetector("dummy.onnx", verify=None)
+
+    # Folha minúscula: 8x8 px de papel numa máscara de 100x100
+    # (0,64% < 1% do piso de presença) — o logit ausente é fixo.
+    logits = np.zeros((1, 4, size, size), dtype=np.float32)
+    logits[0, 0] = 1.0  # fundo vence em todo lugar
+    logits[0, 1, 40:48, 40:48] = 2.0  # papel vence num miolo de 8x8
+    det._session = _DummySegSession(logits)
+    corners, _, _ = det(frame)
+    assert corners is None
+    assert det.last_presence_logit == perception._SEGMENTATION_ABSENT_LOGIT
+    reject = det.last_fit_reject
+    assert reject["reason"] == "low_presence"
+    assert reject["area_ratio"] == 64 / (size * size)
+
+    # Quadro vazio de verdade: razão zero, distinguível da folha.
+    logits_empty = np.zeros((1, 4, size, size), dtype=np.float32)
+    logits_empty[0, 0] = 1.0
+    det._session = _DummySegSession(logits_empty)
+    corners, _, _ = det(frame)
+    assert corners is None
+    reject = det.last_fit_reject
+    assert reject["reason"] == "low_presence"
+    assert reject["area_ratio"] == 0.0
+
+
 def main():
     test_predict_matches_legacy_softmax_and_normalization()
     test_middle_arm_notch_recovers_straight_chord_without_memory()
@@ -234,6 +281,7 @@ def main():
     test_fit_contorno_minusculo_reporta_min_area()
     test_fit_com_folha_fecha_e_limpa_o_reject()
     test_fit_implausivel_reporta_implausible()
+    test_presenca_baixa_registra_area_da_mascara()
     print("TESTES DE GUARDAS NEURAIS OK.")
     return 0
 
