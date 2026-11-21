@@ -585,11 +585,21 @@ def open_wsl_hvcam_fallback(source, *, timeout_ms=None, connect_timeout_ms=None)
     return None, None
 
 
+def _confirm_stream_alive(capture, attempts=3):
+    """Confirma que uma captura que falhou no probe volta a entregar quadro."""
+    for _ in range(attempts):
+        ok, frame = capture.read()
+        if ok and frame is not None:
+            return True
+    return False
+
+
 def _try_other_local_cameras(source, capture_factory):
     """Quando o indice padrao (0) falha, tenta outras webcams locais disponiveis.
 
     So aceita um candidato depois de confirmar que ele efetivamente entregou
-    ao menos um quadro (evita travar num dispositivo que abre mas nao transmite).
+    e continua entregando quadros (se houve falha no warm-up, exige retomada
+    antes de aceitar; camera travada e liberada para testar a proxima).
     """
     if source != 0:
         return None
@@ -606,7 +616,10 @@ def _try_other_local_cameras(source, capture_factory):
         if cap.isOpened():
             _configure_local_capture(cap)
             cap = _supervise_local_open(idx, cap, capture_factory)
-            if cap.isOpened() and _LAST_OPEN_DELIVERED:
+            probe = _LAST_OPEN_PROBE
+            settled = probe is not None and probe.get("brilho_medio") is not None
+            alive = settled or (_LAST_OPEN_DELIVERED and _confirm_stream_alive(cap))
+            if cap.isOpened() and alive:
                 print(f"Camera {source} indisponivel; usando camera local {idx}.")
                 return cap
         cap.release()

@@ -966,10 +966,39 @@ def test_try_other_local_cameras_skips_frameless_candidate(monkeypatch):
     assert caps[1].released is True
 
 
-def test_try_other_local_cameras_accepts_camera_that_delivered_before_missed_read(
+def test_try_other_local_cameras_accepts_camera_that_recovers_after_missed_read(
     monkeypatch,
 ):
-    class _FlakyWarmupCap:
+    class _RecoveringCap:
+        def __init__(self):
+            self._calls = 0
+            self.released = False
+
+        def isOpened(self):
+            return True
+
+        def set(self, *_):
+            return True
+
+        def read(self):
+            self._calls += 1
+            if self._calls == 2:
+                return False, None  # falha pontual no warm-up
+            return True, np.full((32, 32, 3), 100, dtype=np.uint8)
+
+        def release(self):
+            self.released = True
+
+    recovering = _RecoveringCap()
+    monkeypatch.setattr(camera_module.sys, "platform", "linux")
+    monkeypatch.setattr(camera_module, "_video_nodes", lambda: ["/dev/video1"])
+    chosen = camera_module._try_other_local_cameras(0, lambda _idx: recovering)
+    assert chosen is recovering
+    assert recovering.released is False
+
+
+def test_try_other_local_cameras_skips_camera_that_stalls_permanently(monkeypatch):
+    class _StalledAfterOneCap:
         def __init__(self):
             self._calls = 0
             self.released = False
@@ -984,20 +1013,40 @@ def test_try_other_local_cameras_accepts_camera_that_delivered_before_missed_rea
             self._calls += 1
             if self._calls == 1:
                 return True, np.full((32, 32, 3), 100, dtype=np.uint8)
-            return False, None
+            return False, None  # morre permanentemente
 
         def release(self):
             self.released = True
 
-    flaky = _FlakyWarmupCap()
+    class _GoodCap:
+        def __init__(self):
+            self.released = False
+
+        def isOpened(self):
+            return True
+
+        def set(self, *_):
+            return True
+
+        def read(self):
+            return True, np.full((32, 32, 3), 100, dtype=np.uint8)
+
+        def release(self):
+            self.released = True
+
+    stalled = _StalledAfterOneCap()
+    good = _GoodCap()
+    caps = {1: stalled, 2: good}
     monkeypatch.setattr(camera_module.sys, "platform", "linux")
-    monkeypatch.setattr(camera_module, "_video_nodes", lambda: ["/dev/video1"])
-    chosen = camera_module._try_other_local_cameras(0, lambda _idx: flaky)
-    assert chosen is flaky
-    assert flaky.released is False
+    monkeypatch.setattr(
+        camera_module, "_video_nodes", lambda: ["/dev/video1", "/dev/video2"]
+    )
+    chosen = camera_module._try_other_local_cameras(0, lambda idx: caps[idx])
+    assert chosen is good
+    assert stalled.released is True
 
 
-def test_run_check_succeeds_when_video0_unreadable_but_video1_works(monkeypatch):
+def test_run_check_succeeds_without_fail_message_when_video1_works(monkeypatch, capsys):
     monkeypatch.setattr(app_module.sys, "platform", "linux")
     monkeypatch.setattr(app_module, "_require_gui_backend", lambda: None)
     monkeypatch.setattr(app_module, "_check_models", lambda: True)
@@ -1011,6 +1060,7 @@ def test_run_check_succeeds_when_video0_unreadable_but_video1_works(monkeypatch)
         lambda idx, _label: idx == 1,
     )
     assert app_module.run_check(0) == 0
+    assert "FAIL:" not in capsys.readouterr().out
 
 
 def test_open_wsl_hvcam_fallback_does_not_use_manual_host_for_nonzero_source(

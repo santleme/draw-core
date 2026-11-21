@@ -336,10 +336,22 @@ def run_check(source=0, helper_token_file=None):
     except Exception:
         group_note = ""
     models_ok = all_ok
-    cam_ok = True
     if access:
         print(f"PASS: este processo le e escreve em {node}.{group_note}")
-    else:
+        if _check_camera_open(source, node):
+            return 0 if models_ok else 1
+
+    if source == 0:
+        for alt_node in nodes:
+            if alt_node == node:
+                continue
+            alt_idx = int(alt_node[len("/dev/video") :])
+            if os.access(alt_node, os.R_OK | os.W_OK) and _check_camera_open(
+                alt_idx, alt_node
+            ):
+                return 0 if models_ok else 1
+
+    if not access:
         print(
             f"FAIL: este processo nao tem permissao de leitura e "
             f"escrita em {node}.{group_note}"
@@ -349,22 +361,7 @@ def run_check(source=0, helper_token_file=None):
             "(vale nas proximas sessoes)."
         )
         print('  Correcao nesta sessao: sg video -c "python -m draw".')
-        cam_ok = False
-
-    if not access or not _check_camera_open(source, node):
-        cam_ok = False
-        if source == 0:
-            for alt_node in nodes:
-                if alt_node == node:
-                    continue
-                alt_idx = int(alt_node[len("/dev/video") :])
-                if os.access(alt_node, os.R_OK | os.W_OK) and _check_camera_open(
-                    alt_idx, alt_node
-                ):
-                    cam_ok = True
-                    break
-
-    return 0 if (models_ok and cam_ok) else 1
+    return 1
 
 
 def _check_camera_open(source, label):

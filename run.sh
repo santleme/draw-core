@@ -4,16 +4,29 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 _resolve_venv_paths() {
-    if [ -x ".venv/Scripts/python.exe" ]; then
-        VENV_PYTHON=".venv/Scripts/python.exe"
-        VENV_DRAW=".venv/Scripts/draw.exe"
-    elif [ -x ".venv/bin/python" ]; then
-        VENV_PYTHON=".venv/bin/python"
-        VENV_DRAW=".venv/bin/draw"
-    else
-        VENV_PYTHON=""
-        VENV_DRAW=""
-    fi
+    case "$(uname -s 2>/dev/null || echo Linux)" in
+        MINGW*|MSYS*|CYGWIN*)
+            if [ -x ".venv/Scripts/python.exe" ]; then
+                VENV_PYTHON=".venv/Scripts/python.exe"
+                VENV_DRAW=".venv/Scripts/draw.exe"
+            elif [ -x ".venv/bin/python" ]; then
+                VENV_PYTHON=".venv/bin/python"
+                VENV_DRAW=".venv/bin/draw"
+            else
+                VENV_PYTHON=""
+                VENV_DRAW=""
+            fi
+            ;;
+        *)
+            if [ -x ".venv/bin/python" ]; then
+                VENV_PYTHON=".venv/bin/python"
+                VENV_DRAW=".venv/bin/draw"
+            else
+                VENV_PYTHON=""
+                VENV_DRAW=""
+            fi
+            ;;
+    esac
 }
 
 _venv_ready() {
