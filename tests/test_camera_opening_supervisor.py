@@ -89,6 +89,7 @@ def test_open_capture_raises_when_recovery_reopen_is_closed(monkeypatch):
     # fechada: o desfecho e o erro de abertura de sempre, nao uma
     # captura morta entregue em silencio.
     monkeypatch.setattr(camera_module, "_probe_exposure", lambda capture: 149.0)
+    monkeypatch.setattr(camera_module, "is_wsl", lambda: False)
     blown = _FakeCapture()
     closed = _FakeCapture(opened=False)
     factory = _factory([blown, closed])

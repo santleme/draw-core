@@ -25,6 +25,7 @@ import errno
 import os
 import selectors
 import socket
+import struct
 import time
 from urllib.parse import urlparse
 
@@ -45,6 +46,12 @@ _MAX_PAYLOAD = 64 * 1024 * 1024
 # Portas AF_VSOCK sao uint32; 0xFFFFFFFF e VMADDR_PORT_ANY (reservado).
 _VSOCK_PORT_MAX = 0xFFFFFFFF - 1
 _TCP_PORT_MAX = 65535
+_HVCAM_MAGIC = 0x4856434D  # "HVCM"
+_HVCAM_VERSION = 1
+_HVCAM_REQ = b"Q"
+_HEADER_STRUCT = struct.Struct("<IHHQQHHII")
+_MIN_REQ_SECONDS = 0.020
+_NAP_SECONDS = 0.015
 
 
 class HvFrameHeader(ctypes.Structure):
@@ -122,6 +129,207 @@ def _lib():
     return _LIB
 
 
+class _PurePythonHvcamLib:
+    """Implementacao Python pura da API de libhvcam.so (protocol.h).
+
+    Permite rodar hvcam://, hvcam+reverse:// e hvcam+tcp:// numa maquina
+    recem-clonada sem precisar compilar o repositorio C santleme/hvcam.
+    Mantem a mesma assinatura e semantica de hvcam_client.c:
+    - hvcam_connect(port) -> fd ou -errno
+    - hvcam_connect_tcp(host_bytes, port) -> fd ou -1
+    - hvcam_grab_next(fd, hdr_ptr, buf, cap, last_ptr, timeout_ms) -> bytes, -2 (timeout) ou -1 (erro)
+    - hvcam_close(fd)
+    """
+
+    def hvcam_connect(self, port):
+        af_vsock = getattr(socket, "AF_VSOCK", 40)
+        cid_host = getattr(socket, "VMADDR_CID_HOST", 2)
+        try:
+            sock = socket.socket(af_vsock, socket.SOCK_STREAM)
+        except OSError as error:
+            return -(error.errno or errno.EIO)
+        try:
+            sock.connect((cid_host, int(port)))
+            sock.setblocking(True)
+            return sock.detach()
+        except OSError as error:
+            return -(error.errno or errno.EIO)
+        finally:
+            sock.close()
+
+    def hvcam_connect_tcp(self, host_bytes, port):
+        host = (
+            host_bytes.decode("utf-8", errors="replace")
+            if isinstance(host_bytes, (bytes, bytearray))
+            else str(host_bytes or "127.0.0.1")
+        )
+        if not host:
+            host = "127.0.0.1"
+        try:
+            infos = socket.getaddrinfo(
+                host, int(port), socket.AF_UNSPEC, socket.SOCK_STREAM
+            )
+        except OSError:
+            return -1
+        for family, socktype, proto, _canon, sockaddr in infos:
+            sock = None
+            try:
+                sock = socket.socket(family, socktype, proto)
+                sock.connect(sockaddr)
+                sock.setblocking(True)
+                return sock.detach()
+            except OSError:
+                continue
+            finally:
+                if sock is not None:
+                    sock.close()
+        return -1
+
+    @staticmethod
+    def _wait_readable(fd, deadline):
+        with selectors.DefaultSelector() as sel:
+            sel.register(fd, selectors.EVENT_READ)
+            while True:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return -2
+                try:
+                    ready = sel.select(left)
+                except InterruptedError:
+                    continue
+                except OSError:
+                    return -1
+                if not ready:
+                    return -2
+                return 0
+
+    @classmethod
+    def _read_full(cls, fd, total, deadline):
+        chunks = bytearray()
+        remaining = total
+        while remaining > 0:
+            w = cls._wait_readable(fd, deadline)
+            if w == -2:
+                return None, (-1 if len(chunks) > 0 else -2)
+            if w != 0:
+                return None, w
+            try:
+                data = os.read(fd, remaining)
+            except InterruptedError:
+                continue
+            except BlockingIOError:
+                continue
+            except OSError:
+                return None, -1
+            if not data:
+                return None, -1
+            chunks.extend(data)
+            remaining -= len(data)
+        return bytes(chunks), 0
+
+    @staticmethod
+    def _write_full(fd, data):
+        view = memoryview(data)
+        sent = 0
+        while sent < len(view):
+            try:
+                n = os.write(fd, view[sent:])
+            except InterruptedError:
+                continue
+            except OSError:
+                return -1
+            if n <= 0:
+                return -1
+            sent += n
+        return 0
+
+    @classmethod
+    def _pull_frame(cls, fd, hdr, buf, cap, deadline):
+        if cls._write_full(fd, _HVCAM_REQ) < 0:
+            return -1
+        raw_hdr, rc = cls._read_full(fd, _HEADER_STRUCT.size, deadline)
+        if rc != 0:
+            return rc
+        (
+            magic,
+            version,
+            flags,
+            seq_num,
+            timestamp_us,
+            width,
+            height,
+            fmt,
+            payload_bytes,
+        ) = _HEADER_STRUCT.unpack(raw_hdr)
+        hdr.magic = magic
+        hdr.version = version
+        hdr.flags = flags
+        hdr.seq_num = seq_num
+        hdr.timestamp_us = timestamp_us
+        hdr.width = width
+        hdr.height = height
+        hdr.format = fmt
+        hdr.payload_bytes = payload_bytes
+        if (
+            magic != _HVCAM_MAGIC
+            or version != _HVCAM_VERSION
+            or payload_bytes > _MAX_PAYLOAD
+        ):
+            return -1
+        raw_payload, rc = cls._read_full(fd, payload_bytes, deadline)
+        if rc == -2:
+            return -1
+        if rc != 0:
+            return rc
+        stored = min(payload_bytes, int(cap))
+        if stored > 0 and buf is not None:
+            ctypes.memmove(buf, raw_payload, stored)
+        return stored
+
+    def hvcam_grab_next(self, fd, hdr_ptr, buf, cap, last_ptr, timeout_ms):
+        hdr = hdr_ptr._obj if hasattr(hdr_ptr, "_obj") else hdr_ptr.contents
+        last = last_ptr._obj if hasattr(last_ptr, "_obj") else last_ptr.contents
+        deadline = time.monotonic() + (timeout_ms / 1000.0)
+        drained = False
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return -2
+            if drained and left < _MIN_REQ_SECONDS:
+                return -2
+            n = self._pull_frame(fd, hdr, buf, cap, deadline)
+            if n == -2:
+                return -1
+            if n < 0:
+                return n
+            drained = True
+            if (hdr.flags & 1) and hdr.seq_num != last.value:
+                last.value = hdr.seq_num
+                return n
+            nap_end = min(time.monotonic() + _NAP_SECONDS, deadline)
+            w = self._wait_readable(fd, nap_end)
+            if w == -1:
+                return -1
+
+    def hvcam_close(self, fd):
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+_PYTHON_LIB = _PurePythonHvcamLib()
+
+
+def _lib_or_fallback():
+    """Carrega libhvcam.so se disponivel; senao usa o cliente Python puro."""
+    try:
+        return _lib()
+    except OSError:
+        return _PYTHON_LIB
+
+
 def _listen_vsock_bounded(
     port,
     timeout_ms=_LISTEN_TIMEOUT_MS,
@@ -197,7 +405,7 @@ class Camera:
             raise ValueError("hvcam: listen mode cannot use a TCP host")
         if listen and not 1 <= int(port) <= _VSOCK_PORT_MAX:
             raise ValueError(f"porta hvcam invalida: {port!r}")
-        lib = _lib()
+        lib = _lib_or_fallback()
         self._lib = lib
         if host is not None:
             self.fd = lib.hvcam_connect_tcp(host.encode(), port)
@@ -241,7 +449,7 @@ class Camera:
         timeout vencer (TimeoutError). O ndarray e uma view sobre o
         buffer persistente — to_bgr() ja materializa a imagem.
         """
-        lib = getattr(self, "_lib", None) or _lib()
+        lib = getattr(self, "_lib", None) or _lib_or_fallback()
         n = lib.hvcam_grab_next(
             self.fd,
             ctypes.byref(self._hdr),
@@ -318,7 +526,7 @@ class Camera:
 
     def close(self):
         if self.fd >= 0:
-            lib = getattr(self, "_lib", None) or _lib()
+            lib = getattr(self, "_lib", None) or _lib_or_fallback()
             lib.hvcam_close(self.fd)
             self.fd = -1
 

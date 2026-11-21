@@ -470,8 +470,9 @@ def _local_open_hint(source):
         hint = f"A camera nao esta conectada a este sistema: {node} nao existe. "
         if is_wsl():
             hint += (
-                "Anexe a camera ao WSL com: bash scripts/setup_camera_wsl.sh. "
-                "A alternativa e uma camera via rede: python main.py "
+                "No Windows, rode 'hvcam-host.exe --reverse' (santleme/hvcam) "
+                "ou anexe a camera ao WSL com: bash scripts/setup_camera_wsl.sh. "
+                "A alternativa e uma camera via rede: draw "
                 "--source http://<ip-da-camera>:8080/video."
             )
         else:
@@ -528,6 +529,7 @@ def open_capture(source, capture_factory=None, helper_token_file=None):
         )
     if capture_factory is None:
         capture_factory = cv2.VideoCapture
+    default_factory = capture_factory is cv2.VideoCapture
     capture = capture_factory(source)
     if capture.isOpened():
         if isinstance(source, int):
@@ -544,6 +546,29 @@ def open_capture(source, capture_factory=None, helper_token_file=None):
             return capture
     hint = f"Nao consegui abrir a fonte de video: {source!r}. "
     if isinstance(source, int):
+        if (
+            default_factory
+            and source == 0
+            and sys.platform.startswith("linux")
+            and is_wsl()
+        ):
+            node = f"/dev/video{source}"
+            if not os.path.exists(node) and not _video_nodes():
+                print(
+                    "WSL sem /dev/video0: tentando camera do Windows via hvcam "
+                    "(hvcam:// e hvcam+reverse:// na porta 8765)..."
+                )
+                for hvcam_candidate in ("hvcam://", "hvcam+reverse://"):
+                    if hvcam_candidate == "hvcam+reverse://":
+                        print(
+                            "Aguardando hvcam-host.exe --reverse conectar no Windows "
+                            "(ate 35 s)..."
+                        )
+                    hv_cap = HvcamCapture(hvcam_candidate)
+                    if hv_cap.isOpened():
+                        print(f"Camera do Windows conectada via {hvcam_candidate}.")
+                        return hv_cap
+                    hv_cap.release()
         hint += _local_open_hint(source)
     else:
         hint += (

@@ -542,3 +542,93 @@ def test_camera_to_bgr_rejects_wrong_payload_size():
     }
     with pytest.raises(ValueError, match="payload"):
         cam.to_bgr(info, np.zeros(64 * 48 * 3 + 8, dtype=np.uint8))
+
+
+def test_pure_python_hvcam_lib_pulls_frame_over_socketpair(monkeypatch):
+    """Sem libhvcam.so compilada, _PurePythonHvcamLib implementa o protocolo
+    de fio (REQ 'Q' -> 36-byte header + payload) em Python puro."""
+    import socket
+    import struct
+
+    monkeypatch.setattr(hvcam_module, "_LIB", None)
+    monkeypatch.setattr(
+        hvcam_module,
+        "_load",
+        lambda: (_ for _ in ()).throw(OSError("sem libhvcam.so")),
+    )
+    client_sock, server_sock = socket.socketpair()
+    try:
+        payload = np.arange(4 * 2 * 3, dtype=np.uint8).tobytes()
+        header = struct.pack(
+            "<IHHQQHHII",
+            0x4856434D,  # HVCAM_MAGIC
+            1,  # HVCAM_VERSION
+            1,  # flags: valid
+            42,  # seq_num
+            999_000,  # timestamp_us
+            4,  # width
+            2,  # height
+            1,  # format: BGR24
+            len(payload),
+        )
+        fd = client_sock.detach()
+        cam = hvcam_module.Camera(
+            port=8765,
+            listen=True,
+            listener=lambda _port, _timeout: fd,
+        )
+        # O servidor responde ao byte 'Q' enviado por grab().
+        import threading
+
+        def serve():
+            req = server_sock.recv(1)
+            assert req == b"Q"
+            server_sock.sendall(header + payload)
+
+        t = threading.Thread(target=serve, daemon=True)
+        t.start()
+        info, raw = cam.grab(timeout_ms=1000)
+        t.join(timeout=1.0)
+        assert info["seq"] == 42
+        assert info["width"] == 4 and info["height"] == 2
+        bgr = cam.to_bgr(info, raw)
+        assert bgr.shape == (2, 4, 3)
+        np.testing.assert_array_equal(bgr.reshape(-1), np.frombuffer(payload, np.uint8))
+        cam.close()
+    finally:
+        server_sock.close()
+
+
+def test_open_capture_on_wsl_without_dev_video0_falls_back_to_hvcam(monkeypatch):
+    class _ClosedLocal:
+        def isOpened(self):
+            return False
+
+        def release(self):
+            pass
+
+    cam = FakeCamera([(_info(), _payload())])
+    tried = []
+
+    def fake_hvcam(source):
+        tried.append(source)
+        if source == "hvcam+reverse://":
+            return HvcamCapture(source, camera_factory=_factory(cam))
+        return HvcamCapture(
+            source,
+            camera_factory=_factory(FakeCamera([], fail=OSError("no vsock service"))),
+        )
+
+    monkeypatch.setattr(camera_module, "is_wsl", lambda: True)
+    monkeypatch.setattr(camera_module.os.path, "exists", lambda _p: False)
+    monkeypatch.setattr(camera_module, "_video_nodes", lambda: [])
+    monkeypatch.setattr(camera_module, "HvcamCapture", fake_hvcam)
+    monkeypatch.setattr(camera_module.cv2, "VideoCapture", lambda _s: _ClosedLocal())
+
+    capture = camera_module.open_capture(0)
+    try:
+        assert tried == ["hvcam://", "hvcam+reverse://"]
+        ok, frame = capture.read()
+        assert ok and frame.shape == (48, 64, 3)
+    finally:
+        capture.release()
