@@ -756,8 +756,35 @@ def test_hand_vote_top_entry_with_brief_side_touch_still_votes():
     # Issue #90: 2 linhas de folga no topo, toque lateral de 19 linhas abaixo.
     mask = np.zeros((720, 1280), dtype=np.uint8)
     mask[2:90, 500:780] = 255
-    mask[60:80, 0:780] = 255
-    mask[60:79, 0:1] = 255
+    mask[60:79, 0:780] = 255
+    assert hand_mask_orientation_vote(mask) == "inverted"
+    assert hand_mask_orientation_vote(mask[::-1].copy()) == "upright"
+
+
+def _flips(mask):
+    return [mask, mask[::-1].copy(), mask[:, ::-1].copy(), mask[::-1, ::-1].copy()]
+
+
+def test_hand_vote_abstains_on_wide_side_arm_near_top_without_top_contact():
+    mask = np.zeros((720, 1280), dtype=np.uint8)
+    mask[2:62, 0:400] = 255  # so a lateral; 400 colunas na faixa de folga
+    for m in (mask, mask[:, ::-1].copy()):
+        assert hand_mask_orientation_vote(m) is None
+        assert hand_mask_orientation_vote(m[::-1].copy()) is None
+
+
+def test_hand_vote_two_edge_arm_keeps_real_opposite_contact():
+    mask = np.zeros((720, 1280), dtype=np.uint8)
+    mask[0:30, 100:220] = 255  # topo: 120 colunas
+    mask[30:720, 100:146] = 255  # base: 46 colunas
+    mask[300:350, 0:146] = 255  # lateral: 50 linhas
+    for m in _flips(mask):
+        assert hand_mask_orientation_vote(m) is None
+
+
+def test_hand_vote_top_entry_with_visible_side_gap_still_votes():
+    mask = np.zeros((720, 1280), dtype=np.uint8)
+    mask[0:225, 20:170] = 255  # 20 px da lateral: nao e contato lateral
     assert hand_mask_orientation_vote(mask) == "inverted"
     assert hand_mask_orientation_vote(mask[::-1].copy()) == "upright"
 
