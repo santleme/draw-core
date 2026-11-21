@@ -966,6 +966,53 @@ def test_try_other_local_cameras_skips_frameless_candidate(monkeypatch):
     assert caps[1].released is True
 
 
+def test_try_other_local_cameras_accepts_camera_that_delivered_before_missed_read(
+    monkeypatch,
+):
+    class _FlakyWarmupCap:
+        def __init__(self):
+            self._calls = 0
+            self.released = False
+
+        def isOpened(self):
+            return True
+
+        def set(self, *_):
+            return True
+
+        def read(self):
+            self._calls += 1
+            if self._calls == 1:
+                return True, np.full((32, 32, 3), 100, dtype=np.uint8)
+            return False, None
+
+        def release(self):
+            self.released = True
+
+    flaky = _FlakyWarmupCap()
+    monkeypatch.setattr(camera_module.sys, "platform", "linux")
+    monkeypatch.setattr(camera_module, "_video_nodes", lambda: ["/dev/video1"])
+    chosen = camera_module._try_other_local_cameras(0, lambda _idx: flaky)
+    assert chosen is flaky
+    assert flaky.released is False
+
+
+def test_run_check_succeeds_when_video0_unreadable_but_video1_works(monkeypatch):
+    monkeypatch.setattr(app_module.sys, "platform", "linux")
+    monkeypatch.setattr(app_module, "_require_gui_backend", lambda: None)
+    monkeypatch.setattr(app_module, "_check_models", lambda: True)
+    monkeypatch.setattr(
+        app_module, "_video_nodes", lambda: ["/dev/video0", "/dev/video1"]
+    )
+    monkeypatch.setattr(app_module.os, "access", lambda p, _m: p == "/dev/video1")
+    monkeypatch.setattr(
+        app_module,
+        "_check_camera_open",
+        lambda idx, _label: idx == 1,
+    )
+    assert app_module.run_check(0) == 0
+
+
 def test_open_wsl_hvcam_fallback_does_not_use_manual_host_for_nonzero_source(
     monkeypatch,
 ):

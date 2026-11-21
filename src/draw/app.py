@@ -335,6 +335,8 @@ def run_check(source=0, helper_token_file=None):
         )
     except Exception:
         group_note = ""
+    models_ok = all_ok
+    cam_ok = True
     if access:
         print(f"PASS: este processo le e escreve em {node}.{group_note}")
     else:
@@ -347,10 +349,10 @@ def run_check(source=0, helper_token_file=None):
             "(vale nas proximas sessoes)."
         )
         print('  Correcao nesta sessao: sg video -c "python -m draw".')
-        all_ok = False
+        cam_ok = False
 
-    if not _check_camera_open(source, node):
-        alt_ok = False
+    if not access or not _check_camera_open(source, node):
+        cam_ok = False
         if source == 0:
             for alt_node in nodes:
                 if alt_node == node:
@@ -359,12 +361,10 @@ def run_check(source=0, helper_token_file=None):
                 if os.access(alt_node, os.R_OK | os.W_OK) and _check_camera_open(
                     alt_idx, alt_node
                 ):
-                    alt_ok = True
+                    cam_ok = True
                     break
-        if not alt_ok:
-            all_ok = False
 
-    return 0 if all_ok else 1
+    return 0 if (models_ok and cam_ok) else 1
 
 
 def _check_camera_open(source, label):

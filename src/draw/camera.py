@@ -385,15 +385,20 @@ _EXPOSURE_MAX_ATTEMPTS = 3
 # de sessao: sem ele, uma corrida que nasce morta nao deixa dito
 # nem como a camera abriu. None = fonte sem supervisor (URL).
 _LAST_OPEN_PROBE = None
+_LAST_OPEN_DELIVERED = False
+_LAST_PROBE_DELIVERED = False
 
 
-def _record_open_probe(mean, attempts, outcome):
-    global _LAST_OPEN_PROBE
+def _record_open_probe(mean, attempts, outcome, delivered=None):
+    global _LAST_OPEN_PROBE, _LAST_OPEN_DELIVERED
     _LAST_OPEN_PROBE = {
         "brilho_medio": None if mean is None else round(float(mean), 1),
         "tentativas": attempts,
         "desfecho": outcome,
     }
+    _LAST_OPEN_DELIVERED = (
+        bool(mean is not None) if delivered is None else bool(delivered)
+    )
 
 
 def _probe_exposure(capture, seconds=_EXPOSURE_PROBE_SECONDS, now=time.monotonic):
@@ -404,12 +409,15 @@ def _probe_exposure(capture, seconds=_EXPOSURE_PROBE_SECONDS, now=time.monotonic
     leitura falhar: quem chama trata como "sem evidencia de estouro"
     e o caminho existente de fonte morta cuida do resto.
     """
+    global _LAST_PROBE_DELIVERED
+    _LAST_PROBE_DELIVERED = False
     deadline = now() + seconds
     recent = []
     while now() < deadline:
         ok, frame = capture.read()
         if not ok or frame is None:
             return None
+        _LAST_PROBE_DELIVERED = True
         recent.append(float(frame.mean()))
         del recent[:-3]
         if len(recent) == 3 and sum(recent) / 3 < _EXPOSURE_SETTLED_MEAN:
@@ -425,16 +433,22 @@ def _supervise_local_open(source, capture, capture_factory):
     Devolve a captura a usar: a original assentada, uma reaberta
     assentada, ou a ultima tentativa (com aviso) se todas estourarem.
     """
+    global _LAST_PROBE_DELIVERED
     attempt = 1
     while True:
+        _LAST_PROBE_DELIVERED = False
         mean = _probe_exposure(capture)
+        delivered = _LAST_PROBE_DELIVERED or (mean is not None)
         if mean is None or mean < _EXPOSURE_BLOWN_MEAN:
             if mean is not None and attempt > 1:
                 print(
                     f"Camera reaberta: exposicao assentada (brilho medio {mean:.0f})."
                 )
             _record_open_probe(
-                mean, attempt, "sem_evidencia" if mean is None else "assentada"
+                mean,
+                attempt,
+                "sem_evidencia" if mean is None else "assentada",
+                delivered=delivered,
             )
             return capture
         if attempt >= _EXPOSURE_MAX_ATTEMPTS:
@@ -443,7 +457,7 @@ def _supervise_local_open(source, capture, capture_factory):
                 f"{mean:.0f}) apos {attempt} aberturas; o reconhecimento "
                 "de folha pode falhar ate a exposicao assentar."
             )
-            _record_open_probe(mean, attempt, "estourada_seguiu")
+            _record_open_probe(mean, attempt, "estourada_seguiu", delivered=delivered)
             return capture
         print(
             "Camera abriu com exposicao alta (brilho medio "
@@ -454,7 +468,7 @@ def _supervise_local_open(source, capture, capture_factory):
         attempt += 1
         capture = capture_factory(source)
         if not capture.isOpened():
-            _record_open_probe(mean, attempt, "reabertura_falhou")
+            _record_open_probe(mean, attempt, "reabertura_falhou", delivered=False)
             return capture
         _configure_local_capture(capture)
 
@@ -592,9 +606,7 @@ def _try_other_local_cameras(source, capture_factory):
         if cap.isOpened():
             _configure_local_capture(cap)
             cap = _supervise_local_open(idx, cap, capture_factory)
-            probe = _LAST_OPEN_PROBE
-            has_frame = probe is not None and probe.get("brilho_medio") is not None
-            if cap.isOpened() and has_frame:
+            if cap.isOpened() and _LAST_OPEN_DELIVERED:
                 print(f"Camera {source} indisponivel; usando camera local {idx}.")
                 return cap
         cap.release()
