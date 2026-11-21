@@ -421,7 +421,9 @@ class NeuralSheetDetector:
             if frame is not None
             else (mask.shape[0] * scale_y, mask.shape[1] * scale_x)
         )
-        if corners is not None and not _geometry.fit_plausible(corners, ref_shape):
+        if corners is not None and not _geometry.fit_plausible(
+            corners, ref_shape, mask, scale_x=scale_x, scale_y=scale_y
+        ):
             return None
         if lines is not None:
             # Aresta sem medida confiável neste quadro grava ausente:

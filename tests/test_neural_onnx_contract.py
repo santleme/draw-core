@@ -270,9 +270,10 @@ def test_plausibility_guard_still_accepts_a_normal_sheet():
 def test_plausibility_guard_accepts_clipped_sheet_with_border_short_edge():
     # Issue #104: folha cortada pelo frame tem a aresta curta alinhada a
     # borda — e o recorte do frame, nao um colapso. A razao entre opostas
-    # (aqui ~12x) nao pode rejeitar.
+    # (aqui ~9x) nao pode rejeitar. A aresta a 10 px da borda segue dentro
+    # da tolerancia de ~2% que cobre a quantizacao da mascara nativa.
     quad = np.array(
-        [[0.0, 200.0], [0.0, 260.0], [700.0, 600.0], [200.0, 100.0]],
+        [[10.0, 200.0], [10.0, 260.0], [800.0, 560.0], [450.0, 120.0]],
         dtype=np.float32,
     )
     assert fit_plausible(quad, (720, 1280)) is True
@@ -281,11 +282,27 @@ def test_plausibility_guard_accepts_clipped_sheet_with_border_short_edge():
 def test_plausibility_guard_accepts_clip_that_truncates_short_edge_corner():
     # O corte pode tomar um lado inteiro do poligono visivel e encurtar a
     # aresta adjacente: ela fica com um vertice na borda e outro no papel.
+    # O corte vale porque o contorno da mascara nativa alcanca a borda.
     quad = np.array(
         [[0.0, 100.0], [180.0, 130.0], [850.0, 650.0], [0.0, 680.0]],
         dtype=np.float32,
     )
-    assert fit_plausible(quad, (720, 1280)) is True
+    mask = np.zeros((72, 128), np.uint8)
+    mask[10:69, :85] = 255
+    assert fit_plausible(quad, (720, 1280), mask, 10.0, 10.0) is True
+
+
+def test_plausibility_guard_refuses_paper_edge_passing_near_border():
+    # Uma aresta de papel a ~12 px da borda NAO e corte de frame: a
+    # mascara nativa nao alcanca a borda ali, entao a aresta vizinha
+    # colapsada continua rejeitada.
+    quad = np.array(
+        [[12.0, 100.0], [180.0, 130.0], [850.0, 650.0], [12.0, 680.0]],
+        dtype=np.float32,
+    )
+    mask = np.zeros((72, 128), np.uint8)
+    mask[10:69, 1:85] = 255  # papel para na coluna 1: borda sem suporte
+    assert fit_plausible(quad, (720, 1280), mask, 10.0, 10.0) is False
 
 
 def test_plausibility_guard_refuses_short_edge_with_one_vertex_near_border():

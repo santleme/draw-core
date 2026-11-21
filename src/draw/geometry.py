@@ -69,17 +69,36 @@ _FIT_EDGE_BORDER_GAP_FRAC = 0.02
 _FIT_EXCURSION_DIAG_FRAC = 0.15
 
 
-def _edge_on_border(p, q, border_gap, width, height):
-    """True se a aresta p→q corre ao longo de uma borda do quadro."""
-    return (
-        max(p[0], q[0]) <= border_gap
-        or max(p[1], q[1]) <= border_gap
-        or width - min(p[0], q[0]) <= border_gap
-        or height - min(p[1], q[1]) <= border_gap
-    )
+def _edge_border_side(p, q, border_gap, width, height):
+    """Borda do quadro ao longo da qual a aresta p→q corre, ou None."""
+    if max(p[0], q[0]) <= border_gap:
+        return "left"
+    if max(p[1], q[1]) <= border_gap:
+        return "top"
+    if width - min(p[0], q[0]) <= border_gap:
+        return "right"
+    if height - min(p[1], q[1]) <= border_gap:
+        return "bottom"
+    return None
 
 
-def fit_plausible(corners, frame_shape):
+def _mask_supports_cut(mask, side, p, q, scale_x, scale_y):
+    """O recorte declarado em `side` tem suporte no contorno da máscara?"""
+    mh, mw = mask.shape
+    if side in ("left", "right"):
+        i = 0 if side == "left" else mw - 1
+        a = int(min(p[1], q[1]) // scale_y)
+        b = int(max(p[1], q[1]) // scale_y)
+        strip = mask[max(0, a) : min(mh, b + 1), i]
+    else:
+        i = 0 if side == "top" else mh - 1
+        a = int(min(p[0], q[0]) // scale_x)
+        b = int(max(p[0], q[0]) // scale_x)
+        strip = mask[i, max(0, a) : min(mw, b + 1)]
+    return strip.size > 0 and np.count_nonzero(strip) * 2 >= strip.size
+
+
+def fit_plausible(corners, frame_shape, mask=None, scale_x=1.0, scale_y=1.0):
     """True se o quadrilátero passa na guarda de plausibilidade.
 
     A primeira regra é finitude. Toda comparação com NaN é falsa, e
@@ -106,22 +125,28 @@ def fit_plausible(corners, frame_shape):
         short = a if edges[a] <= edges[b] else b
         # Isenta corte de frame: a aresta curta e o proprio corte, ou uma
         # aresta vizinha inteira na borda — o corte que encurtou o canto
-        # dela (aresta curta com um vertice na borda e outro no papel).
-        if not (
-            _edge_on_border(
+        # dela. O corte vizinho so vale se o contorno da mascara nativa
+        # alcanca a borda ali: uma aresta de papel comum passando perto
+        # da borda nao isenta um vizinho colapsado.
+        on_border = (
+            _edge_border_side(
                 quad[short], quad[(short + 1) % 4], border_gap, width, height
             )
-            or _edge_on_border(
-                quad[(short - 1) % 4], quad[short], border_gap, width, height
-            )
-            or _edge_on_border(
-                quad[(short + 1) % 4],
-                quad[(short + 2) % 4],
-                border_gap,
-                width,
-                height,
-            )
-        ):
+            is not None
+        )
+        cut = False
+        if not on_border:
+            for u, v in ((short - 1, short), (short + 1, short + 2)):
+                p, q = quad[u % 4], quad[v % 4]
+                side = _edge_border_side(p, q, border_gap, width, height)
+                if (
+                    side is not None
+                    and mask is not None
+                    and _mask_supports_cut(mask, side, p, q, scale_x, scale_y)
+                ):
+                    cut = True
+                    break
+        if not (on_border or cut):
             return False
     margin = _FIT_EXCURSION_DIAG_FRAC * float(np.hypot(width, height))
     return not (
