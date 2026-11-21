@@ -690,20 +690,33 @@ def test_pure_python_hvcam_lib_tcp_loopback_end_to_end(monkeypatch):
 
 def test_run_check_on_wsl_without_dev_video_uses_hvcam_fallback(monkeypatch, capsys):
     cam = FakeCamera([(_info(), _payload())])
-    hv_cap = HvcamCapture("hvcam+reverse://", camera_factory=_factory(cam))
+    seen = []
+
+    def fake_hvcam(source, **kw):
+        seen.append((source, kw))
+        if source == "hvcam+reverse://":
+            return HvcamCapture(source, camera_factory=_factory(cam))
+        return HvcamCapture(
+            source,
+            camera_factory=_factory(FakeCamera([], fail=OSError("no service"))),
+        )
 
     monkeypatch.setattr(app_module.sys, "platform", "linux")
+    monkeypatch.setattr(camera_module.sys, "platform", "linux")
     monkeypatch.setattr(app_module, "_require_gui_backend", lambda: None)
     monkeypatch.setattr(app_module, "_check_models", lambda: True)
     monkeypatch.setattr(app_module, "_video_nodes", lambda: [])
+    monkeypatch.setattr(camera_module, "_video_nodes", lambda: [])
+    monkeypatch.setattr(camera_module.os.path, "exists", lambda _p: False)
     monkeypatch.setattr(app_module, "is_wsl", lambda: True)
-    monkeypatch.setattr(
-        camera_module,
-        "open_wsl_hvcam_fallback",
-        lambda source, **kw: ("hvcam+reverse://", hv_cap),
-    )
+    monkeypatch.setattr(camera_module, "is_wsl", lambda: True)
+    monkeypatch.setattr(camera_module, "HvcamCapture", fake_hvcam)
 
     assert app_module.run_check(0) == 0
     assert cam.closed is True
+    assert seen == [
+        ("hvcam://", {"timeout_ms": 5000}),
+        ("hvcam+reverse://", {"timeout_ms": 5000}),
+    ]
     out = capsys.readouterr().out
     assert "quadro lido da fonte hvcam (hvcam+reverse://)" in out

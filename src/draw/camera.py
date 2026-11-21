@@ -496,7 +496,7 @@ def _local_open_hint(source):
 _WSL_HVCAM_CANDIDATES = ("hvcam://", "hvcam+reverse://")
 
 
-def open_wsl_hvcam_fallback(source, *, connect_timeout_ms=None):
+def open_wsl_hvcam_fallback(source, *, timeout_ms=None, connect_timeout_ms=None):
     """Tenta abrir a camera do Windows via hvcam quando WSL nao tem /dev/video0.
 
     Compartilhado entre `open_capture` e `run_check` para que `draw --check`
@@ -517,6 +517,8 @@ def open_wsl_hvcam_fallback(source, *, connect_timeout_ms=None):
                 "Aguardando hvcam-host.exe --reverse conectar no Windows (ate 35 s)..."
             )
         kwargs = {}
+        if timeout_ms is not None:
+            kwargs["timeout_ms"] = timeout_ms
         if connect_timeout_ms is not None:
             kwargs["connect_timeout_ms"] = connect_timeout_ms
         hv_cap = HvcamCapture(candidate, **kwargs)
