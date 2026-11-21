@@ -10,6 +10,10 @@ e _check_hvcam_source.
 
 import errno
 import os
+import subprocess
+import sys
+import threading
+import time
 
 import cv2
 import numpy as np
@@ -1740,6 +1744,64 @@ def test_strict_decoder_restarts_after_worker_exits():
         decoder.close()
 
 
+def test_decoder_works_without_writable_temp_storage(monkeypatch):
+    launch = subprocess.Popen
+    script = """
+import runpy, sys, tempfile
+def deny_tempfile(*args, **kwargs):
+    raise PermissionError("no writable temp storage")
+tempfile.TemporaryFile = deny_tempfile
+runpy.run_path(sys.argv[1], run_name="__main__")
+"""
+
+    def worker(command, **kwargs):
+        return launch([sys.executable, "-c", script, command[1]], **kwargs)
+
+    monkeypatch.setattr(mjpeg_module.subprocess, "Popen", worker)
+    ok, jpeg = cv2.imencode(".jpg", np.zeros((16, 16, 3), np.uint8))
+    assert ok
+    decoder = mjpeg_module._MjpegDecoder()
+    try:
+        assert decoder.decode(jpeg).shape == (16, 16, 3)
+        proc = decoder._process
+        assert decoder.decode(jpeg).shape == (16, 16, 3)
+        assert decoder._process is proc
+    finally:
+        decoder.close()
+
+
+@pytest.mark.parametrize("input_size", [16, 2 * 1024 * 1024])
+def test_decoder_times_out_during_pipe_read_or_write_and_restarts(
+    input_size, monkeypatch
+):
+    launch = subprocess.Popen
+    processes = []
+
+    def worker(command, **kwargs):
+        if not processes:
+            command = [sys.executable, "-c", "import time; time.sleep(60)"]
+        proc = launch(command, **kwargs)
+        processes.append(proc)
+        return proc
+
+    monkeypatch.setattr(mjpeg_module.subprocess, "Popen", worker)
+    decoder = mjpeg_module._MjpegDecoder(timeout_s=0.2)
+    try:
+        started = time.monotonic()
+        with pytest.raises(ValueError, match="tempo limite"):
+            decoder.decode(np.zeros(input_size, np.uint8))
+        assert time.monotonic() - started < 5
+        assert processes[0].poll() is not None
+        assert decoder._process is None
+        ok, jpeg = cv2.imencode(".jpg", np.zeros((16, 16, 3), np.uint8))
+        assert ok
+        decoder._timeout_s = 5
+        assert decoder.decode(jpeg).shape == (16, 16, 3)
+        assert len(processes) == 2
+    finally:
+        decoder.close()
+
+
 def _jpeg_with_tail_before_eoi(tail):
     img = np.random.default_rng(7).integers(0, 255, (96, 96, 3), dtype=np.uint8)
     ok, enc = cv2.imencode(".jpg", img)
@@ -1773,38 +1835,60 @@ def test_classify_warning_is_per_line():
 
 
 @pytest.mark.parametrize("corrupt", [False, True])
-def test_strict_decoder_preserves_concurrent_stderr(corrupt, monkeypatch, capfdbinary):
-    import threading
-
+def test_strict_decoder_preserves_concurrent_stderr(
+    corrupt, monkeypatch, capfdbinary, tmp_path
+):
     buf = _jpeg_with_tail_before_eoi(bytes(range(1, 41)) if corrupt else b"")
-    reading = threading.Event()
-    logged = threading.Event()
+    inside = tmp_path / "inside-decode"
+    release = tmp_path / "logged"
     message = b"other thread diagnostics " + b"x" * 8192 + b"\n"
-    receive = mjpeg_module._MjpegDecoder._receive
+    launch = subprocess.Popen
+    script = """
+import runpy, sys, time
+from pathlib import Path
+worker = runpy.run_path(sys.argv[1])
+cv2 = worker["cv2"]
+imdecode = cv2.imdecode
+def gated_imdecode(*args):
+    Path(sys.argv[2]).touch()
+    deadline = time.monotonic() + 5
+    while not Path(sys.argv[3]).exists():
+        if time.monotonic() >= deadline:
+            raise ValueError("writer did not report during decode")
+        time.sleep(0.005)
+    return imdecode(*args)
+cv2.imdecode = gated_imdecode
+worker["_serve"]()
+"""
 
-    def receive_after_log(pipe):
-        reading.set()
-        assert logged.wait(5)
-        return receive(pipe)
+    def worker(command, **kwargs):
+        return launch(
+            [sys.executable, "-c", script, command[1], str(inside), str(release)],
+            **kwargs,
+        )
 
     def write_log():
-        if reading.wait(5):
+        deadline = time.monotonic() + 5
+        while not inside.exists() and time.monotonic() < deadline:
+            time.sleep(0.005)
+        if inside.exists():
             os.write(2, message)
-            logged.set()
+            release.touch()
 
-    monkeypatch.setattr(
-        mjpeg_module._MjpegDecoder, "_receive", staticmethod(receive_after_log)
-    )
+    monkeypatch.setattr(mjpeg_module.subprocess, "Popen", worker)
+    decoder = mjpeg_module._MjpegDecoder(timeout_s=6)
     writer = threading.Thread(target=write_log)
     writer.start()
     try:
         if corrupt:
             with pytest.raises(ValueError, match="corrompido"):
-                hvcam_module._imdecode_mjpeg_strict(buf)
+                decoder.decode(buf)
         else:
-            assert hvcam_module._imdecode_mjpeg_strict(buf).shape == (96, 96, 3)
+            assert decoder.decode(buf).shape == (96, 96, 3)
     finally:
+        decoder.close()
         writer.join(timeout=6)
+    assert release.exists()
     assert capfdbinary.readouterr().err == message
 
 
