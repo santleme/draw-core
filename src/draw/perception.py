@@ -74,6 +74,7 @@ _NORM_SCALE = (1.0 / (255.0 * _STD)).astype(np.float32)
 _NORM_BIAS = (-_MEAN / _STD).astype(np.float32)
 _MEMORY_MIN_MASK_IOU = 0.7
 _MEMORY_MASK_STRIDE = 4
+_REJECTED_FIT_STREAK_LIMIT = 3
 _PAPER_CLASS = 1
 _HAND_CLASS = 2
 _INK_CLASS = 3
@@ -288,6 +289,7 @@ class NeuralSheetDetector:
         self._edge_lines = None
         self._memory_mask = None
         self._memory_geometry = None
+        self._reject_streak = 0
         self.last_presence_logit = None
         # Cobertura de folha da última previsão (0/255, resolução da
         # máscara devolvida): classes de folha sob qualquer ocupante
@@ -369,6 +371,22 @@ class NeuralSheetDetector:
             return None
         return self._edge_lines
 
+    def _note_rejected_fit(self):
+        """Conta a rejeição com a memória preservada, até um limite.
+
+        Rejeições isoladas mantêm a herança (uma máscara contaminada
+        não apaga a memória de arestas); rejeições seguidas demais
+        sinalizam que a cena mudou de verdade — solta a referência
+        antiga para uma folha substituta não herdar as retas da
+        anterior.
+        """
+        self._reject_streak += 1
+        if self._reject_streak >= _REJECTED_FIT_STREAK_LIMIT:
+            self._edge_lines = None
+            self._memory_mask = None
+            self._memory_is_spread = False
+            self._memory_spread_area = 0.0
+
     def _fit(self, mask, frame=None, *, scale_x=1.0, scale_y=1.0):
         """fit_quad com a memória de arestas do detector.
 
@@ -382,6 +400,7 @@ class NeuralSheetDetector:
             self._memory_mask = None
             self._memory_is_spread = False
             self._memory_spread_area = 0.0
+            self._reject_streak = 0
             self._memory_geometry = geometry
         contour, is_spread, contour_area = _geometry._sheet_contour_with_spread(mask)
         prev_spread = getattr(self, "_memory_is_spread", False)
@@ -413,6 +432,7 @@ class NeuralSheetDetector:
             else (mask.shape[0] * scale_y, mask.shape[1] * scale_x)
         )
         if corners is not None and not _geometry.fit_plausible(corners, ref_shape):
+            self._note_rejected_fit()
             return None
         if (
             corners is None
@@ -426,7 +446,9 @@ class NeuralSheetDetector:
             # plausibilidade. Sem isso o caminho "sem cantos" apagava as
             # retas guardadas e gravava a máscara recusada como
             # referência — uma aresta ocluída deixava de ser recuperável.
+            self._note_rejected_fit()
             return None
+        self._reject_streak = 0
         if lines is not None:
             # Aresta sem medida confiável neste quadro grava ausente:
             # copiar a linha velha faria o próximo quadro tratá-la

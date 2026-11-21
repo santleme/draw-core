@@ -184,6 +184,47 @@ def test_rejected_fit_preserves_edge_memory_for_later_occlusion(monkeypatch):
         assert q_occ[:, 0].max() >= 500.0
 
 
+def test_sustained_rejection_releases_edge_memory(monkeypatch):
+    """Rejeição isolada preserva a memória; rejeições seguidas demais
+    soltam a referência antiga — uma folha substituta no mesmo lugar
+    não pode herdar as retas da anterior (risco apontado no review)."""
+    det = perception.NeuralSheetDetector("unused.onnx", verify=None)
+
+    clean = np.zeros((480, 640), np.uint8)
+    clean[80:400, 120:520] = 255
+    assert det._fit(clean) is not None
+
+    contaminated = clean.copy()
+    cv2.fillConvexPoly(
+        contaminated,
+        np.array(
+            [[10, 20], [300, 70], [410, 300], [260, 430], [20, 230]],
+            np.int32,
+        ),
+        255,
+    )
+
+    def _reject_once():
+        with monkeypatch.context() as m:
+            m.setattr(geometry, "_approx_quad", lambda contour: None)
+            assert det._fit(contaminated) is None
+
+    # Uma rejeição isolada: memória viva — a oclusão recupera a aresta.
+    _reject_once()
+    occluded = clean.copy()
+    occluded[:, 440:] = 0
+    q_occ = det._fit(occluded)
+    assert q_occ is not None and q_occ[:, 0].max() >= 500.0
+
+    # Rejeições até o limite: a referência antiga é solta e a oclusão
+    # seguinte só enxerga a máscara visível.
+    for _ in range(perception._REJECTED_FIT_STREAK_LIMIT):
+        _reject_once()
+    assert det._edge_lines is None and det._memory_mask is None
+    q_after = det._fit(occluded)
+    assert q_after is not None and q_after[:, 0].max() < 500.0
+
+
 def test_neural_detector_rejects_exploding_quad():
     """Via detector: mancha de fundo rotulada como papel explode o quad e
     a detecção volta None em vez de entregar o frame inteiro."""
