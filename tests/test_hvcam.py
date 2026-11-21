@@ -1828,7 +1828,7 @@ def test_decoder_has_separate_cold_start_and_frame_deadlines(monkeypatch):
     launch = subprocess.Popen
     script = """
 import runpy, sys, time
-time.sleep(0.7)
+time.sleep(0.55)
 runpy.run_path(sys.argv[1], run_name="__main__")
 """
 

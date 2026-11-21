@@ -362,7 +362,13 @@ def test_consumer_cap_evicts_oldest(monkeypatch):
     monkeypatch.setattr(stream, "MAX_CONSUMERS", 2)
     pub = stream.InkStreamPublisher(port=0, token=TOKEN, log=lambda *_: None)
     try:
-        socks = [_connect(pub.port) for _ in range(3)]
+        # A adocao roda numa thread por conexao: registrar em sequencia
+        # garante que a ordem dos sinks bate com a ordem dos sockets,
+        # senao a vitima da expulsao e aleatoria.
+        socks = [_connect(pub.port)]
+        assert _wait(lambda: len(pub._sinks) == 1)
+        socks.append(_connect(pub.port))
+        socks.append(_connect(pub.port))
         assert _wait(lambda: len(pub._sinks) == 2)
         # len==2 ja vale antes da 3a conexao entrar; espera o EOF com folga.
         socks[0].settimeout(10)

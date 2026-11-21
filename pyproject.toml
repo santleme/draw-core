@@ -17,7 +17,13 @@ dependencies = [
 hand = ["mediapipe>=0.10"]
 # Janela na tela (cv2.imshow): a roda com GUI substitui a headless.
 gui = ["opencv-contrib-python>=4.8,<5.1"]
-dev = ["pytest>=8", "pytest-xdist>=3.6", "ruff>=0.6", "onnx>=1.16"]
+dev = [
+    "pytest>=8",
+    "pytest-testmon>=2.3.1",
+    "pytest-xdist>=3.6",
+    "ruff>=0.6",
+    "onnx>=1.16",
+]
 
 [project.scripts]
 draw = "draw.app:main"

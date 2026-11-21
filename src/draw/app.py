@@ -155,6 +155,7 @@ def _detect_sheet_combined_traced(frame, neural_detector):
         "classic_ran": False,
         "classic_verdict": None,
         "classic_corners": None,
+        "scene_stats": None,
     }
     extras = {}
 
@@ -184,6 +185,12 @@ def _detect_sheet_combined_traced(frame, neural_detector):
         # extras para o laço retificar com a homografia do warp de
         # tinta; a máscara de mão alimenta a oclusão semântica.
         corners, verdict, mask = neural_detector(frame, return_mask=True)
+        # Sinais de qualidade de cena da segmentação (issue #106): o
+        # rastro os leva à telemetria em TODOS os desfechos neurais —
+        # a cena estranha sem quadrilátero (veto, presença sem
+        # posição) é exatamente o caso medido lá. getattr com default:
+        # dublês de teste antigos não têm o atributo.
+        trace["scene_stats"] = getattr(neural_detector, "last_scene_stats", None)
         if corners is not None and mask is not None:
             # Máscara quase vazia não é evidência de folha: sem o
             # piso, uma detecção ruim transformaria a cobertura num

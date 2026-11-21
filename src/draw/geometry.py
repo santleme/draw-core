@@ -60,10 +60,113 @@ def fill_interior_holes(mask):
 # tela, com overlay queimado; a guarda precisa de reconfirmação em
 # captura crua.
 _FIT_OPPOSITE_RATIO_MAX = 3.0
+# Aresta "na borda do quadro": os DOIS vértices a ~2% do lado menor da
+# mesma borda (um corte de frame corre ao longo dela). A aresta curta
+# interior é a assinatura do colapso por oclusão; na borda ela pode ser o
+# próprio corte do clip, e a razão não decide. ~2% cobre a quantização da
+# máscara do detector redimensionada.
+_FIT_EDGE_BORDER_GAP_FRAC = 0.02
 _FIT_EXCURSION_DIAG_FRAC = 0.15
 
+# Guarda de suporte do ajuste na máscara (medida em 2026-11-21 nas
+# capturas draw-data/captures s1-s4): o ajuste precisa ficar sobre a
+# região não-fundo que o modelo marcou. Num cenário fora da mesa de
+# referência (s3_geometria, câmera oblíqua 640x480 com piso claro à
+# vista), o modelo rotula região de não-papel como folha e o ajuste
+# explode para um quadrilátero que cobre braço, chão e o frame inteiro
+# — razão de arestas ~1 e excursão dentro da margem, então a guarda de
+# plausibilidade deixava passar. Nessas capturas, ajustes sãos cobrem a
+# máscara em >= 0,84 (p5 0,91 na sessão de escrita da mesa de
+# referência), os quads explodidos ficam entre 0,56 e 0,80 e os
+# fantasmas de mesa vazia (s1) chegam a 0,43. A região de suporte é a
+# cobertura (tudo que não é fundo) quando o detector a fornece — mão
+# sobre a folha não pode secar a métrica — e a própria máscara fora
+# dele. Ressalva igual à guarda de plausibilidade: limiar calibrado nas
+# capturas da mesa de referência e de um cenário oblíquo; reconfirmar
+# em capturas de outras mesas.
+_FIT_MIN_MASK_FILL = 0.82
 
-def fit_plausible(corners, frame_shape):
+
+def _quad_supported(quad, support_mask):
+    """True se a região não-fundo cobre a maior parte do quadrilátero.
+
+    O quadrilátero é desenhado na grade de `support_mask`; a fração
+    coberta por pixels não-fundo precisa chegar a _FIT_MIN_MASK_FILL.
+    É a medida que separa o ajuste apoiado na folha do que escorregou
+    para cima de fundo mal classificado — o piso claro rotulado como
+    papel que produzia quad do tamanho do frame inteiro.
+    """
+    filled = np.zeros(support_mask.shape, np.uint8)
+    cv2.fillConvexPoly(filled, np.round(quad).astype(np.int32), 255)
+    area = int(np.count_nonzero(filled))
+    if area == 0:
+        return False
+    inside = int(np.count_nonzero((filled != 0) & (support_mask != 0)))
+    return inside / area >= _FIT_MIN_MASK_FILL
+
+
+def _edge_border_sides(p, q, border_gap, width, height):
+    """Bordas do quadro ao longo das quais a aresta p→q pode correr."""
+    sides = []
+    if max(p[0], q[0]) <= border_gap:
+        sides.append("left")
+    if max(p[1], q[1]) <= border_gap:
+        sides.append("top")
+    if width - min(p[0], q[0]) <= border_gap:
+        sides.append("right")
+    if height - min(p[1], q[1]) <= border_gap:
+        sides.append("bottom")
+    return sides
+
+
+def _mask_supports_cut(evidence, observable, side, p, q, scale_x, scale_y):
+    """O recorte declarado em `side` tem suporte no contorno observado?"""
+    mh, mw = evidence.shape
+    if side in ("left", "right"):
+        i = 0 if side == "left" else mw - 1
+        a = int(min(p[1], q[1]) // scale_y)
+        b = int(max(p[1], q[1]) // scale_y)
+        st_e = evidence[max(0, a) : min(mh, b + 1), i]
+        st_o = observable[max(0, a) : min(mh, b + 1), i]
+    else:
+        i = 0 if side == "top" else mh - 1
+        a = int(min(p[0], q[0]) // scale_x)
+        b = int(max(p[0], q[0]) // scale_x)
+        st_e = evidence[i, max(0, a) : min(mw, b + 1)]
+        st_o = observable[i, max(0, a) : min(mw, b + 1)]
+    obs = int(np.count_nonzero(st_o))
+    return obs > 0 and int(np.count_nonzero(st_e)) * 2 >= obs
+
+
+def _frame_cut(
+    quad, u, v, border_gap, width, height, evidence, observable, scale_x, scale_y
+):
+    """A aresta quad[u]→quad[v] e corte de frame?
+
+    A aresta precisa correr ao longo de uma borda do quadro e, quando a
+    mascara nativa existe, ter suporte do contorno nela — perto de um
+    canto a aresta pode caber em duas bordas e basta uma ser suportada.
+    """
+    p, q = quad[u % 4], quad[v % 4]
+    sides = _edge_border_sides(p, q, border_gap, width, height)
+    return bool(sides) and (
+        evidence is None
+        or any(
+            _mask_supports_cut(evidence, observable, side, p, q, scale_x, scale_y)
+            for side in sides
+        )
+    )
+
+
+def fit_plausible(
+    corners,
+    frame_shape,
+    mask=None,
+    scale_x=1.0,
+    scale_y=1.0,
+    contour=None,
+    hand=None,
+):
     """True se o quadrilátero passa na guarda de plausibilidade.
 
     A primeira regra é finitude. Toda comparação com NaN é falsa, e
@@ -72,6 +175,12 @@ def fit_plausible(corners, frame_shape):
     ajuste mais inválido possível. Infinito já era recusado pela
     comparação com a margem do quadro, mas a regra explícita cobre
     os dois casos com a mesma mensagem.
+
+    `mask`, `scale_x` e `scale_y` trazem a máscara nativa e a escala
+    frame→máscara para validar os cortes de frame que isentam a razão
+    entre arestas opostas; `contour` restringe a evidência aos pixels
+    do componente ajustado e `hand` marca pixels de mão como não
+    observáveis. Sem `mask` a isenção é só geométrica (vértices).
     """
     quad = np.asarray(corners, dtype=np.float64)
     if quad.shape != (4, 2):
@@ -81,11 +190,61 @@ def fit_plausible(corners, frame_shape):
     edges = np.array([np.linalg.norm(quad[(i + 1) % 4] - quad[i]) for i in range(4)])
     if edges.min() <= 0:
         return False
+    height, width = frame_shape[:2]
+    border_gap = _FIT_EDGE_BORDER_GAP_FRAC * min(width, height)
+    evidence = observable = None
+    if mask is not None:
+        # Evidencia do corte = pixels reais da mascara dentro do contorno
+        # escolhido para o ajuste: foreground destacado ou preenchimento
+        # de casco nao conta como contato com a borda. O denominador e o
+        # trecho INTEIRO observavel — fundo visivel fora do contorno
+        # conta como "nao papel"; so pixels de mao saem como nao
+        # observaveis (e nunca podem ser evidencia).
+        if contour is None:
+            region = np.ones(mask.shape, bool)
+        else:
+            region = np.zeros(mask.shape, np.uint8)
+            cv2.fillPoly(region, [contour], 255)
+            region = region.astype(bool)
+        evidence = (mask > 0) & region
+        observable = np.ones(mask.shape, bool)
+        if hand is not None and hand.shape == mask.shape:
+            evidence &= hand == 0
+            observable = hand == 0
     for a, b in ((0, 2), (3, 1)):
         ratio = max(edges[a], edges[b]) / min(edges[a], edges[b])
-        if ratio > _FIT_OPPOSITE_RATIO_MAX:
+        if ratio <= _FIT_OPPOSITE_RATIO_MAX:
+            continue
+        short = a if edges[a] <= edges[b] else b
+        other = b if short == a else a
+        # Isenta o par quando uma aresta dele e corte de frame — o
+        # comprimento e decidido pela borda da imagem, nao pela pagina:
+        # a curta pode ser o corte, a longa pode ser o corte (a curta e
+        # entao a aresta distante real, interior), ou um vizinho da
+        # curta e o corte que comeu o canto dela. Com mascara disponivel
+        # o corte precisa de suporte no contorno nativo: aresta de papel
+        # passando perto da borda nao isenta um colapsado.
+        if not any(
+            _frame_cut(
+                quad,
+                u,
+                v,
+                border_gap,
+                width,
+                height,
+                evidence,
+                observable,
+                scale_x,
+                scale_y,
+            )
+            for u, v in (
+                (short, short + 1),
+                (other, other + 1),
+                (short - 1, short),
+                (short + 1, short + 2),
+            )
+        ):
             return False
-    height, width = frame_shape[:2]
     margin = _FIT_EXCURSION_DIAG_FRAC * float(np.hypot(width, height))
     return not (
         quad[:, 0].min() < -margin
@@ -703,14 +862,26 @@ def _refine_inside(frame, corners):
 
 
 def _fit_quad_impl(
-    mask_bin, frame, fallback_lines, scale_x=1.0, scale_y=1.0, *, contour=None
+    mask_bin,
+    frame,
+    fallback_lines,
+    scale_x=1.0,
+    scale_y=1.0,
+    *,
+    contour=None,
+    support_mask=None,
 ):
     """O ajuste completo sobre a máscara, com herança opcional.
 
     Retorna (quadrilatero ou None, retas usadas ou None, confiavel
     por aresta ou None). fallback_lines são as retas confiáveis da
     chamada anterior, oferecidas às arestas sem cobertura.
+    support_mask é a região não-fundo que precisa cobrir o quad
+    ajustado (cobertura do detector quando existe; a própria máscara
+    caso contrário): ajuste que escapa para cima de fundo não sai.
     """
+    if support_mask is None or support_mask.shape != mask_bin.shape:
+        support_mask = mask_bin
     if contour is None:
         contour = _sheet_contour(mask_bin)
     if contour is None:
@@ -721,10 +892,21 @@ def _fit_quad_impl(
     scale = np.array([scale_x, scale_y], dtype=np.float32)
     quad = _approx_quad(contour)
     if quad is None:
-        return _min_area_quad(contour) * scale, None, None
+        # Reserva de área mínima: sai sem reajuste nem refino, mas não
+        # sai sem apoio — todas as explosões medidas nas capturas
+        # oblíquas entraram por aqui, com o retângulo mínimo cobrindo
+        # braço e chão além da máscara.
+        quad = _min_area_quad(contour)
+        if not _quad_supported(quad, support_mask):
+            return None, None, None
+        return quad * scale, None, None
     quad, lines, trusted = _refit_corners(
         contour, quad, mask_bin.shape[:2], fallback_lines, scale
     )
+    if lines is None and not _quad_supported(quad, support_mask):
+        # Refit abandonado por falta de pontos: o approx que sobrou
+        # também não teve guarda de aresta; a mesma regra vale.
+        return None, None, None
     quad = quad * scale
     if frame is not None:
         quad = _refine_inside(frame, quad)

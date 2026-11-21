@@ -74,6 +74,7 @@ _NORM_SCALE = (1.0 / (255.0 * _STD)).astype(np.float32)
 _NORM_BIAS = (-_MEAN / _STD).astype(np.float32)
 _MEMORY_MIN_MASK_IOU = 0.7
 _MEMORY_MASK_STRIDE = 4
+_REJECTED_FIT_STREAK_LIMIT = 3
 _PAPER_CLASS = 1
 _HAND_CLASS = 2
 _INK_CLASS = 3
@@ -103,6 +104,16 @@ _TIMING_LOG_EVERY = 100
 # clássica justamente no cenário de generalização, a folha real que a
 # neural subdispara num setup novo.
 PRESENCE_VETO_LOGIT = -3.0
+
+# Piso de área para um componente conectado contar como componente
+# de cena em _scene_stats, em fração do frame nativo (0,5%). Referência
+# da issue #106: a mancha de falso-papel no piso claro cobria ~55%
+# do quadro — duas ordens de grandeza acima do piso — enquanto o
+# resíduo de classificação de um argmax de quatro classes aparece em
+# salpicos de dezenas de pixels, abaixo dele. A 384² o limiar pede
+# ~740 px (quadrado de ~27 px de lado): uma folha longe da câmera
+# ainda conta, o ruído não.
+_SCENE_COMPONENT_MIN_FRAC = 0.005
 
 
 def _frame_to_tensor(frame, size):
@@ -243,6 +254,80 @@ def _session_contract(session):
     )
 
 
+def _scene_stats(coverage_mask, hand_mask):
+    """Medidas de qualidade de cena sobre a máscara de cobertura nativa.
+
+    O sinal de presença responde "há papel?" e nada diz sobre a cena:
+    na captura da issue #106 (frames_s3_geometria_1117_1754, piso
+    claro fora da mesa de referência) a segmentação rotulou lajota
+    como papel, a mancha colou no blob da folha e o quadrilátero saiu
+    cobrindo braço e chão. Este dict separa "papel detectado" de
+    "cena estranha detectada" sem decidir nada — quem lê o rastro na
+    telemetria combina cobertura alta, máscara colada nas bordas e
+    mão sem folha coerente.
+
+    coverage_mask e hand_mask são mapas 0/≠0 na resolução nativa do
+    modelo; hand_mask None (contrato de dois canais) deixa
+    hand_ratio None, pois esse modelo não sabe o que é mão. Campos:
+
+    - coverage_ratio: não-fundo / total do frame — o "máscara cobre
+      55% do frame" medido na captura;
+    - components: componentes conectados (8-vizinhança) com área ≥
+      _SCENE_COMPONENT_MIN_FRAC do frame — o mesmo conjunto de
+      regiões dos contornos externos (uma região com buraco segue um
+      componente só); o salpico de ruído fica fora;
+    - largest_share: pixels do maior componente / não-fundo, máximo
+      sobre TODOS os componentes (não só os contados): mede a
+      concentração do não-fundo. Um blob colado (piso+folha numa
+      união só) fecha ~1,0 — a separação dele vem de coverage_ratio
+      e border_ratio, não deste campo; um salpico sozinho também
+      marca 1,0 ("tudo que há é um blob" é verdade ali), e o que o
+      distingue é components=0 com coverage_ratio ≈ 0;
+    - border_ratio: fração do perímetro do frame que é não-fundo —
+      os quads explodidos da issue nascem de máscaras coladas na
+      borda (96–100% do frame);
+    - hand_ratio: pixels de mão / total.
+
+    Custo: um connectedComponentsWithStats a 384² por previsão —
+    desprezível contra os ~58 ms do session.run medidos na mesa.
+    """
+    total_px = coverage_mask.size
+    non_background = int(np.count_nonzero(coverage_mask))
+    min_area = _SCENE_COMPONENT_MIN_FRAC * total_px
+    _, _, component_stats, _ = cv2.connectedComponentsWithStats(
+        coverage_mask.astype(np.uint8), connectivity=8
+    )
+    # Rótulo 0 é o fundo; CC_STAT_AREA é a contagem exata de pixels
+    # de cada componente — medida do auditor lab/seg_scene_audit.py.
+    # A área de polígono do contorno mediria ~zero num blob fino e
+    # longo e o piso o descartaria apesar dos pixels reais.
+    areas = component_stats[1:, cv2.CC_STAT_AREA]
+    components = int(np.count_nonzero(areas >= min_area))
+    # O maior blob sai do máximo sobre todos os rótulos, contados ou
+    # não (sem componente, non_background é zero e a fatia é 0,0).
+    largest_share = float(areas.max() / non_background) if non_background else 0.0
+    # Fração do perímetro ocupada por não-fundo: linhas de cima e de
+    # baixo inteiras, colunas sem os cantos — cada pixel de borda
+    # conta exatamente uma vez.
+    border_px = np.concatenate(
+        (
+            coverage_mask[0],
+            coverage_mask[-1],
+            coverage_mask[1:-1, 0],
+            coverage_mask[1:-1, -1],
+        )
+    )
+    return {
+        "coverage_ratio": non_background / total_px,
+        "components": components,
+        "largest_share": largest_share,
+        "border_ratio": float(np.count_nonzero(border_px) / border_px.size),
+        "hand_ratio": (
+            None if hand_mask is None else float(np.count_nonzero(hand_mask) / total_px)
+        ),
+    }
+
+
 class NeuralSheetDetector:
     """Detector neural com sessão própria.
 
@@ -267,7 +352,15 @@ class NeuralSheetDetector:
     última chamada a predict (None antes da primeira e após um frame
     vazio): nos modelos legados é o logit treinado; no SegFormer de
     quatro classes é um sinal derivado da área segmentada. O app usa-o
-    para decidir se a reserva clássica pode falar.
+    para decidir se a reserva clássica pode falar. O atributo
+    last_scene_stats guarda o dict de _scene_stats da mesma chamada
+    (None nos mesmos casos): a presença não separa "papel detectado"
+    de "cena estranha detectada" — o falso papel de piso claro da
+    issue #106 — e o rastro da aquisição leva essas medidas à
+    telemetria. last_coverage_raw guarda a cobertura crua dessa
+    chamada (None nos mesmos casos): last_coverage_mask vai ao voto
+    de tinta já com os buracos internos preenchidos, e o mapa cru é o
+    que _scene_stats mede e a auditoria de cena reporta.
     """
 
     def __init__(
@@ -300,6 +393,7 @@ class NeuralSheetDetector:
         self._edge_lines = None
         self._memory_mask = None
         self._memory_geometry = None
+        self._reject_streak = 0
         self.last_presence_logit = None
         # Cobertura de folha da última previsão (0/255, resolução da
         # máscara devolvida): classes de folha sob qualquer ocupante
@@ -308,6 +402,16 @@ class NeuralSheetDetector:
         # o voto sob a mão é a visibilidade, não a cobertura.
         self.last_coverage_mask = None
         self.last_hand_mask = None
+        # Qualidade de cena da última previsão (dict de _scene_stats):
+        # o complemento do logit de presença para a telemetria dizer
+        # "papel detectado" de "cena estranha detectada" (issue #106).
+        self.last_scene_stats = None
+        # A cobertura crua (argmax sem o preenchimento de buracos do
+        # voto de tinta): é o mapa que _scene_stats mede e que a
+        # auditoria de cena (lab/seg_scene_audit.py) reporta — um
+        # buraco de fundo cercado de papel conta como falha nela,
+        # não como pixel preenchido.
+        self.last_coverage_raw = None
         self._timing_stats = {
             phase: {"count": 0, "sum_ms": 0.0, "max_ms": 0.0}
             for phase in _TIMING_PHASES
@@ -381,6 +485,22 @@ class NeuralSheetDetector:
             return None
         return self._edge_lines
 
+    def _note_rejected_fit(self):
+        """Conta a rejeição com a memória preservada, até um limite.
+
+        Rejeições isoladas mantêm a herança (uma máscara contaminada
+        não apaga a memória de arestas); rejeições seguidas demais
+        sinalizam que a cena mudou de verdade — solta a referência
+        antiga para uma folha substituta não herdar as retas da
+        anterior.
+        """
+        self._reject_streak += 1
+        if self._reject_streak >= _REJECTED_FIT_STREAK_LIMIT:
+            self._edge_lines = None
+            self._memory_mask = None
+            self._memory_is_spread = False
+            self._memory_spread_area = 0.0
+
     def _fit(self, mask, frame=None, *, scale_x=1.0, scale_y=1.0):
         """fit_quad com a memória de arestas do detector.
 
@@ -394,6 +514,7 @@ class NeuralSheetDetector:
             self._memory_mask = None
             self._memory_is_spread = False
             self._memory_spread_area = 0.0
+            self._reject_streak = 0
             self._memory_geometry = geometry
         contour, is_spread, contour_area = _geometry._sheet_contour_with_spread(
             mask, spread_mode=getattr(self, "_spread_mode", "auto")
@@ -407,22 +528,51 @@ class NeuralSheetDetector:
             is_spread and prev_area > 0 and contour_area > prev_area * 1.05
         )
         fallback = None if spread_expanded else self._fallback_lines(mask)
-        # Dublês de teste antigos nao aceitam `contour`; decide pela assinatura
-        # em vez de capturar TypeError (que mascararia erros reais do ajuste).
+        # Dublês de teste antigos nao aceitam `contour`/`support_mask`;
+        # decide pela assinatura em vez de capturar TypeError (que
+        # mascararia erros reais do ajuste).
         impl = _geometry._fit_quad_impl
-        if "contour" in inspect.signature(impl).parameters:
-            corners, lines, trusted = impl(
-                mask, frame, fallback, scale_x, scale_y, contour=contour
-            )
-        else:
-            corners, lines, trusted = impl(mask, frame, fallback, scale_x, scale_y)
+        params = inspect.signature(impl).parameters
+        kwargs = {}
+        if "contour" in params:
+            kwargs["contour"] = contour
+        if "support_mask" in params:
+            coverage = getattr(self, "last_coverage_mask", None)
+            kwargs["support_mask"] = coverage if coverage is not None else mask
+        corners, lines, trusted = impl(
+            mask, frame, fallback, scale_x, scale_y, **kwargs
+        )
         ref_shape = (
             frame.shape
             if frame is not None
             else (mask.shape[0] * scale_y, mask.shape[1] * scale_x)
         )
-        if corners is not None and not _geometry.fit_plausible(corners, ref_shape):
+        if corners is not None and not _geometry.fit_plausible(
+            corners,
+            ref_shape,
+            mask,
+            scale_x=scale_x,
+            scale_y=scale_y,
+            contour=contour,
+            hand=self.last_hand_mask,
+        ):
+            self._note_rejected_fit()
             return None
+        if (
+            corners is None
+            and lines is None
+            and contour is not None
+            and contour_area
+            >= mask.shape[0] * mask.shape[1] * _geometry._MIN_CONTOUR_AREA_RATIO
+        ):
+            # Contorno substancial sem quadrilátero nem retas é rejeição
+            # (guarda de suporte), não ausência de folha: sai cedo como a
+            # plausibilidade. Sem isso o caminho "sem cantos" apagava as
+            # retas guardadas e gravava a máscara recusada como
+            # referência — uma aresta ocluída deixava de ser recuperável.
+            self._note_rejected_fit()
+            return None
+        self._reject_streak = 0
         if lines is not None:
             # Aresta sem medida confiável neste quadro grava ausente:
             # copiar a linha velha faria o próximo quadro tratá-la
@@ -558,11 +708,23 @@ class NeuralSheetDetector:
         # quem consome (draw/app.py) faz o upsample no mesmo ponto
         # em que a máscara de chamada ganha a resolução do frame.
         self.last_coverage_mask = _geometry.fill_interior_holes(coverage_small) * 255
+        # A mesma cobertura antes do preenchimento — mapa de
+        # diagnóstico (auditoria de cena, overlays): lá dentro, o
+        # fundo que o modelo cercou de papel precisa aparecer como
+        # falha, não como pixel já remendado para o voto de tinta.
+        self.last_coverage_raw = coverage_small * 255
         # Oclusão semântica: a classe mão vira segundo sinal do
         # canal visible do voto de tinta.
         # Resolução nativa da máscara — quem consome faz o upsample
         # no mesmo ponto da cobertura.
         self.last_hand_mask = None if hand_small is None else hand_small * 255
+        # Qualidade de cena sobre a cobertura crua que alimenta
+        # last_coverage_mask: o preenchimento de buracos é conveniência
+        # do voto de tinta, não do diagnóstico — a mão que o modelo
+        # viu como fundo dentro da folha não pode virar não-fundo
+        # aqui. coverage_small e hand_small saem de qualquer um dos
+        # três caminhos de saída acima.
+        self.last_scene_stats = _scene_stats(coverage_small, hand_small)
         if not native:
             mask = cv2.resize(mask, (frame_w, frame_h), interpolation=cv2.INTER_NEAREST)
         if self._timing_enabled:
@@ -579,6 +741,8 @@ class NeuralSheetDetector:
     def __call__(self, frame, *, return_mask=True):
         if frame is None or frame.size == 0:
             self.last_presence_logit = None
+            self.last_scene_stats = None
+            self.last_coverage_raw = None
             return None, None, None
         presence, mask = self.predict(frame, native=True)
         frame_h, frame_w = frame.shape[:2]
@@ -588,6 +752,11 @@ class NeuralSheetDetector:
             corners = self._fit(
                 mask, frame, scale_x=frame_w / mask_w, scale_y=frame_h / mask_h
             )
+        else:
+            # Ausência não é rejeição: o ajuste nem rodou e a cena
+            # pode estar vazia ou com a folha sob a mão — zerar a
+            # sequência para frames assim não esvaziarem a memória.
+            self._reject_streak = 0
         verdict = "paper" if corners is not None else None
         if return_mask:
             mask = cv2.resize(mask, (frame_w, frame_h), interpolation=cv2.INTER_NEAREST)
