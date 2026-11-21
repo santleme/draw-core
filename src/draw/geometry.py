@@ -756,6 +756,12 @@ def _fit_quad_impl(
     support_mask é a região não-fundo que precisa cobrir o quad
     ajustado (cobertura do detector quando existe; a própria máscara
     caso contrário): ajuste que escapa para cima de fundo não sai.
+
+    Contrato dos retornos vazios, lido pelo rastro de aquisição do
+    detector (issue #105): passado o piso de área, (None, None,
+    None) é exclusivamente veto de suporte. Um motivo novo de
+    rejeição não pode sair assim — o detector o rotularia
+    "unsupported" e precisa de sinalização própria.
     """
     if support_mask is None or support_mask.shape != mask_bin.shape:
         support_mask = mask_bin
