@@ -1482,6 +1482,7 @@ def run(
         base_rotation = rotation
         seq_offset = 0
         reset_source = False
+        preserve_ink_on_reset = False
         auto_rotator = (
             AutoRotationDetector() if (auto_rotate and not markers_mode) else None
         )
@@ -1606,7 +1607,16 @@ def run(
             if reset_source:
                 reset_source = False
                 if pipeline is not None:
+                    if preserve_ink_on_reset:
+                        # Correcao automatica (180°/retrato-paisagem) nao e troca
+                        # de camera: a tinta confirmada nao pode sumir do Save.
+                        # A grade antiga nao serve na nova orientacao, entao
+                        # guarda um snapshot da pagina antes de limpar.
+                        kept = pipeline.clean_mask
+                        if kept is not None and bool(np.any(kept)):
+                            save_page_snapshot("pagina_reorientada", kept)
                     pipeline.reset_source(packet.captured_at)
+                preserve_ink_on_reset = False
 
             loop_frames += 1
             tel_window_frames += 1
@@ -1662,6 +1672,7 @@ def run(
                         rotation = 180 if frame_source.rotation == 0 else 0
                         frame_source.set_rotation(rotation)
                         reset_source = True
+                        preserve_ink_on_reset = True
                         if auto_orienter is not None:
                             auto_orienter.reset_streak()
                         print(
@@ -1680,6 +1691,7 @@ def run(
                         if ink_stream is not None:
                             ink_stream.set_paper_mm(config.paper_mm())
                         reset_source = True
+                        preserve_ink_on_reset = True
                         print(
                             "Orientacao da folha ajustada automaticamente para "
                             f"{new_orient} ({config.PAPER_W}x{config.PAPER_H})."

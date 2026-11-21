@@ -56,6 +56,7 @@ O arquivo do modelo fica fora do repositório (binário de 15 MB). O
 caminho chega sempre por argumento explícito ao detector.
 """
 
+import inspect
 import time
 from pathlib import Path
 from typing import NamedTuple, Tuple
@@ -392,14 +393,15 @@ class NeuralSheetDetector:
             is_spread and prev_area > 0 and contour_area > prev_area * 1.05
         )
         fallback = None if spread_expanded else self._fallback_lines(mask)
-        try:
-            corners, lines, trusted = _geometry._fit_quad_impl(
+        # Dublês de teste antigos nao aceitam `contour`; decide pela assinatura
+        # em vez de capturar TypeError (que mascararia erros reais do ajuste).
+        impl = _geometry._fit_quad_impl
+        if "contour" in inspect.signature(impl).parameters:
+            corners, lines, trusted = impl(
                 mask, frame, fallback, scale_x, scale_y, contour=contour
             )
-        except TypeError:
-            corners, lines, trusted = _geometry._fit_quad_impl(
-                mask, frame, fallback, scale_x, scale_y
-            )
+        else:
+            corners, lines, trusted = impl(mask, frame, fallback, scale_x, scale_y)
         ref_shape = (
             frame.shape
             if frame is not None

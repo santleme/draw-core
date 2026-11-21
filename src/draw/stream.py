@@ -322,6 +322,7 @@ class InkStreamPublisher:
         self._src_generation = None
         self._stream_generation = 0
         self._last_shape = None
+        self._last_paper_mm = None
         # Ultima ancora/captura conhecidas da geracao: uma atualizacao so do
         # provisorio chega sem metadados, e o consumidor tardio (FULL do
         # ultimo estado) nao pode perder a ancora por causa dela.
@@ -418,12 +419,18 @@ class InkStreamPublisher:
                 mask = np.zeros(self._last_shape, np.uint8)
                 mask.flags.writeable = False
                 version = 0
+                # Grade em branco e dimensoes fisicas andam juntas: se a
+                # orientacao mudou desde a ultima mascara, a grade antiga nao
+                # pode ser rotulada com os mm novos.
+                paper_mm = self._last_paper_mm or self._paper_mm
             else:
                 if publication.generation != self._src_generation:
                     self._src_generation = publication.generation
                     self._stream_generation += 1
                     self._last_captured_us = self._last_anchor = None
                 self._last_shape = mask.shape
+                self._last_paper_mm = self._paper_mm
+                paper_mm = self._paper_mm
                 version = publication.version
                 if publication.full:
                     # Descontinuidade (ex.: a trabalhadora zerou a ancora na
@@ -448,7 +455,7 @@ class InkStreamPublisher:
                 captured_at_us,
                 anchor,
                 force_full,
-                self._paper_mm,
+                paper_mm,
             )
             self._cond.notify()
 

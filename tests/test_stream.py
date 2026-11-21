@@ -835,3 +835,22 @@ def test_accept_loop_handles_high_fd_on_linux():
                 os.close(fd)
             except OSError:
                 pass
+
+
+@needs_private_files
+def test_clear_after_orientation_change_keeps_grid_and_mm_together(tmp_path):
+    path = tmp_path / "rec.dral"
+    pub = stream.InkStreamPublisher(port=None, record_path=str(path))
+    pub.set_paper_mm((210.0, 297.0))
+    portrait = _mask(40, 30)
+    portrait[2:5, 2:5] = 255
+    pub.publish(contracts.InkPublication(1, 1, portrait))
+    # Orientacao muda; o clear seguinte ainda usa a grade retrato antiga.
+    pub.set_paper_mm((297.0, 210.0))
+    pub.publish(contracts.InkPublication(-1, 0, None))
+    pub.close()
+    canvas = stream.InkCanvas()
+    for rec in stream.records_from_file(path):
+        canvas.apply(rec)
+    assert canvas.mask.shape == (40, 30)
+    assert canvas.paper_mm == pytest.approx((210.0, 297.0))

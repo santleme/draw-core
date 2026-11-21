@@ -2,6 +2,7 @@
 
 import cv2
 import numpy as np
+import pytest
 
 from draw import config, contracts, geometry
 from draw.auto_orient import (
@@ -646,3 +647,85 @@ def test_neural_detector_noisy_native_scale_slide_does_not_lock_trailing_edge():
         assert q3 is not None
         assert abs(q3[:, 0].min() - 89.0 * scale_x) <= 10.0
         assert abs(q3[:, 0].max() - 339.0 * scale_x) <= 10.0
+
+
+def test_neural_detector_lateral_trapezoid_slide_with_large_angle_change():
+    """Slide lateral de trapezio: os lados mudam >6 graus na imagem, mas no plano
+    retificado e uma translacao pura. A borda traseira nao pode ficar presa."""
+    from draw.perception import NeuralSheetDetector
+
+    det = NeuralSheetDetector("unused.onnx", verify=None)
+    t1 = np.array([[109, 100], [241, 100], [325, 260], [25, 260]], dtype=np.int32)
+    m1 = np.zeros((384, 384), dtype=np.uint8)
+    cv2.fillPoly(m1, [t1], 255)
+    assert det._fit(m1) is not None
+
+    # Topo desliza 19 px, base 43 px (proporcional as larguras projetadas).
+    t2 = np.array([[128, 100], [260, 100], [368, 260], [68, 260]], dtype=np.int32)
+    m2 = np.zeros((384, 384), dtype=np.uint8)
+    cv2.fillPoly(m2, [t2], 255)
+    for _ in range(3):
+        q = det._fit(m2)
+        assert q is not None
+        assert abs(q[:, 0].min() - 68.0) <= 6.0
+        assert abs(q[:, 0].max() - 368.0) <= 6.0
+        top = q[np.argsort(q[:, 1])[:2]]
+        assert abs(top[:, 0].min() - 128.0) <= 6.0
+
+
+def test_hand_vote_abstains_on_side_entry_inside_top_band():
+    from draw.auto_orient import hand_mask_orientation_vote
+
+    mask = np.zeros((1280, 720), dtype=np.uint8)
+    mask[8:75, 0:220] = 255  # entra pela esquerda, sem tocar a borda superior
+    assert hand_mask_orientation_vote(mask) is None
+    side_and_corner = mask.copy()
+    side_and_corner[0:75, 0:60] = 255  # toca o topo, mas o contato lateral domina
+    assert hand_mask_orientation_vote(side_and_corner) is None
+
+
+def test_hand_vote_still_detects_real_top_entry():
+    from draw.auto_orient import hand_mask_orientation_vote
+
+    mask = np.zeros((1280, 720), dtype=np.uint8)
+    mask[0:300, 300:420] = 255
+    assert hand_mask_orientation_vote(mask) == "inverted"
+
+
+def _contour_of(x0, y0, x1, y1):
+    m = np.zeros((400, 800), dtype=np.uint8)
+    m[y0:y1, x0:x1] = 255
+    contours, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    return contours[0]
+
+
+def test_loose_sheets_with_desk_gap_are_not_a_spread():
+    from draw.geometry import _is_two_page_spread
+
+    # Duas A4 lado a lado com ~19% de largura de intervalo: folhas soltas.
+    a = _contour_of(50, 50, 300, 350)
+    b = _contour_of(347, 50, 597, 350)
+    assert _is_two_page_spread(a, b) is False
+
+
+def test_notebook_with_narrow_gutter_is_still_a_spread():
+    from draw.geometry import _is_two_page_spread
+
+    a = _contour_of(50, 50, 300, 350)
+    b = _contour_of(310, 50, 560, 350)
+    assert _is_two_page_spread(a, b) is True
+
+
+def test_fit_does_not_swallow_typeerror_from_geometry(monkeypatch):
+    from draw import geometry as geometry_module
+    from draw.perception import NeuralSheetDetector
+
+    def boom(mask, frame, fallback, sx, sy, contour=None):
+        raise TypeError("erro real do ajuste")
+
+    monkeypatch.setattr(geometry_module, "_fit_quad_impl", boom)
+    det = NeuralSheetDetector("unused.onnx", verify=None)
+    m = np.zeros((384, 384), dtype=np.uint8)
+    m[80:300, 80:300] = 255
+    with pytest.raises(TypeError, match="erro real"):
+        det._fit(m)

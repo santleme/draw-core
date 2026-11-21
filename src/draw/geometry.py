@@ -106,6 +106,11 @@ def _largest_contour(mask_bin):
     return max(contours, key=cv2.contourArea)
 
 
+# Calha maxima entre as paginas (fracao da extensao maior). Folhas soltas lado a
+# lado ficam bem alem disso; so um caderno aberto tem calha estreita.
+_SPREAD_MAX_GUTTER = 0.10
+
+
 def _is_two_page_spread(contour_a, contour_b):
     """True quando dois contornos grandes formam um caderno aberto (2 paginas).
 
@@ -146,7 +151,7 @@ def _is_two_page_spread(contour_a, contour_b):
     if (
         v_overlap >= 0.55 * min(ha, hb)
         and min(ha, hb) >= 0.65 * max(ha, hb)
-        and -0.15 * min(wa, wb) <= u_gap <= 0.25 * max(wa, wb)
+        and -0.15 * min(wa, wb) <= u_gap <= _SPREAD_MAX_GUTTER * max(wa, wb)
     ):
         return True
 
@@ -156,7 +161,7 @@ def _is_two_page_spread(contour_a, contour_b):
     return (
         u_overlap >= 0.55 * min(wa, wb)
         and min(wa, wb) >= 0.65 * max(wa, wb)
-        and -0.15 * min(ha, hb) <= v_gap <= 0.25 * max(ha, hb)
+        and -0.15 * min(ha, hb) <= v_gap <= _SPREAD_MAX_GUTTER * max(ha, hb)
     )
 
 
@@ -268,10 +273,20 @@ def _line_normal_shift_at(point, line_ref):
 
 
 _RECTIFIED_EDGE_UNCERTAINTY_PX = 2.5
+# Inclinacao maxima (|across|/|along|) de uma aresta no plano retificado:
+# tan(6 graus) com folga para o aspecto nao isotropico do quadrado unitario.
+_RECTIFIED_PARALLEL_SLOPE = 0.16
 
 
 def _rectified_translation_consistent(
-    fallback_lines, out_i, out_mid, out_norm, in_i, in_mid, in_norm
+    fallback_lines,
+    out_i,
+    out_mid,
+    out_norm,
+    in_i,
+    in_mid,
+    in_norm,
+    new_lines=None,
 ):
     """Confere se dois saltos em arestas opostas sao iguais e opostos no plano
     retificado da pagina anterior (invariante a perspectiva de camera inclinada).
@@ -314,6 +329,24 @@ def _rectified_translation_consistent(
         return None
     if out_off <= 0.0 or in_off >= 0.0:
         return False
+    if new_lines is not None:
+        # Translacao no plano da pagina mantem cada aresta paralela a si mesma
+        # no referencial retificado, mesmo que o angulo na imagem mude muito
+        # (trapezio). Pivo de oclusao gira a aresta tambem la.
+        for edge_idx, line in ((out_i, new_lines[0]), (in_i, new_lines[1])):
+            if line is None:
+                return None
+            direction, point = line
+            a = homography @ np.array([point[0], point[1], 1.0], dtype=np.float64)
+            probe = point + 50.0 * np.asarray(direction, dtype=np.float64)
+            b = homography @ np.array([probe[0], probe[1], 1.0], dtype=np.float64)
+            if abs(a[2]) < 1e-9 or abs(b[2]) < 1e-9:
+                return None
+            du = float(b[0] / b[2] - a[0] / a[2])
+            dv = float(b[1] / b[2] - a[1] / a[2])
+            along, across = (du, dv) if edge_idx in (0, 2) else (dv, du)
+            if abs(across) > _RECTIFIED_PARALLEL_SLOPE * abs(along):
+                return False
     err_px = _RECTIFIED_EDGE_UNCERTAINTY_PX
     out_pert = _outward_offset(out_i, out_mid + err_px * out_norm)
     in_pert = _outward_offset(in_i, in_mid + err_px * in_norm)
@@ -595,7 +628,7 @@ def _refit_corners(contour, quad, frame_shape, fallback_lines=None, scale=(1.0, 
                     and in_ang <= _MEMORY_SINGLE_OUTLIER_ANGLE_DEG
                 )
                 consistent_translation = False
-                if opposite and angles_ok:
+                if opposite:
                     rect_ok = _rectified_translation_consistent(
                         fallback_lines,
                         out_i,
@@ -604,10 +637,11 @@ def _refit_corners(contour, quad, frame_shape, fallback_lines=None, scale=(1.0, 
                         in_i,
                         in_mid,
                         in_norm,
+                        new_lines=(lines[out_i], lines[in_i]),
                     )
                     if rect_ok is not None:
                         consistent_translation = rect_ok
-                    else:
+                    elif angles_ok:
                         mag = max(abs(out_shift), abs(in_shift))
                         consistent_translation = abs(out_shift + in_shift) <= max(
                             12.0 * pixel_scale, 0.35 * mag

@@ -52,6 +52,20 @@ def hand_mask_orientation_vote(hand_mask):
     tol = max(3, int(round(h * _HAND_EDGE_TOL_RATIO)))
     top_contact = int(np.count_nonzero(comp[:tol, :]))
     bot_contact = int(np.count_nonzero(comp[h - tol :, :]))
+    # Contato lateral: uma mao que entra de lado pode sobrepor a faixa de
+    # tolerancia do topo sem tocar a borda. Exige toque real na linha extrema e
+    # abstem-se quando o contato lateral e tao forte quanto o vertical.
+    side_contact = max(
+        int(np.count_nonzero(comp[:, 0])), int(np.count_nonzero(comp[:, w - 1]))
+    )
+    top_edge = int(np.count_nonzero(comp[0, :]))
+    bot_edge = int(np.count_nonzero(comp[h - 1, :]))
+    if top_edge == 0:
+        top_contact = 0
+    if bot_edge == 0:
+        bot_contact = 0
+    if side_contact >= max(top_edge, bot_edge):
+        return None
 
     if top_contact >= _HAND_EDGE_MIN_PIXELS and top_contact >= (
         _HAND_BORDER_DOMINANCE * max(bot_contact, 1)
