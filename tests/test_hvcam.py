@@ -1413,12 +1413,7 @@ def test_open_managed_reverse_requests_720p_and_falls_back_to_nv12_on_mjpeg_erro
     assert cmds[1][-2:] == ["--device", "0"]
 
 
-def test_premature_mjpeg_scan_with_eoi_rejected_by_real_decoder_and_triggers_nv12(
-    tmp_path,
-):
-    """Scan MJPEG cortado no meio mantendo FF D9 no fim (imagem metade-cinza
-    com aviso do libjpeg) deve ser rejeitado pelo caminho real de `to_bgr` e
-    acionar o fallback NV12 em `open_managed_reverse`."""
+def _half_scan_mjpeg():
     img = np.random.default_rng(42).integers(0, 255, (128, 192, 3), dtype=np.uint8)
     ok, encoded = cv2.imencode(".jpg", img)
     assert ok
@@ -1426,7 +1421,14 @@ def test_premature_mjpeg_scan_with_eoi_rejected_by_real_decoder_and_triggers_nv1
     sos = raw.find(b"\xff\xda")
     assert sos > 0
     half_scan_with_eoi = raw[: sos + (len(raw) - sos) // 2] + b"\xff\xd9"
-    arr = np.frombuffer(half_scan_with_eoi, dtype=np.uint8)
+    return np.frombuffer(half_scan_with_eoi, dtype=np.uint8)
+
+
+def test_premature_mjpeg_scan_with_eoi_rejected_by_real_decoder_and_triggers_nv12(
+    tmp_path,
+):
+    """Scan MJPEG cortado mantendo FF D9 deve ser rejeitado e acionar NV12."""
+    arr = _half_scan_mjpeg()
 
     # 1. Caminho real de Camera.to_bgr rejeita o quadro metade-cinza.
     real_cam = object.__new__(hvcam_module.Camera)
@@ -1764,8 +1766,51 @@ runpy.run_path(sys.argv[1], run_name="__main__")
     try:
         assert decoder.decode(jpeg).shape == (16, 16, 3)
         proc = decoder._process
+        with pytest.raises(ValueError, match="corrompido"):
+            decoder.decode(_half_scan_mjpeg())
         assert decoder.decode(jpeg).shape == (16, 16, 3)
         assert decoder._process is proc
+    finally:
+        decoder.close()
+
+
+def test_decoder_has_separate_cold_start_and_frame_deadlines(monkeypatch):
+    launch = subprocess.Popen
+    script = """
+import runpy, sys, time
+time.sleep(0.7)
+runpy.run_path(sys.argv[1], run_name="__main__")
+"""
+
+    def worker(command, **kwargs):
+        return launch([sys.executable, "-c", script, command[1]], **kwargs)
+
+    monkeypatch.setattr(mjpeg_module.subprocess, "Popen", worker)
+    ok, jpeg = cv2.imencode(".jpg", np.zeros((16, 16, 3), np.uint8))
+    assert ok
+    decoder = mjpeg_module._MjpegDecoder(timeout_s=0.5)
+    try:
+        assert decoder.decode(jpeg).shape == (16, 16, 3)
+    finally:
+        decoder.close()
+
+
+def test_decoder_kills_worker_that_never_reports_ready(monkeypatch):
+    launch = subprocess.Popen
+    processes = []
+
+    def worker(_command, **kwargs):
+        proc = launch([sys.executable, "-c", "import time; time.sleep(60)"], **kwargs)
+        processes.append(proc)
+        return proc
+
+    monkeypatch.setattr(mjpeg_module.subprocess, "Popen", worker)
+    decoder = mjpeg_module._MjpegDecoder(startup_timeout_s=0.2)
+    try:
+        with pytest.raises(ValueError, match="tempo limite da inicializacao"):
+            decoder.decode(np.zeros(16, np.uint8))
+        assert processes[0].poll() is not None
+        assert decoder._process is None
     finally:
         decoder.close()
 
@@ -1779,7 +1824,13 @@ def test_decoder_times_out_during_pipe_read_or_write_and_restarts(
 
     def worker(command, **kwargs):
         if not processes:
-            command = [sys.executable, "-c", "import time; time.sleep(60)"]
+            script = """
+import sys, time
+sys.stdout.buffer.write(b"\x01")
+sys.stdout.buffer.flush()
+time.sleep(60)
+"""
+            command = [sys.executable, "-c", script]
         proc = launch(command, **kwargs)
         processes.append(proc)
         return proc
@@ -1842,9 +1893,10 @@ def test_strict_decoder_preserves_concurrent_stderr(
     inside = tmp_path / "inside-decode"
     release = tmp_path / "logged"
     message = b"other thread diagnostics " + b"x" * 8192 + b"\n"
+    codec_message = b"codec diagnostics " + b"x" * (128 * 1024) + b"\n"
     launch = subprocess.Popen
     script = """
-import runpy, sys, time
+import os, runpy, sys, time
 from pathlib import Path
 worker = runpy.run_path(sys.argv[1])
 cv2 = worker["cv2"]
@@ -1856,6 +1908,7 @@ def gated_imdecode(*args):
         if time.monotonic() >= deadline:
             raise ValueError("writer did not report during decode")
         time.sleep(0.005)
+    os.write(2, b"codec diagnostics " + b"x" * (128 * 1024) + b"\\n")
     return imdecode(*args)
 cv2.imdecode = gated_imdecode
 worker["_serve"]()
@@ -1889,7 +1942,7 @@ worker["_serve"]()
         decoder.close()
         writer.join(timeout=6)
     assert release.exists()
-    assert capfdbinary.readouterr().err == message
+    assert capfdbinary.readouterr().err == message + codec_message
 
 
 def test_native_raw_tries_yuy2_when_nv12_is_too_slow(tmp_path):

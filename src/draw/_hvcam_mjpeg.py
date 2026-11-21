@@ -6,10 +6,10 @@ import re
 import struct
 import subprocess
 import sys
-import tempfile
 import threading
 import time
-from contextlib import ExitStack, suppress
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager, suppress
 
 import cv2
 import numpy as np
@@ -17,7 +17,9 @@ import numpy as np
 _SIZE = struct.Struct("<I")
 # Resposta: largura e altura, ou largura zero e tamanho do texto do erro.
 _RESULT = struct.Struct("<II")
+_READY = b"\x01"
 _EXTRANEOUS_RE = re.compile(r"(\d+) extraneous bytes before marker 0xd9")
+_STARTUP_TIMEOUT_S = 8.0
 _DECODE_TIMEOUT_S = 2.0
 
 
@@ -38,24 +40,31 @@ def _classify_mjpeg_warning(line, buf):
     return "padding" if bool(np.all((tail == 0x00) | (tail == 0xFF))) else "corrupt"
 
 
-def _decode_in_worker(buf, warnings):
+def _decode_in_worker(buf, drain):
     """Libjpeg pode devolver imagem parcial junto com aviso no fd 2."""
-    warnings.seek(0)
-    warnings.truncate()
-    saved_fd = os.dup(2)
-    try:
-        os.dup2(warnings.fileno(), 2)
-        img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
-    finally:
+    read_fd, write_fd = os.pipe()
+    with os.fdopen(read_fd, "rb") as reader:
+        pending = None
         try:
-            os.dup2(saved_fd, 2)
+            with os.fdopen(write_fd, "wb") as writer:
+                saved_fd = os.dup(2)
+                try:
+                    # A leitura concorre com o codec para evitar que um pipe
+                    # cheio bloqueie o decode.
+                    pending = drain.submit(reader.read)
+                    os.dup2(writer.fileno(), 2)
+                    try:
+                        img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+                    finally:
+                        os.dup2(saved_fd, 2)
+                finally:
+                    os.close(saved_fd)
         finally:
-            os.close(saved_fd)
+            if pending is not None:
+                warnings = pending.result()
 
-    warnings.seek(0)
     corruption = None
-    for raw_line in warnings:
-        line = raw_line.decode("utf-8", errors="replace")
+    for line in warnings.decode("utf-8", errors="replace").splitlines(keepends=True):
         verdict = _classify_mjpeg_warning(line, buf)
         if verdict == "other":
             sys.stderr.write(line)
@@ -70,30 +79,24 @@ def _serve():
     source = sys.stdin.buffer
     # O pipe binário fica reservado ao protocolo mesmo se o codec escrever
     # mensagens no stdout do filho.
-    with os.fdopen(os.dup(1), "wb") as sink, ExitStack() as resources:
+    with (
+        os.fdopen(os.dup(1), "wb") as sink,
+        ThreadPoolExecutor(max_workers=1, thread_name_prefix="mjpeg-stderr") as drain,
+    ):
         os.dup2(2, 1)
-        try:
-            warnings = resources.enter_context(tempfile.TemporaryFile())
-        except OSError:
-            warnings = None
-            sys.stderr.write(
-                "hvcam: temporario indisponivel para avisos do decoder MJPEG.\n"
-            )
+        drain.submit(lambda: None).result()
+        sink.write(_READY)
+        sink.flush()
         while len(header := source.read(_SIZE.size)) == _SIZE.size:
             (size,) = _SIZE.unpack(header)
             payload = source.read(size)
             if len(payload) != size:
                 return
             try:
-                buf = np.frombuffer(payload, dtype=np.uint8)
-                image = (
-                    cv2.imdecode(buf, cv2.IMREAD_COLOR)
-                    if warnings is None
-                    else _decode_in_worker(buf, warnings)
-                )
+                image = _decode_in_worker(np.frombuffer(payload, dtype=np.uint8), drain)
                 if image is None or image.size == 0:
                     raise ValueError("hvcam: payload MJPEG falhou no decode")
-            except (ValueError, cv2.error) as error:
+            except (OSError, ValueError, cv2.error) as error:
                 message = str(error).encode("utf-8", errors="replace")
                 sink.write(_RESULT.pack(0, len(message)))
                 sink.write(message)
@@ -107,10 +110,13 @@ def _serve():
 class _MjpegDecoder:
     """Reusa um processo e os pipes entre quadros, inclusive ao trocar de câmera."""
 
-    def __init__(self, *, timeout_s=_DECODE_TIMEOUT_S):
+    def __init__(
+        self, *, timeout_s=_DECODE_TIMEOUT_S, startup_timeout_s=_STARTUP_TIMEOUT_S
+    ):
         self._lock = threading.Lock()
         self._watch = threading.Condition()
         self._timeout_s = timeout_s
+        self._startup_timeout_s = startup_timeout_s
         self._deadline = None
         self._timed_out = False
         self._process = None
@@ -147,34 +153,45 @@ class _MjpegDecoder:
                 daemon=True,
             )
             self._watchdog.start()
+        with self._time_limit(
+            self._startup_timeout_s, "tempo limite da inicializacao do decoder MJPEG"
+        ):
+            if proc.stdout.read(len(_READY)) != _READY:
+                raise EOFError("confirmacao de inicializacao do decoder MJPEG ausente")
         return proc
+
+    @contextmanager
+    def _time_limit(self, seconds, message):
+        with self._watch:
+            self._timed_out = False
+            self._deadline = time.monotonic() + seconds
+            self._watch.notify()
+        try:
+            yield
+        finally:
+            with self._watch:
+                self._deadline = None
+                self._watch.notify()
+                timed_out = self._timed_out
+            if timed_out:
+                raise TimeoutError(f"hvcam: {message}")
 
     def decode(self, payload):
         with self._lock:
-            self._timed_out = False
             try:
                 proc = self._process or self._start()
-                with self._watch:
-                    self._deadline = time.monotonic() + self._timeout_s
-                    self._watch.notify()
-                try:
+                with self._time_limit(
+                    self._timeout_s, "tempo limite do decode MJPEG excedido"
+                ):
                     proc.stdin.write(_SIZE.pack(payload.nbytes))
                     proc.stdin.write(memoryview(payload).cast("B"))
                     proc.stdin.flush()
-                    image = self._receive(proc.stdout)
-                finally:
-                    with self._watch:
-                        self._deadline = None
-                        self._watch.notify()
-                    if self._timed_out:
-                        raise TimeoutError
-                return image
+                    return self._receive(proc.stdout)
+            except TimeoutError as error:
+                self.close()
+                raise ValueError(str(error)) from error
             except (OSError, EOFError) as error:
                 self.close()
-                if self._timed_out:
-                    raise ValueError(
-                        "hvcam: tempo limite do decoder MJPEG excedido"
-                    ) from error
                 raise ValueError(
                     "hvcam: processo de decode MJPEG indisponivel"
                 ) from error
