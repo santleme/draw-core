@@ -19,9 +19,22 @@ picks an available webcam, and opens Draw:
 
 Any CLI flags pass straight through (`./run.sh --check`, `./run.sh --fullscreen`,
 `./run.sh --source 1`). `./run.sh` is the portable entry point that selects
-the correct environment across Linux, WSL, and Windows. In shared checkouts
-with isolated environments (e.g. `.venv-linux` under WSL alongside Windows
-`.venv`), set `UV_PROJECT_ENVIRONMENT=.venv-linux` if invoking `uv run --no-sync draw` directly.
+the correct environment across Linux, WSL, and Windows, including a separate
+environment for hand tracking if the launcher set one up.
+
+For a direct launch with `uv run --no-sync draw`, set
+`UV_PROJECT_ENVIRONMENT` to the prepared environment you want to use.
+For example, in a shared checkout with a Windows `.venv`, WSL uses
+`.venv-linux` for the base installation. If a later MediaPipe retry succeeded
+in `.venv-linux-hand`, launch with hand tracking using:
+
+```sh
+UV_PROJECT_ENVIRONMENT=.venv-linux-hand uv run --no-sync draw
+```
+
+The same `-hand` suffix applies to the other base directories (`.venv` and
+`.venv-win`). If MediaPipe is already installed in the base environment, use
+that directory directly.
 
 No flags selects the production preset (`InkConfig.production()` plus
 `PipelineConfig()` defaults): digital gain, strict vote `0.85`, ruling
