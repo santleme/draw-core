@@ -354,7 +354,8 @@ def test_paths_use_pixel_index_coordinates_and_do_not_grab_a_neighbour_stroke():
     for k in range(12):
         prob[80 + 40 * k : 82 + 40 * k, :] = 0.95
     model = ruling.estimate(prob.copy())
-    first = model.segments[0].paths[0]
+    paths = model.segments[0].paths
+    first = paths[int(np.argmin(np.abs(np.median(paths, axis=1) - 80.5)))]
     assert abs(float(np.median(first)) - 80.5) < 0.3
     # traco de caneta (2 px) colado a pauta, separado por UMA linha em branco
     pen = np.zeros_like(prob)
@@ -406,3 +407,68 @@ def test_filter_holds_up_through_the_live_vote(straight, level):
     for name in bench.SHORT_STROKE_GLYPHS:
         arms |= straight.arms[name]
     assert (confirmed & arms).sum() >= 0.97 * (plain & arms).sum()  # braços ficam
+
+
+# ------------------------------------------------ caderno aberto com vinco (#132)
+
+
+def _shaded_notebook(tilt, house=None):
+    """Duas paginas curvas, pauta com lacunas e vinco sombreado: na faixa
+    central TODAS as linhas engrossam (sombra), com probabilidade menor."""
+    page = bench.make_synthetic_page(seed=0, tilt=tilt)
+    prob = page.prob.copy()
+    h, w = prob.shape
+    mid = w // 2
+    rng = np.random.default_rng(1)
+    band = (slice(None), slice(mid - 40, mid + 40))
+    shade = (
+        np.asarray(
+            __import__("cv2").dilate(
+                page.ruling[band].astype(np.uint8), np.ones((5, 1), np.uint8)
+            )
+        )
+        > 0
+    )
+    sub = prob[band]
+    sub[shade] = np.maximum(sub[shade], rng.uniform(0.6, 0.9, int(shade.sum())))
+    for x in range(30, w, 53):  # lacunas na pauta, longe do vinco
+        if abs(x - mid) > 60:
+            prob[page.ruling_only[:, x : x + 7].any(axis=1), x : x + 7] *= 0.4
+    strokes = np.zeros(prob.shape, bool)
+    if house is not None:
+        import cv2
+
+        x0, y0, size = house
+        mask = np.zeros(prob.shape, np.uint8)
+        pts = [
+            (x0, y0 + size),
+            (x0, y0),
+            (x0 + size, y0),
+            (x0 + size, y0 + size),
+            (x0, y0 + size),
+        ]
+        roof = [(x0, y0), (x0 + size // 2, y0 - size // 2), (x0 + size, y0)]
+        for line in (pts, roof):
+            cv2.polylines(mask, [np.array(line, np.int32)], False, 255, 5)
+        strokes = mask > 0
+        prob[strokes] = 0.97
+    return page, prob, strokes
+
+
+@pytest.mark.parametrize("tilt", [0.0, 0.35])
+def test_shaded_gutter_does_not_leave_a_staircase_of_ruling(tilt):
+    page, prob, _ = _shaded_notebook(tilt)
+    out = ruling.RulingFilter().apply(prob.copy())
+    mid = prob.shape[1] // 2
+    gutter = np.zeros(prob.shape, bool)
+    gutter[40:-40, mid - 50 : mid + 50] = True  # borda: issue irma
+    left = ((out > 0.5) & page.ruling_only & gutter).sum()
+    assert left < 0.01 * (page.ruling_only & gutter).sum()
+
+
+@pytest.mark.parametrize("x0", [150, 520])  # 520: o telhado cruza o vinco
+def test_a_house_drawn_over_the_ruling_keeps_all_its_strokes(x0):
+    page, prob, house = _shaded_notebook(0.35, house=(x0, 300, 150))
+    out = ruling.RulingFilter().apply(prob.copy())
+    kept = ((out > 0.5) & house).sum() / house.sum()
+    assert kept >= 0.97  # inclui os lados horizontais

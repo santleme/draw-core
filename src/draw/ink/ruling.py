@@ -62,6 +62,14 @@ _PROB_MARGIN = 0.045  # margem sobre a mediana da pauta para proteger um braço
 _PROB_SMOOTH = 9  # colunas da média móvel da probabilidade ao longo da linha
 _PROB_SIGMAS = 4.0  # margem em desvios robustos do ruído da própria pauta
 _PROB_MIN_RUN = 12  # colunas mínimas contínuas para proteger um braço
+# Vinco sombreado: a sombra engrossa TODAS as linhas numa faixa larga de colunas.
+# Um cruzamento de caneta também engrossa todas, mas só por poucas colunas; por
+# isso a faixa exige >= _GUTTER_MIN_W colunas seguidas com a maioria das linhas
+# grossas, e nela a espessura apagável sobe de _GUTTER_EXTRA px.
+_GUTTER_FRAC = 0.6  # fração das linhas grossas na coluna
+_GUTTER_MIN_W = 16  # colunas contínuas (mais largo que qualquer traço de caneta)
+_GUTTER_JOIN_PAD = 3  # colunas olhadas em cada ponta da faixa
+_GUTTER_EXTRA = 4  # px a mais de espessura apagável dentro da faixa
 
 
 @dataclass(frozen=True)
@@ -187,7 +195,27 @@ def _seeds(score, c_lo, c_hi):
     peaks = _peaks(smooth, 0.6 * lag, float(smooth.mean() + 0.5 * smooth.std()))
     if peaks.size < _MIN_LINES:
         return None
-    return c_seed, peaks, lag, slope
+    # com a folha inclinada, linhas fora da faixa-semente entram na vista pelo
+    # lado: estende além das bordas pelo deslocamento máximo da inclinação
+    reach = int(np.ceil(abs(slope) * (c_hi - c_lo))) + 1
+    return c_seed, _extend_peaks(peaks, score.shape[0], reach), lag, slope
+
+
+def _extend_peaks(peaks, h_s, reach=0):
+    """Estende o pente, no passo mediano, até as bordas do mapa.
+
+    Os picos da faixa-semente somem onde a pauta enfraquece (sombra, margens
+    e, com a folha inclinada, as linhas que só entram na vista mais longe da
+    semente): as linhas além do primeiro/último pico ficavam sem caminho e
+    sobreviviam como riscos soltos. A pauta de verdade corre a folha toda; o
+    portão de run-length segue decidindo, ponto a ponto, o que apagar.
+    """
+    step = float(np.median(np.diff(peaks)))
+    if step < 2:
+        return peaks
+    lo = np.arange(peaks[0] - step, -1.0 - reach, -step)[::-1]
+    hi = np.arange(peaks[-1] + step, h_s - 1.0 + reach, step)
+    return np.concatenate([lo, peaks, hi]).astype(np.float32)
 
 
 def _shifted_max(prev, slope, penalty):
@@ -289,8 +317,11 @@ def _segment(score, c_lo, c_hi, width, height):
     x1 = width if c_hi >= w_s else int(round(c_hi * rx))
     xs = np.arange(x0, x1, dtype=np.float32)
     full = (rows + 0.5) * ry - 0.5
+    # linhas estendidas que nunca entram na imagem não têm o que apagar (e o
+    # grampo da janela as jogaria para a borda)
+    inside = ((full >= 0) & (full <= height - 1)).any(axis=0)
     paths = np.stack(
-        [np.interp(xs, xc, full[:, k]) for k in range(full.shape[1])]
+        [np.interp(xs, xc, full[:, k]) for k in np.flatnonzero(inside)]
     ).astype(np.float32)
     return Segment(x0=x0, x1=x1, paths=paths, period=float(lag * ry))
 
@@ -468,6 +499,37 @@ def _estimate_h(prob, segments):
     return float(np.median(np.concatenate(runs)))
 
 
+def _gutter_cols(raw):
+    """Colunas (X,) dentro de uma faixa de sombra: quase todas as linhas
+    engrossam por uma largura maior que um traço de caneta."""
+    return _opening_cols((raw.mean(axis=0) >= _GUTTER_FRAC)[None, :], _GUTTER_MIN_W)[0]
+
+
+def _joined_through(raw, gutter):
+    """(K, X): trecho da linha dentro da faixa que liga dois trechos grossos.
+
+    A sombra engrossa todas as linhas por igual, então por espessura um traço
+    de caneta deitado sobre ela some na sombra. O que o separa é a continuidade:
+    se a linha é grossa (>= pauta + margem) logo antes E logo depois da faixa,
+    o que há dentro é o mesmo traço atravessando o vinco, não sombra.
+    """
+    k, x = raw.shape
+    out = np.zeros_like(raw)
+    edges = np.flatnonzero(np.diff(np.concatenate([[0], gutter.view(np.uint8), [0]])))
+    for a, b in zip(edges[::2], edges[1::2], strict=False):
+        pad = _GUTTER_JOIN_PAD
+        # O vinco fica na divisa das metades: cada trilha vê só um lado da
+        # faixa, e a borda da trilha não conta como ponta a conferir.
+        left = raw[:, max(a - pad, 0) : a].any(axis=1) if a > 0 else None
+        right = raw[:, b : b + pad].any(axis=1) if b < x else None
+        sides = [s for s in (left, right) if s is not None]
+        if not sides:
+            continue
+        both = np.logical_and.reduce(sides)
+        out[:, a:b] = both[:, None]
+    return out
+
+
 def _opening_cols(mask, length):
     """Abertura booleana ao longo de x: só sobrevivem trechos de >= length colunas."""
     core = _along(mask.astype(np.float32), length) > 0.999
@@ -520,6 +582,13 @@ def erase_tracks(prob, tracks, h_pauta):
         # própria pauta (medido no e5: 14% dos pontos, runs de 6 a 13 px) e,
         # tratado como âncora, protegia 5 colunas e deixava a pauta tracejada.
         raw = run > h_run + _THIN_MARGIN
+        gutter = _gutter_cols(raw)
+        if gutter.any():
+            cap = h_run + _THIN_MARGIN + _GUTTER_EXTRA
+            shaded = (run >= 1) & (run <= cap) & gutter[None, :]
+            shaded &= ~_joined_through(raw, gutter)
+            thin |= shaded
+            raw = raw & ~(gutter[None, :] & (run <= cap))
         anchor = np.zeros_like(raw)
         both = raw[:, 1:] & raw[:, :-1]
         anchor[:, 1:] |= both
@@ -546,7 +615,7 @@ def erase_tracks(prob, tracks, h_pauta):
         length = run[ks, xs].astype(np.int64) + 2
         top = centers[ks, xs] - up - 1
         flat_cols = xs + track.x0
-        for j in range(h_run + _THIN_MARGIN + 2):
+        for j in range(int(length.max())):
             sel = (j < length) & (top + j >= 0) & (top + j < h)
             if sel.any():
                 flat_prob[(top[sel] + j) * w + flat_cols[sel]] = 0.0
