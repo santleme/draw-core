@@ -451,27 +451,48 @@ def _refit_corners(contour, quad, frame_shape, fallback_lines=None, scale=(1.0, 
                 ang > _MEMORY_SINGLE_OUTLIER_ANGLE_DEG
                 or shf > _MEMORY_SINGLE_OUTLIER_SHIFT_PX * pixel_scale
             ):
-                jumped.append((i, proj_mid, ang))
+                dir_prev, pt_prev = prev
+                norm_out = np.array([-dir_prev[1], dir_prev[0]], dtype=np.float64)
+                norm_out /= max(float(np.linalg.norm(norm_out)), 1e-9)
+                if float((centroid - pt_prev) @ norm_out) > 0:
+                    norm_out = -norm_out
+                shift_outward = float((proj_mid - pt_prev) @ norm_out)
+                is_outward = (
+                    shift_outward > 2.0 * pixel_scale
+                    and ang <= _MEMORY_STATIONARY_ANGLE_DEG * 1.5
+                )
+                jumped.append((i, shift_outward, ang, is_outward))
         if len(steady) >= 2 and len(jumped) == 1:
-            bad, proj_mid, ang = jumped[0]
-            # Oclusao de mao/antebraco move a aresta para DENTRO (na direcao do
-            # centroide da folha). Salto unico para FORA (afastando do centroide)
-            # com angulo estavel e desobstrucao ou expansao de pagina — mas so
-            # isenta depois de confirmar que apenas UMA aresta saltou, para nao
-            # confundir translacao lateral (2 arestas saltando) com outlier unico.
-            dir_prev, pt_prev = fallback_lines[bad]
-            norm_out = np.array([-dir_prev[1], dir_prev[0]], dtype=np.float64)
-            norm_out /= max(float(np.linalg.norm(norm_out)), 1e-9)
-            if float((centroid - pt_prev) @ norm_out) > 0:
-                norm_out = -norm_out
-            shift_outward = float((proj_mid - pt_prev) @ norm_out)
-            if not (
-                shift_outward > 2.0 * pixel_scale
-                and ang <= _MEMORY_STATIONARY_ANGLE_DEG * 1.5
-            ):
+            bad, _shift_outward, _ang, is_outward = jumped[0]
+            if not is_outward:
                 lines[bad] = fallback_lines[bad]
                 locked[bad] = True
                 trusted[bad] = False
+        elif len(steady) >= 2 and len(jumped) == 2:
+            # Uma aresta exposta (para fora) acompanhada de um salto para dentro
+            # so caracteriza translacao rigida quando ocorre em arestas opostas
+            # com angulo estavel e deslocamento assinalado coerente. Caso
+            # contrario (ex.: braco sai de um lado e cobre o lado vizinho),
+            # a aresta exposta e aceita e a aresta invadida segue protegida.
+            outward_edges = [entry for entry in jumped if entry[3]]
+            inward_edges = [entry for entry in jumped if not entry[3]]
+            if len(outward_edges) == 1 and len(inward_edges) == 1:
+                out_i, out_shift, _out_ang, _ = outward_edges[0]
+                in_i, in_shift, in_ang, _ = inward_edges[0]
+                opposite = (out_i + 2) % 4 == in_i
+                # Em arestas opostas paralelas, translacao rigida desloca a
+                # aresta lider em +d e a traseira em -d (out_shift + in_shift ~ 0).
+                mag = max(abs(out_shift), abs(in_shift))
+                consistent_translation = (
+                    opposite
+                    and in_shift < -2.0 * pixel_scale
+                    and in_ang <= _MEMORY_STATIONARY_ANGLE_DEG * 1.5
+                    and abs(out_shift + in_shift) <= max(12.0 * pixel_scale, 0.35 * mag)
+                )
+                if not consistent_translation:
+                    lines[in_i] = fallback_lines[in_i]
+                    locked[in_i] = True
+                    trusted[in_i] = False
 
     refined = quad.copy()
     for i in range(4):

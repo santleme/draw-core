@@ -384,3 +384,74 @@ def test_neural_detector_updates_spread_peak_when_expanded_with_untrusted_edge(
     # Quadro seguinte com a mesma mascara: memoria de arestas volta ativa.
     assert det._fit(m2) is not None
     assert seen_fallbacks[-1] is not None
+
+
+def test_neural_detector_shifting_occlusion_recovers_exposed_edge_and_guards_new_occlusion():
+    """Quando o braco sai da borda esquerda (revelando x=250) e passa a cobrir
+    a borda superior (empurrando y=120 -> 160), nao e translacao rigida: a
+    borda esquerda deve recuperar x=250 e a superior deve continuar em y=120."""
+    from draw.perception import NeuralSheetDetector
+
+    det = NeuralSheetDetector("unused.onnx", verify=None)
+
+    # Quadro 1: folha x=250..909, y=120..599 com 40 px da esquerda cobertos.
+    m1 = np.zeros((720, 1280), dtype=np.uint8)
+    m1[120:600, 290:910] = 255
+    q1 = det._fit(m1)
+    assert q1 is not None
+    assert abs(q1[:, 1].min() - 120.0) <= 5.0
+
+    # Quadro 2+: esquerda livre (x=250), mas 40 px superiores agora cobertos (y=160).
+    m2 = np.zeros((720, 1280), dtype=np.uint8)
+    m2[160:600, 250:910] = 255
+    for _ in range(3):
+        q2 = det._fit(m2)
+        assert q2 is not None
+        assert abs(q2[:, 0].min() - 250.0) <= 6.0
+        assert abs(q2[:, 1].min() - 120.0) <= 6.0
+
+
+def test_neural_detector_expansion_without_fresh_lines_clears_stale_edges(
+    monkeypatch,
+):
+    """Se _fit_quad_impl devolve cantos via _min_area_quad (lines=None) em uma
+    expansao de caderno, o detector nao pode elevar o pico nem parear a nova
+    mascara com as linhas pre-expansao no quadro seguinte."""
+    from draw import geometry as _geometry
+    from draw.perception import NeuralSheetDetector
+
+    det = NeuralSheetDetector("unused.onnx", verify=None)
+    m1 = np.zeros((400, 600), dtype=np.uint8)
+    m1[80:320, 70:260] = 255
+    m1[80:320, 270:460] = 255
+    assert det._fit(m1) is not None
+    initial_peak = det._memory_spread_area
+    assert det._edge_lines is not None
+
+    m2 = np.zeros((400, 600), dtype=np.uint8)
+    m2[80:320, 70:260] = 255
+    m2[80:320, 270:500] = 255
+
+    orig_fit = _geometry._fit_quad_impl
+    calls = {"n": 0}
+    seen_fallbacks = []
+
+    def _fit_no_lines_first(mask, frame, fallback, sx, sy, **kwargs):
+        calls["n"] += 1
+        seen_fallbacks.append(fallback)
+        corners, lines, trusted = orig_fit(mask, frame, fallback, sx, sy, **kwargs)
+        if calls["n"] == 1:
+            return corners, None, None
+        return corners, lines, trusted
+
+    monkeypatch.setattr(_geometry, "_fit_quad_impl", _fit_no_lines_first)
+
+    # Quadro da expansao sem linhas medidas: pico nao sobe e retas velhas sao limpas.
+    assert det._fit(m2) is not None
+    assert det._edge_lines is None
+    assert det._memory_spread_area == initial_peak
+
+    # Quadro seguinte: fallback continua None (sem parear linhas velhas) e pico sobe.
+    assert det._fit(m2) is not None
+    assert seen_fallbacks[-1] is None
+    assert det._memory_spread_area > initial_peak * 1.05

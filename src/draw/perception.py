@@ -424,17 +424,21 @@ class NeuralSheetDetector:
                 ):
                     stored[i] = self._edge_lines[i]
             self._edge_lines = stored
+        elif fallback is None:
+            # Ajuste sem retas (ex.: _min_area_quad) em quadro sem heranca:
+            # descarta retas antigas para nao parear a nova mascara com linhas
+            # pre-expansao no proximo quadro.
+            self._edge_lines = None
         self._memory_mask = mask[::_MEMORY_MASK_STRIDE, ::_MEMORY_MASK_STRIDE] > 0
         self._memory_is_spread = is_spread
         if not is_spread:
             self._memory_spread_area = 0.0
         else:
-            # Guarda o pico de area do caderno aberto sempre que a guarda de
-            # outlier nao pode ter travado nenhuma aresta (fallback=None ou
-            # todas as arestas confiaveis), evitando tanto que uma aresta
-            # travada eleve a referencia quanto um loop infinito de
-            # spread_expanded=True quando ha uma aresta ocluida.
-            if fallback is None or (trusted is not None and all(trusted)):
+            # Guarda o pico de area do caderno aberto apenas quando houve retas
+            # medidas e a guarda de outlier nao pode ter travado nenhuma aresta.
+            if lines is not None and (
+                fallback is None or (trusted is not None and all(trusted))
+            ):
                 self._memory_spread_area = max(prev_area, contour_area)
         return corners
 
