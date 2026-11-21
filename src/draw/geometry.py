@@ -66,17 +66,19 @@ def fill_interior_holes(mask):
 # aresta-corte e sempre a LONGA — comprimento arbitrario, decidido
 # pela borda da imagem e nao pela pagina —, com os dois vertices a
 # ~2 px da borda; a aresta curta do par e a aresta distante de
-# verdade, interior. Por isso a razao nao se mede num par oposto que
-# contem aresta-corte: aresta com os DOIS vertices sobre a moldura do
-# quadro — a menos de _FIT_EDGE_BORDER_FRAC * min(H,W) de uma borda
-# ou fora dele (1% de min(H,W) sao ~4 px na mascara 384, folga sobre
-# os ~2 px medidos). Um vertice solto na borda nao isenta: sozinho
-# ele nao e corte de frame.
+# verdade, interior. Por isso uma aresta-corte — os DOIS vertices
+# sobre a moldura do quadro, a menos de _FIT_EDGE_BORDER_FRAC *
+# min(H,W) de uma borda ou fora dele (1% de min(H,W) sao ~4 px na
+# mascara 384, folga sobre os ~2 px medidos) — marca o quad como
+# clipado e desliga a razao: recorte torna a medida de qualquer par
+# arbitraria, nao so do par que a contem. Um vertice solto na borda
+# nao isenta: sozinho ele nao e corte de frame.
 # Ressalvas: (i) a folha inteira no quadro a angulo rasante ainda
 # falha por perspectiva pura — razao 4-6,6 em ~17% dos casos reais
 # medidos, indistinguivel do colapso sem contato de borda; (ii) um
-# colapso com uma aresta inteira encostada na moldura escapa da
-# razao — mitigado pela guarda de suporte de mascara do ajuste.
+# colapso com uma aresta inteira encostada na moldura passa por
+# clipado e escapa da razao — mitigado pela guarda de suporte de
+# mascara do ajuste.
 _FIT_OPPOSITE_RATIO_MAX = 3.0
 _FIT_EXCURSION_DIAG_FRAC = 0.15
 _FIT_EDGE_BORDER_FRAC = 0.01
@@ -102,9 +104,11 @@ def fit_plausible(corners, frame_shape):
         return False
     height, width = frame_shape[:2]
     # Vertice "sobre a moldura": a menos de `border` de uma das bordas
-    # do quadro ou fora dele. Aresta-corte tem os DOIS vertices assim —
-    # so entao o comprimento dela e decidido pelo recorte. Um vertice
-    # solto na borda nao e corte: a razao do par segue valendo.
+    # do quadro ou fora dele. Aresta-corte tem os DOIS vertices assim e
+    # marca um quad clipado pelo frame — nenhuma razao ali e confiavel:
+    # a aresta oposta ao corte pode ser o proprio recorte e as laterais
+    # terminam na moldura, encurtadas por ela. Um vertice solto na
+    # borda nao e corte: sem aresta-corte a razao segue valendo.
     border = _FIT_EDGE_BORDER_FRAC * min(height, width)
     on_frame_edge = ~(
         (quad[:, 0] > border)
@@ -112,14 +116,12 @@ def fit_plausible(corners, frame_shape):
         & (quad[:, 1] > border)
         & (quad[:, 1] < height - 1.0 - border)
     )
-    for a, b in ((0, 2), (3, 1)):
-        if (on_frame_edge[a] and on_frame_edge[(a + 1) % 4]) or (
-            on_frame_edge[b] and on_frame_edge[(b + 1) % 4]
-        ):
-            continue
-        ratio = max(edges[a], edges[b]) / min(edges[a], edges[b])
-        if ratio > _FIT_OPPOSITE_RATIO_MAX:
-            return False
+    cut_edge = any(on_frame_edge[i] and on_frame_edge[(i + 1) % 4] for i in range(4))
+    if not cut_edge:
+        for a, b in ((0, 2), (3, 1)):
+            ratio = max(edges[a], edges[b]) / min(edges[a], edges[b])
+            if ratio > _FIT_OPPOSITE_RATIO_MAX:
+                return False
     margin = _FIT_EXCURSION_DIAG_FRAC * float(np.hypot(width, height))
     return not (
         quad[:, 0].min() < -margin

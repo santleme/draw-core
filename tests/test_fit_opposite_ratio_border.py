@@ -9,10 +9,11 @@ dois vertices a ~2 px da borda; a aresta curta do par e a aresta
 distante de verdade, interior. Ja a familia de colapso que a guarda
 caca (razao 3,8-4,7, mesa de referencia de 2026-10-30) tem todos os
 vertices interiores: o contato com a borda e o sinal que separa os
-dois casos. A razao nao se mede num par oposto que contem
-aresta-corte — aresta com os DOIS vertices a
-_FIT_EDGE_BORDER_FRAC * min(H,W) da borda ou fora do quadro. Um
-vertice solto na borda nao isenta: sozinho nao e corte de frame.
+dois casos. Uma aresta-corte — os DOIS vertices a
+_FIT_EDGE_BORDER_FRAC * min(H,W) da borda ou fora do quadro — marca
+o quad como clipado e desliga a razao: recorte torna a medida de
+qualquer par arbitraria, nao so do par que a contem. Um vertice
+solto na borda nao isenta: sozinho nao e corte de frame.
 """
 
 import cv2
@@ -97,6 +98,19 @@ def test_ratio_with_short_edge_on_border_is_accepted():
     os dois vertices dela encostam na borda direita do quadro."""
     quad = np.array(
         [[300.0, 60.0], [1918.5, 400.0], [1917.0, 640.0], [320.0, 1040.0]],
+        dtype=np.float32,
+    )
+    assert fit_plausible(quad, _REF_SHAPE) is True
+
+
+def test_clipped_quad_with_asymmetric_side_edges_is_accepted():
+    """Corte embaixo com laterais muito desiguais: o lado direito
+    quase nao aparece (o canto superior da folha ja esta rente a
+    borda). Os lados sao arestas reais da folha — mas terminam na
+    moldura, entao o comprimento visivel e decidido pelo recorte e a
+    razao entre eles nao mede a pagina."""
+    quad = np.array(
+        [[300.0, 200.0], [1450.0, 1050.0], [1500.0, 1078.0], [400.0, 1079.0]],
         dtype=np.float32,
     )
     assert fit_plausible(quad, _REF_SHAPE) is True
