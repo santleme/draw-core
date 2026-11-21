@@ -8,6 +8,8 @@ congelada sem mão, oclusão semântica da mão e os desfechos
 reopen/drop/erro.
 """
 
+import json
+
 import numpy as np
 import pytest
 
@@ -355,6 +357,56 @@ def test_coverage_iou_floor_inert_without_mask():
     assert ink.submitted
 
 
+def test_coverage_iou_floor_rejections_are_recorded():
+    """Issue #105: todo veto do piso de IoU é registrado — total e
+    anel dos últimos valores — para a recalibração do limiar, que
+    não tem denominador natural de resolução."""
+    phantom = _mask_block(50, 400, 900, 1100)  # blob à direita, quad em x<500
+    loop, _det, ink = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", {"coverage_mask": phantom})
+    )
+    _drive(loop, 40)
+    assert ink.submitted == []  # o veto seguiu ativo em todas as passadas
+    stats = loop.stats()
+    assert stats["coverage_iou_rejects_total"] >= 1
+    recent = stats["coverage_iou_reject_recent"]
+    assert recent
+    assert stats["coverage_iou_rejects_total"] >= len(recent)
+    floor = loop._config.coverage_iou_floor
+    assert all(0.0 <= v < floor for v in recent)
+    # O registrado é o IoU medido na hora do veto: a cena é estática,
+    # recomputar pelo caminho do pipeline devolve o mesmo valor.
+    expected = loop._quad_coverage_iou(QUAD)
+    assert all(v == pytest.approx(expected, abs=1e-4) for v in recent)
+    # O dict sobe ao tel_fields da SessionTelemetry: precisa
+    # serializar e voltar intacto.
+    assert json.loads(json.dumps(stats)) == stats
+
+    # Fantasma com sobreposição parcial: o anel guarda o valor
+    # medido, não um genérico — é o dado da recalibração.
+    partial = _mask_block(100, 400, 400, 1100)  # cobre 1/4 do QUAD + mesa
+    loop, _det, ink = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", {"coverage_mask": partial})
+    )
+    _drive(loop, 40)
+    assert ink.submitted == []
+    recent = loop.stats()["coverage_iou_reject_recent"]
+    expected = loop._quad_coverage_iou(QUAD)
+    assert 0.0 < expected < floor
+    assert all(v == pytest.approx(expected, abs=1e-4) for v in recent)
+
+    # Folha alinhada (IoU alto): nenhum veto, anel vazio.
+    aligned = _mask_block(100, 400, 100, 500)
+    loop, _det, ink = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", {"coverage_mask": aligned})
+    )
+    _drive(loop, 40)
+    assert ink.submitted, "a folha real segue submetendo"
+    stats = loop.stats()
+    assert stats["coverage_iou_rejects_total"] == 0
+    assert stats["coverage_iou_reject_recent"] == []
+
+
 def test_paisagem_submete_pagina_deitada_a_tinta():
     """--orientation paisagem: o quad largo chega à tinta numa grade
     deitada (1200x850), sem espremer o conteúdo na grade em pé."""
@@ -694,31 +746,39 @@ def test_seg_hand_occlusion_off_keeps_visible_none():
     assert all(v is None for _g, _c, v, _cov in ink.submitted)
 
 
-def _drive_clock(loop, steps, clock_state, dt=0.05):
-    frame = _frame()
+def _drive_clock(loop, steps, clock_state, dt=0.05, frame=None):
+    if frame is None:
+        frame = _frame()
     for _ in range(steps):
         loop.step(_packet(loop, frame))
         clock_state["t"] += dt
 
 
-def _move_scenario(*, follow_move):
-    """Folha desliza sem mão: sessão aberta em QUAD, mão sai
-    (freeze) e o quad confirmado salta +120 px em x."""
+def _move_scenario(
+    *, follow_move, frame=None, quad=None, move=(120.0, 0.0), move_steps=60
+):
+    """Folha desliza sem mão: sessão aberta em `quad`, mão sai
+    (freeze) e o quad confirmado desliza `move` pixels. `frame`
+    define a resolução da captura (padrão 720x1280, a mesa de
+    referência)."""
     clock_state = {"t": 0.0}
-    moved = QUAD + np.array([120.0, 0.0], dtype=np.float32)
+    quad = QUAD if quad is None else np.asarray(quad, dtype=np.float32)
+    moved = quad + np.asarray(move, dtype=np.float32)
     state = {"move": False}
+    if frame is None:
+        frame = _frame()
 
     def script(_i):
-        return (moved if state["move"] else QUAD).copy(), "paper", None
+        return (moved if state["move"] else quad).copy(), "paper", None
 
     loop, _det, ink = _make_loop(script, config=PipelineConfig(follow_move=follow_move))
     loop._clock = lambda: clock_state["t"]
-    _drive_clock(loop, 40, clock_state)
+    _drive_clock(loop, 40, clock_state, frame=frame)
     assert loop.tracker.corners is not None
     # Mão sai da cena: o histórico congela na pose antiga.
     loop.clean_hand_present = False
     state["move"] = True
-    _drive_clock(loop, 60, clock_state)
+    _drive_clock(loop, move_steps, clock_state, frame=frame)
     return loop, ink, moved
 
 
@@ -741,6 +801,40 @@ def test_frozen_geometry_stays_without_follow_move():
     last_corners = ink.submitted[-1][1]
     assert last_corners is not None
     assert np.max(np.abs(last_corners - QUAD)) < 5.0
+
+
+def test_frozen_geometry_unlock_scales_with_frame_resolution():
+    """Issue #105: o destrave da geometria congelada escala com a
+    diagonal do quadro. O MESMO deslize de 60 px destrava o
+    histórico a 720p (escala 1.0 → limiar efetivo 25 px) mas NÃO a
+    4K (escala 3.0 → limiar 75 px): em 4K o rastreador acompanha a
+    folha (60 px < near-limit escalado de 120 px, confirma por
+    mistura sem persistência de salto) e mesmo assim o histórico
+    congelado não reparte — a tinta segue retificada na pose velha.
+    """
+    # 720p (mesa de referência): 60 px > 25 px efetivo → destrava.
+    _loop, ink_720, moved_720 = _move_scenario(
+        follow_move=True, quad=QUAD, move=(60.0, 0.0)
+    )
+    last = ink_720.submitted[-1][1]
+    assert np.max(np.abs(last - moved_720)) < 5.0
+
+    # 4K (escala 3.0): o mesmo deslize de 60 px fica abaixo do
+    # limiar efetivo de 75 px → o histórico segue congelado.
+    quad_4k = QUAD * 3.0
+    frame_4k = np.zeros((2160, 3840, 3), dtype=np.uint8)
+    loop_4k, ink_4k, moved_4k = _move_scenario(
+        follow_move=True,
+        frame=frame_4k,
+        quad=quad_4k,
+        move=(60.0, 0.0),
+        move_steps=90,
+    )
+    # O rastreador em si acompanhou a folha — é o limiar escalado,
+    # não o rastreador, que segura o histórico na pose velha.
+    assert np.max(np.abs(loop_4k.tracker.corners - moved_4k)) < 15.0
+    last = ink_4k.submitted[-1][1]
+    assert np.max(np.abs(last - quad_4k)) < 5.0
 
 
 def test_poll_display_feeds_the_display_layers():

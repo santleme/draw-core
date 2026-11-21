@@ -65,9 +65,16 @@ INK_WORKER_FAILED = "ink_worker_failed"
 # contra a mediana congelada e movimento real, nao ruido. Acima do
 # limiar, o historico reparte da posicao nova e o registro/ECC/juiz
 # da trabalhadora tratam a migracao, como num salto com mao.
-# 25 px fica bem acima do jitter residual do rastreador (~2 px de
-# banda morta) e abaixo do salto grande de _SHEET_BIG_JUMP_PX, que
-# um deslize continuo nunca dispara.
+# 25 px e medido no quadro de referencia (diagonal 1280x720): no
+# ponto de uso o limiar efetivo e _FROZEN_SHEET_MOVE_PX * pixel_scale
+# — um deslocamento de 25 px e ~3,5% da diagonal a 720p e ~1% a 4K,
+# entao sem a escala as resolucoes maiores marcariam deslize onde
+# nao ha (issue #105). Fica bem acima do jitter residual do
+# rastreador (~2 px de banda morta) e abaixo do salto grande de
+# _SHEET_BIG_JUMP_PX, que um deslize continuo nunca dispara — a
+# banda morta e o salto grande escalam pelo mesmo fator no
+# rastreador, entao a ordem entre os limiares se preserva em
+# qualquer resolucao.
 _FROZEN_SHEET_MOVE_PX = 25.0
 
 
@@ -218,6 +225,15 @@ class Pipeline:
         # Ganho digital do ultimo warp de tinta (ink_auto_gain); 1.0 sem ganho.
         self.last_ink_gain = 1.0
         self.generation_events = {"drop": 0, "reopen": 0}
+        # Telemetria do piso de cobertura (issue #105): o
+        # coverage_iou_floor nao tem denominador natural para
+        # escalar com a resolucao como os limiares em pixels, entao
+        # cada veto conta aqui e os ultimos IoUs rejeitados ficam
+        # em anel — a recalibracao do piso em outras mesas se faz
+        # com este dado, nao com chute. Sobem a SessionTelemetry
+        # via stats() (merge no snapshot de 1 Hz em draw/app.py).
+        self._coverage_iou_rejects = 0
+        self._coverage_iou_reject_recent = deque(maxlen=32)
 
     @staticmethod
     def _divnorm_page(ink_warped, coverage):
@@ -316,6 +332,12 @@ class Pipeline:
             # cantos sobre um blob espurio da mesa vazia. Submeter
             # o retificado de mesa e trabalho morto e cada pixel
             # e mesa na trabalhadora de tinta.
+            # O piso foi calibrado nas capturas s1-s4 da mesa de
+            # referencia; sem denominador natural para escala-lo,
+            # os IoUs rejeitados sao registrados para que a
+            # recalibracao em outras mesas vire dado (issue #105).
+            self._coverage_iou_rejects += 1
+            self._coverage_iou_reject_recent.append(round(float(iou), 4))
             return
         ink_warped = self._warp_sheet(frame, warp_corners)
         # Visibilidade na grade da pagina: onde a mao esta, a
@@ -501,6 +523,12 @@ class Pipeline:
         log).
         """
         frame = packet.image
+        # Escala de pixels do quadro atual contra o quadro de
+        # referencia 1280x720 onde os limiares em pixels foram
+        # calibrados (issue #105): alimenta o rastreador abaixo e o
+        # destrave da geometria congelada mais adiante. Um hypot por
+        # quadro — custo de ruido.
+        pixel_scale = tracker.camera_pixel_scale(frame.shape[:2])
         det_result = self.detection_worker.poll(self.last_det_seq)
         if det_result is not None and det_result.captured_at < self._detections_since:
             self.last_det_seq = det_result.sequence
@@ -584,6 +612,7 @@ class Pipeline:
             detected_verdict,
             ran_detection,
             det_captured_at if ran_detection else self._clock(),
+            pixel_scale=pixel_scale,
         )
         if ran_detection and self._detect_wake is not None:
             ref_frame = None
@@ -778,7 +807,7 @@ class Pipeline:
                 )
                 if (
                     tracker.corner_distance(_frozen_med, self.tracker.corners)
-                    > _FROZEN_SHEET_MOVE_PX
+                    > _FROZEN_SHEET_MOVE_PX * pixel_scale
                 ):
                     self.corner_history.clear()
                     self.corner_history.append(self.tracker.corners.copy())
@@ -869,3 +898,18 @@ class Pipeline:
             )
             return INK_WORKER_FAILED
         return None
+
+    def stats(self):
+        """Contadores do laco para a telemetria (issue #105).
+
+        O app funde este dict nos tel_fields do snapshot de 1 Hz da
+        SessionTelemetry; os valores saem JSON-serializaveis (int,
+        float, lista de floats). Os IoUs vetados pelo piso de
+        cobertura sao o dado de recalibracao do coverage_iou_floor
+        em outras mesas — o limiar nao tem denominador natural para
+        escalar com a resolucao como os limiares em pixels.
+        """
+        return {
+            "coverage_iou_rejects_total": self._coverage_iou_rejects,
+            "coverage_iou_reject_recent": list(self._coverage_iou_reject_recent),
+        }
