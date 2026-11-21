@@ -806,7 +806,9 @@ def audit_one(scen_dir, out_dir, flags, detector_kind="real"):
         det = OracleDet()
     else:
         det = SyncDet()
-    worker = PageCleanWorker(page_clean, None, clock=clock, config=config.ink)
+    worker = PageCleanWorker(
+        page_clean, None, clock=clock, config=config.ink, ink_divnorm=config.ink_divnorm
+    )
     loop = Pipeline(
         detection_worker=det,
         ink_worker=worker,

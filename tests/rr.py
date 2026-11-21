@@ -105,6 +105,26 @@ def base_quad(shape):
     return quad
 
 
+def camera_mask(page_mask, corners):
+    """Expressa uma máscara de grade de página na grade da câmera.
+
+    WarpedPage carrega máscaras em espaço de câmera (issue #100):
+    para construir a cena do teste, a máscara desenhada na grade
+    da página volta ao frame pela homografia inversa do quad.
+    """
+    matrix = _corners_page_matrix(corners, page_mask.shape[1], page_mask.shape[0])
+    return (
+        cv2.warpPerspective(
+            page_mask.astype(np.uint8) * 255,
+            np.linalg.inv(matrix),
+            (CAMERA_W, CAMERA_H),
+            flags=cv2.INTER_NEAREST,
+            borderValue=0,
+        )
+        > 0
+    )
+
+
 def transform_quad(quad, shift=(0.0, 0.0), angle=0.0, scale=1.0):
     center = quad.mean(axis=0)
     rad = np.deg2rad(angle)

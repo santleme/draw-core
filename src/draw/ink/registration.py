@@ -155,8 +155,21 @@ def _deadband_step(frozen, corners, over):
     return frozen, frozen, over, False, shift
 
 
-def _register_ink_probability(prob, anchor, corners, visible=None):
-    """Registra a passada na geometria ancora; devolve (prob, visible)."""
+def _register_ink_probability(
+    prob, anchor, corners, visible=None, visible_cam=None, pass_corners=None
+):
+    """Registra a passada na geometria ancora; devolve (prob, visible).
+
+    `visible` é a máscara já na grade da página; `visible_cam` (issue
+    #100) é a mesma máscara na grade da câmera — quando presente, a
+    versão registrada sai por UM resample câmera→âncora, em vez do
+    NEAREST página→âncora de sempre (dois resamples acumulados por
+    pixel). `corners` é o quad de registro (congelado na banda
+    morta); `pass_corners` é o quad ao vivo que produziu a prob — a
+    máscara percorre o MESMO caminho da tinta (page_matrix da
+    passada, depois M), senão drift suprimido desalinha máscara e
+    traço em ~tau px (review do PR #118).
+    """
     if visible is not None:
         prob = prob.copy()
         prob[~visible] = 0.0
@@ -172,7 +185,38 @@ def _register_ink_probability(prob, anchor, corners, visible=None):
             flags=cv2.INTER_LINEAR,
             borderValue=0.0,
         )
-        if visible is not None:
+        if visible_cam is not None:
+            visible = (
+                cv2.warpPerspective(
+                    visible_cam.astype(np.uint8),
+                    matrix
+                    @ _corners_page_matrix(
+                        corners if pass_corners is None else pass_corners,
+                        size[0],
+                        size[1],
+                    ),
+                    size,
+                    flags=cv2.INTER_NEAREST,
+                    borderValue=0,
+                )
+                > 0
+            )
+            # A prob so cobre a pegada que M alcanca do quad desta
+            # passada; fora dela nao houve observacao. Marcar
+            # "visivel" ai contaria tinta velha fora do recorte como
+            # ausencia — a folha re-posta noutra pose apagaria o
+            # traco (review do PR #118).
+            visible &= (
+                cv2.warpPerspective(
+                    np.ones(prob.shape, np.uint8),
+                    matrix,
+                    size,
+                    flags=cv2.INTER_NEAREST,
+                    borderValue=0,
+                )
+                > 0
+            )
+        elif visible is not None:
             visible = (
                 cv2.warpPerspective(
                     visible.astype(np.uint8),

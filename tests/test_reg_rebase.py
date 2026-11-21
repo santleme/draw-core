@@ -53,14 +53,23 @@ def spy(monkeypatch):
     calls = []
     real = registration_mod._register_ink_probability
 
-    def wrapped(prob, anchor, corners, visible=None):
+    def wrapped(
+        prob, anchor, corners, visible=None, visible_cam=None, pass_corners=None
+    ):
         calls.append(
             (
                 None if anchor is None else np.array(anchor, copy=True),
                 None if corners is None else np.array(corners, copy=True),
             )
         )
-        return real(prob, anchor, corners, visible)
+        return real(
+            prob,
+            anchor,
+            corners,
+            visible,
+            visible_cam=visible_cam,
+            pass_corners=pass_corners,
+        )
 
     monkeypatch.setattr(registration_mod, "_register_ink_probability", wrapped)
     return calls

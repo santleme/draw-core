@@ -236,7 +236,11 @@ def run_pipeline(
     )
     visibility_configured = ecc_hand_masker is not None
     worker = PageCleanWorker(
-        page_clean, ecc_hand_masker, clock=clock, config=pipeline_config.ink
+        page_clean,
+        ecc_hand_masker,
+        clock=clock,
+        config=pipeline_config.ink,
+        ink_divnorm=pipeline_config.ink_divnorm,
     )
     presence = make_hand_presence(hand_model, verify=verify)
     if presence is not None:

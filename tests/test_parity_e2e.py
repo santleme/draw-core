@@ -283,8 +283,9 @@ def test_run_new_pins_legacy_tier_a_config(monkeypatch, tmp_path):
     class _FakeWorker:
         error = None
 
-        def __init__(self, _pc, _hm, *, clock=None, config=None):
+        def __init__(self, _pc, _hm, *, clock=None, config=None, ink_divnorm=False):
             seen["worker_config"] = config
+            seen["worker_ink_divnorm"] = ink_divnorm
 
         def pump(self):
             return False

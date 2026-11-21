@@ -355,7 +355,9 @@ def run_replay(
             return []
 
     det_worker = SyncDetectionWorker()
-    ink_worker = PageCleanWorker(page_clean, None, clock=clock, config=config.ink)
+    ink_worker = PageCleanWorker(
+        page_clean, None, clock=clock, config=config.ink, ink_divnorm=config.ink_divnorm
+    )
     loop = Pipeline(
         detection_worker=det_worker,
         ink_worker=ink_worker,

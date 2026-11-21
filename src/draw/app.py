@@ -1301,6 +1301,9 @@ def run(
                 page_clean,
                 hand_masker,
                 config=None if pipeline_config is None else pipeline_config.ink,
+                ink_divnorm=(
+                    False if pipeline_config is None else pipeline_config.ink_divnorm
+                ),
             ).start()
             print(
                 "Tinta em thread propria: o laco principal nao espera "
@@ -1594,6 +1597,15 @@ def run(
             ui = _ui_state()
             _camera_menu["cam_shape"] = status.shape
             ui_signature = _ui_signature(ui)
+            # O resize do painel e cacheado por publicacao: geracao +
+            # versao identificam o conteudo do canvas acumulado (a
+            # versao reinicia por geracao). Canvas sem publicacao
+            # propria (blank, warp de marcadores) vai sem token.
+            canvas_version = (
+                (pipeline.clean_generation, pipeline.clean_display_version)
+                if pipeline is not None and canvas is pipeline.accumulated_canvas
+                else None
+            )
             last_view = view_module.compose_view(
                 status,
                 canvas,
@@ -1605,6 +1617,7 @@ def run(
                 camera_menu=ui["camera"],
                 settings_menu=ui["settings"],
                 hud=ui["hud"],
+                canvas_version=canvas_version,
             )
             _show(last_view)
 

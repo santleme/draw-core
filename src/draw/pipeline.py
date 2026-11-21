@@ -34,7 +34,7 @@ import cv2
 import numpy as np
 
 from . import config as config_module
-from . import contracts, exposure, paper, photometry, tracker
+from . import contracts, exposure, paper, tracker
 from .ink import render as ink_render
 from .settings import PipelineConfig
 from .tracker import _SHEET_LOST_MIN_FRAMES
@@ -79,6 +79,38 @@ _FROZEN_SHEET_MOVE_PX = 25.0
 
 
 _STALE_PASS_MIN_FRAMES = _SHEET_LOST_MIN_FRAMES
+
+
+def _quad_camera_width(corners):
+    """Largura média do quad em px de câmera (arestas superior/inferior)."""
+    c = np.asarray(corners, dtype=np.float64).reshape(4, 2)
+    return 0.5 * (np.linalg.norm(c[1] - c[0]) + np.linalg.norm(c[2] - c[3]))
+
+
+def _quad_camera_mask(corners, shape):
+    """Interior do quad rasterizado na grade do frame de câmera."""
+    mask = np.zeros(shape[:2], np.uint8)
+    cv2.fillPoly(mask, [np.asarray(corners, dtype=np.float32).astype(np.int32)], 1)
+    return mask.astype(bool)
+
+
+def _paper_mean_bgr(image, coverage):
+    """Média BGR sobre os pixels cobertos, sem materializar a seleção.
+
+    cv2.mean reduz numa passada sobre a máscara; o caminho
+    `image[coverage].mean(axis=0)` copiava os ~700-800k pixels do
+    papel (~24 ms por submit medidos na VM, issue #98) antes de
+    reduzir — mesmo resultado, ~43x mais barato.
+
+    cv2.mean multiplica a soma pelo recíproco da contagem em vez de
+    dividir: uma média em inteiro exato pode sair 1 ulp abaixo e o
+    cast para uint8 truncar um nível a menos. Recupera a soma exata
+    com round(mean*count) e divide direto — bit a bit igual ao
+    astype(uint8) do caminho antigo (floor para valores >= 0).
+    """
+    count = int(coverage.sum())
+    means = np.array(cv2.mean(image, coverage.astype(np.uint8))[:3])
+    return (np.round(means * count) // count).astype(np.uint8)
 
 
 # Anel de tolerancia do teste de componentes no IoU de cobertura
@@ -320,48 +352,28 @@ class Pipeline:
         self._coverage_iou_accepts = 0
         self._coverage_iou_accept_recent = deque(maxlen=32)
 
-    @staticmethod
-    def _divnorm_page(ink_warped, coverage):
-        """ink_divnorm: domínio de entrada do modelo de tinta v4.
+    def _sheet_coverage_camera(self):
+        """Cobertura da folha na grade do frame, ou None sem evidência.
 
-        Paridade com o treino (draw-training pack_round4: mask_sheet
-        -> division_normalize): o fora-da-folha é preenchido ANTES da
-        normalização. Sem isso a mesa clara entra no blur de
-        iluminação e escurece a faixa de papel encostada nela — uma
-        borda falsa dentro da cobertura, que o preenchimento final
-        não alcança. O preenchimento usa a média da própria página
-        (o mesmo do caminho sem divnorm), não um branco fixo: papel
-        sob sombra ao lado de um branco fixo repetiria a borda.
-        """
-        if coverage is not None and coverage.any():
-            filled = ink_warped.copy()
-            filled[~coverage] = ink_warped[coverage].mean(axis=0).astype(np.uint8)
-            return photometry.division_normalize(filled)
-        return photometry.division_normalize(ink_warped)
-
-    def _sheet_coverage_page(self, warp_corners):
-        """Cobertura da folha na grade da página, ou None sem evidência.
-
-        A máscara da última detecção é retificada com a mesma
-        homografia do warp de tinta deste quadro: o que a cena
-        mostra fora da folha — mesa que entra por quad largo ou
-        atrasado depois de movimento — só pode votar sobre a tinta
-        que a âncora já tem (gate de re-confirmação na trabalhadora).
-        Uma erosão leve desconta a borda da
-        própria máscara. Cobertura toda vazia é devolvida como
-        está: o quad que retifica uma região sem folha nenhuma é
-        exatamente o caso que a cobertura existe para vedar —
-        None seria "sem sinal", que confia.
+        A máscara da última detecção sobe à trabalhadora em espaço
+        de câmera (issue #100): quem consome retifica para a grade
+        que precisa com a homografia do quad que a acompanha. Uma
+        erosão leve desconta a borda da própria máscara — a mesma
+        regra de quando a erosão rolava depois do warp, agora na
+        fonte. Cobertura toda vazia é devolvida como está: o quad
+        que retifica uma região sem folha nenhuma é exatamente o
+        caso que a cobertura existe para vedar — None seria "sem
+        sinal", que confia.
         """
         if not self._config.coverage or self._coverage_mask is None:
             return None
-        warped = self._warp_sheet(self._coverage_mask, warp_corners)
-        if warped is None:
-            return None
-        coverage = (
-            cv2.erode((warped > 127).astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
+        return (
+            cv2.erode(
+                (self._coverage_mask > 127).astype(np.uint8),
+                np.ones((5, 5), np.uint8),
+            )
+            > 0
         )
-        return coverage
 
     def _quad_coverage_iou(self, warp_corners):
         """IoU do quad com a mascara de cobertura no espaco da camera.
@@ -433,16 +445,18 @@ class Pipeline:
             # fantasma caiu (issue #105).
             self._coverage_iou_accepts += 1
             self._coverage_iou_accept_recent.append(round(float(iou), 4))
-        ink_warped = self._warp_sheet(frame, warp_corners)
-        # Visibilidade na grade da pagina: onde a mao esta, a
-        # passada nao ve a folha — a passada nao pode votar com
-        # evidencia fabricada sob oclusao.
+        # Visibilidade e cobertura sobem na grade do frame (issue
+        # #100): retificar cada máscara câmera→página custava ~3
+        # warpPerspective por submit no laço, e a trabalhadora ainda
+        # re-retificava página→âncora — o mesmo pixel pagava dois
+        # resamples. Com as máscaras em espaço de câmera a
+        # trabalhadora resolve as duas grades com uma retificação
+        # só (M·C = A), e o laço deixa de pagar warps de máscara.
         visible = None
         if self.hand_masker is not None:
             camera_mask = self.hand_masker.mask(frame)
             if camera_mask is not None:
-                hand_warped = self._warp_sheet(camera_mask, warp_corners)
-                visible = hand_warped == 0
+                visible = camera_mask == 0
         if self._config.seg_hand_occlusion and self._hand_mask_det is not None:
             # seg_hand_occlusion: a classe mão do segmentador vira
             # segundo sinal de oclusão. Sem ela, a mão sobre a
@@ -450,78 +464,111 @@ class Pipeline:
             # masker falha, a textura da mão vota como tinta nova.
             # Os dois sinais se somam: basta um dizer "mão" para a
             # passada não enxergar a folha ali.
-            seg_hand_warped = self._warp_sheet(self._hand_mask_det, warp_corners)
-            if seg_hand_warped is not None:
-                # Margem de ~1,2% da largura da página: o contorno da
-                # mão é uma zona de transição que o segmentador
-                # reparte entre classes — sem ela a aresta da mão vota
-                # como traço.
-                margin = max(5, int(round(0.012 * seg_hand_warped.shape[1])))
-                kernel = cv2.getStructuringElement(
-                    cv2.MORPH_ELLIPSE, (2 * margin + 1, 2 * margin + 1)
-                )
-                seg_hand_dil = (
-                    cv2.dilate((seg_hand_warped > 127).astype(np.uint8), kernel) > 0
-                )
-                seg_clear = ~seg_hand_dil
-                visible = seg_clear if visible is None else (visible & seg_clear)
-        coverage = self._sheet_coverage_page(warp_corners)
-        if self._config.ink_auto_gain and not self._config.ink_divnorm:
-            # Com ink_divnorm o ganho NÃO roda: a divisão por I/blur(I) já
-            # anula a escala, e o ganho só podia piorar — clipava em 255 o
-            # papel claro de uma folha com luz desigual e apagava o traço
-            # fraco sobre ele antes da normalização (review do PR #48).
-            # Página escura (exposição no teto de 30 fps): o ganho que o
-            # sensor não dá entra aqui, antes do page_clean. Estimado só
-            # sobre a folha (coverage): a mesa clara do quad não cancela
-            # o ganho do papel, e o preenchimento abaixo já trabalha no
-            # domínio clareado.
-            # A mão visível fica fora da conta: a cobertura a inclui (o seg
-            # a conta como folha), mas uma mão clara não é papel e
-            # cancelaria o ganho do papel escuro ao redor (review do PR
-            # #52). `visible` já une os dois sinais de oclusão.
-            # Sem cobertura (detecção clássica não a fornece) a mão ainda
-            # sai da conta: `visible` sozinha serve de máscara.
-            gain_mask = coverage
-            if visible is not None:
-                gain_mask = visible if coverage is None else coverage & visible
-            ink_warped, self.last_ink_gain = exposure.apply_paper_gain(
-                ink_warped, gain_mask
+            # Margem de ~1,2% da largura da folha — agora medida no
+            # quad em px de câmera: o contorno da mão é uma zona de
+            # transição que o segmentador reparte entre classes e,
+            # sem ela, a aresta da mão vota como traço.
+            margin = max(5, int(round(0.012 * _quad_camera_width(warp_corners))))
+            kernel = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE, (2 * margin + 1, 2 * margin + 1)
             )
+            seg_clear = (
+                cv2.dilate((self._hand_mask_det > 127).astype(np.uint8), kernel) == 0
+            )
+            visible = seg_clear if visible is None else (visible & seg_clear)
+        coverage = self._sheet_coverage_camera()
         if self._config.ink_divnorm:
-            ink_warped = self._divnorm_page(ink_warped, coverage)
-        if coverage is not None:
-            # Fora da folha o warp é preto: a transição
-            # folha->preto é uma aresta artificial que o page_clean
-            # lê como tinta. A cor média da própria página preenche o
-            # entorno — o modelo deixa de ver a aresta sintética e
-            # a borda da folha para de votar como traço.
-            ink_submit = ink_warped
-            if coverage.any():
-                ink_submit = ink_warped.copy()
-                ink_submit[~coverage] = (
-                    ink_warped[coverage].mean(axis=0).astype(np.uint8)
-                )
-            self.ink_worker.submit(
-                contracts.WarpedPage(
-                    ink_submit,
-                    self.clean_generation,
-                    warp_corners,
-                    visible,
-                    coverage,
-                    captured_at=captured_at,
-                )
-            )
+            # Com ink_divnorm a imagem sobe crua: o par de
+            # preenchimentos e a normalização rolam dentro da
+            # passada da trabalhadora (issue #101), fora do laço.
+            # A cobertura de câmera segue subindo — a trabalhadora a
+            # retifica para preencher a região fora da folha e para
+            # o gate de re-confirmação.
+            ink_submit = self._warp_sheet(frame, warp_corners)
         else:
-            self.ink_worker.submit(
-                contracts.WarpedPage(
-                    ink_warped,
-                    self.clean_generation,
-                    warp_corners,
-                    visible,
-                    captured_at=captured_at,
-                )
+            # O ganho e o preenchimento usam máscaras em grade de
+            # página nos antigos — a grade da página É o quad
+            # retificado; em câmera o equivalente é o interior do
+            # quad, senão a mesa do frame inteiro entraria na conta.
+            quad_mask = (
+                _quad_camera_mask(warp_corners, frame.shape)
+                if self._config.ink_auto_gain
+                or (coverage is not None and coverage.any())
+                else None
             )
+            if self._config.ink_auto_gain:
+                # Página escura (exposição no teto de 30 fps): o ganho
+                # que o sensor não dá entra aqui, antes do page_clean.
+                # Estimado só sobre a folha (coverage): a mesa clara do
+                # quad não cancela o ganho do papel, e o preenchimento
+                # abaixo já trabalha no domínio clareado.
+                # A mão visível fica fora da conta: a cobertura a inclui
+                # (o seg a conta como folha), mas uma mão clara não é
+                # papel e cancelaria o ganho do papel escuro ao redor
+                # (review do PR #52). `visible` já une os dois sinais
+                # de oclusão.
+                # Sem cobertura (detecção clássica não a fornece) a mão
+                # ainda sai da conta: `visible` sozinha serve de
+                # máscara.
+                gain_mask = quad_mask.copy()
+                if coverage is not None:
+                    gain_mask &= coverage
+                if visible is not None:
+                    gain_mask &= visible
+                frame, self.last_ink_gain = exposure.apply_paper_gain(frame, gain_mask)
+            fill_color = None
+            if coverage is not None and coverage.any():
+                # Fora da folha o warp é preto: a transição
+                # folha->preto é uma aresta artificial que o page_clean
+                # lê como tinta. A cor média da própria página preenche
+                # o entorno — o modelo deixa de ver a aresta sintética
+                # e a borda da folha para de votar como traço. O
+                # preenchimento rola no frame: a região dentro do quad
+                # já sobe uniforme para o warp, e o ganho acima já
+                # clareou o que a média vê (mesma ordem de antes).
+                paper = coverage & quad_mask
+                if paper.any():
+                    fill_color = _paper_mean_bgr(frame, paper)
+                    # fillConvexPoly sub-cobre a aresta do quad: sem a
+                    # dilatação, uma faixa de ~2 px junto à borda da
+                    # página não é preenchida e sobe com cor de mesa
+                    # (review do PR #118). Pintar além do quad não
+                    # custa nada — o warp só amostra o interior.
+                    fill_region = cv2.dilate(
+                        quad_mask.astype(np.uint8), np.ones((7, 7), np.uint8)
+                    ).astype(bool)
+                    filled = frame.copy()
+                    filled[fill_region & ~coverage] = fill_color
+                    frame = filled
+            ink_submit = self._warp_sheet(frame, warp_corners)
+            if fill_color is not None:
+                frame_h, frame_w = frame.shape[:2]
+                crosses = (
+                    warp_corners[:, 0].min() < 0
+                    or warp_corners[:, 0].max() > frame_w - 1
+                    or warp_corners[:, 1].min() < 0
+                    or warp_corners[:, 1].max() > frame_h - 1
+                )
+                if crosses:
+                    # Folha parcialmente fora do quadro: o warp só
+                    # preenche o que a câmera viu — o resto sobe preto.
+                    # Repõe a média do papel no padding, como o
+                    # preenchimento pós-warp do caminho antigo.
+                    valid = self._warp_sheet(
+                        np.full((frame_h, frame_w), 255, np.uint8),
+                        warp_corners,
+                    )
+                    ink_submit[valid == 0] = fill_color
+        self.ink_worker.submit(
+            contracts.WarpedPage(
+                ink_submit,
+                self.clean_generation,
+                warp_corners,
+                visible,
+                coverage,
+                captured_at=captured_at,
+            )
+        )
 
     # So o stream pede os metadados do InkDelta (ink_meta): sem consumidor o
     # laco nao paga o poll_delta. A versao confirmada do delta e outra do que

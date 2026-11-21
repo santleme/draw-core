@@ -454,24 +454,29 @@ def test_camera_coverage_stays_in_camera_geometry_when_vote_changes(
     coverage[:, 600:] = True
     raw = _InkFromWarp().ink_prob(_bgr(_shift(page, raw_shift, 0.0)))
     worker.set_hand_presence(True, moved=True)
+    # A mascara viaja na geometria da camera (issue #100): o quad
+    # deslocou +6 px, entao a cobertura desenhada na grade da pagina
+    # chega ao frame por esse mesmo deslocamento — e na ancora
+    # (retangulo inteiro -> homografia identidade) ela fica exatamente
+    # como a receita antiga produzia com page->anchor.
+    matrix = np.float32([[1, 0, 6], [0, 1, 0]])
+    size = (SHAPE[1], SHAPE[0])
+    camera_coverage = (
+        cv2.warpAffine(coverage.astype(np.uint8), matrix, size, flags=cv2.INTER_NEAREST)
+        > 0
+    )
     worker.submit(
         WarpedPage(
             _bgr(_shift(page, raw_shift, 0.0)),
             generation,
             BASE + np.float32([6.0, 0.0]),
-            coverage=coverage,
+            coverage=camera_coverage,
         )
     )
     assert worker.pump()
     assert worker.telemetry_snapshot()["records"][-1]["motion_decision"] == decision
     # Registro de camera conhecido: translacao de +6 px, borda zero.
-    matrix = np.float32([[1, 0, 6], [0, 1, 0]])
-    size = (SHAPE[1], SHAPE[0])
     camera = cv2.warpAffine(raw, matrix, size, flags=cv2.INTER_LINEAR)
-    camera_coverage = (
-        cv2.warpAffine(coverage.astype(np.uint8), matrix, size, flags=cv2.INTER_NEAREST)
-        > 0
-    )
     allowed = camera_coverage | anchor_ink
     expected = np.where(allowed, camera, 0.0)
     assert np.count_nonzero(camera[~allowed]) > 0  # gate exercitado

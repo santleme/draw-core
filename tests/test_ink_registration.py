@@ -357,3 +357,146 @@ def test_malformed_corners_are_ignored(monkeypatch):
         assert worker.poll(generation, 0) is not None
     finally:
         worker.stop()
+
+
+def test_registered_visibility_stays_inside_the_pass_footprint():
+    """Reaquisicao com a folha noutra pose: a mascara de camera limpa
+    projetaria "visivel" na grade inteira da ancora, mas a prob so
+    cobre a pegada que M alcanca — fora dela nao houve observacao, e
+    marca-la leria tinta velha fora do recorte como ausencia (review
+    do PR #118)."""
+    shape = (100, 140)
+    prob = np.ones(shape, np.float32)
+    anchor = np.array([[120, 60], [500, 60], [500, 300], [120, 300]], np.float32)
+    registration = anchor + np.array([60, 0], np.float32)
+    camera = np.ones((480, 640), bool)
+    _prob, visible = registration_mod._register_ink_probability(
+        prob,
+        anchor,
+        registration,
+        visible_cam=camera,
+        pass_corners=registration,
+    )
+    matrix = registration_mod._registration_matrix(anchor, registration, shape)
+    footprint = (
+        cv2.warpPerspective(
+            np.ones(shape, np.uint8),
+            matrix,
+            (shape[1], shape[0]),
+            flags=cv2.INTER_NEAREST,
+            borderValue=0,
+        )
+        > 0
+    )
+    assert footprint.any() and not footprint.all()
+    assert visible is not None
+    assert np.array_equal(visible, footprint)
+
+
+def test_camera_visibility_follows_the_live_quad_through_deadband():
+    """Banda morta segurando o quad de registro (R) enquanto a passada
+    usa o quad ao vivo (C): a mascara tem de percorrer M @ C, nao A —
+    senao desalinha ~tau px da tinta que protege (review do PR #118)."""
+    shape = (100, 140)
+    prob = np.ones(shape, np.float32)
+    anchor = np.array([[120, 60], [500, 60], [500, 300], [120, 300]], np.float32)
+    registration = anchor + np.array([60, 0], np.float32)
+    live = registration + np.array([9, 0], np.float32)  # < tau=10px
+    camera = np.ones((480, 640), bool)
+    camera[:, :340] = False  # metade esquerda ocluida
+    _prob, visible = registration_mod._register_ink_probability(
+        prob,
+        anchor,
+        registration,
+        visible_cam=camera,
+        pass_corners=live,
+    )
+    size = (shape[1], shape[0])
+    matrix = registration_mod._registration_matrix(anchor, registration, shape)
+    footprint = (
+        cv2.warpPerspective(
+            np.ones(shape, np.uint8),
+            matrix,
+            size,
+            flags=cv2.INTER_NEAREST,
+            borderValue=0,
+        )
+        > 0
+    )
+    expected = (
+        cv2.warpPerspective(
+            camera.astype(np.uint8),
+            matrix @ registration_mod._corners_page_matrix(live, *size),
+            size,
+            flags=cv2.INTER_NEAREST,
+            borderValue=0,
+        )
+        > 0
+    ) & footprint
+    assert np.array_equal(visible, expected)
+    # Nao-vacuo: a projecao antiga por A sozinha teria deslocado a
+    # fronteira de oclusao junto com a tinta.
+    old = (
+        cv2.warpPerspective(
+            camera.astype(np.uint8),
+            registration_mod._corners_page_matrix(anchor, *size),
+            size,
+            flags=cv2.INTER_NEAREST,
+            borderValue=0,
+        )
+        > 0
+    ) & footprint
+    assert not np.array_equal(visible, old)
+
+
+def test_off_crop_occlusion_does_not_hold_the_post_exit_window():
+    """Mao na mesa fora do quad nao e folha mascarada: com a mascara
+    de camera (issue #100), o rearme pos-saida olha o recorte do
+    quad, nao o frame inteiro (review do PR #118)."""
+    from draw.ink.config import InkConfig
+
+    ink = _WanderingInk()
+    worker = worker_mod.PageCleanWorker(ink, config=InkConfig.production())
+    generation = worker.new_generation()
+    worker.set_hand_presence(True)
+    worker.set_hand_presence(False)
+    assert worker._awaiting_clear_post_exit
+    quad = np.array([[100, 100], [400, 100], [400, 400], [100, 400]], np.float32)
+    visible = np.ones((480, 640), bool)
+    visible[430:, 550:] = False  # mao na mesa, fora do quad
+    worker.submit(
+        WarpedPage(np.zeros((60, 80, 3), np.uint8), generation, quad, visible)
+    )
+    assert not worker._awaiting_clear_post_exit
+    # O mesmo recorte governa o is_masked da passada: oclusao fora do
+    # quad nao gasta a janela de confirmacao.
+    assert worker_mod._crop_all_visible(visible, quad)
+    inside = visible.copy()
+    inside[200, 200] = False  # oclusao DENTRO do quad mascara a passada
+    assert not worker_mod._crop_all_visible(inside, quad)
+
+
+def test_off_crop_occlusion_lets_the_post_exit_countdown_advance():
+    """A janela pos-saida tem de AVANCAR com a passada clara: com a
+    mascara de camera, o is_masked so conta oclusao dentro do quad —
+    oclusao na mesa nao pode rearmar o contador a cada passada
+    (review do PR #118)."""
+    from draw.ink.config import InkConfig
+
+    ink = _WanderingInk()
+    worker = worker_mod.PageCleanWorker(ink, config=InkConfig.production())
+    generation = worker.new_generation()
+    worker.set_hand_presence(True)
+    worker.set_hand_presence(False)
+    quad = np.array([[100, 100], [400, 100], [400, 400], [100, 400]], np.float32)
+    visible = np.ones((480, 640), bool)
+    visible[430:, 550:] = False  # mao na mesa, fora do quad
+    passes = worker._post_exit_confirm_passes()
+    worker.submit(
+        WarpedPage(np.zeros((60, 80, 3), np.uint8), generation, quad, visible)
+    )
+    assert worker.pump()
+    assert worker._confirm_passes == passes - 1, (
+        f"contador {worker._confirm_passes} — a oclusao fora do "
+        "recorte rearmou a janela em vez de deixa-la avancar"
+    )

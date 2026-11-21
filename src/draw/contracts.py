@@ -183,12 +183,16 @@ class WarpedPage:
     somente-leitura do buffer recebido. generation é a geração de
     sessão da folha, >= 0. corners é o quad (4, 2) float32
     somente-leitura que retificou ESTE warp, ou None. visible é a
-    máscara de visibilidade DESTE warp (verdadeiro onde a câmera
-    vê a página; falso sob a mão) e coverage a cobertura de folha
-    DESTE warp (verdadeiro onde a retificação cobre papel de
-    verdade): ambas 2D bool/uint8 na mesma grade (altura, largura)
-    de image, somente-leitura, ou None. captured_at é o carimbo
-    monotônico (s) do quadro de câmera que originou o warp, ou None.
+    máscara de visibilidade do FRAME que originou este warp
+    (verdadeiro onde a câmera vê a página; falso sob a mão) e
+    coverage a cobertura de folha do mesmo frame (verdadeiro onde
+    o quad cobre papel de verdade): ambas 2D bool/uint8 na grade
+    (altura, largura) do FRAME DE CÂMERA quando corners vem junto
+    — a trabalhadora retifica câmera→página ou câmera→âncora com
+    corners (issue #100). Sem corners não há geometria de câmera:
+    as máscaras são lidas na grade do próprio warp, como antes.
+    captured_at é o carimbo monotônico (s) do quadro de câmera que
+    originou o warp, ou None.
     """
 
     image: np.ndarray
@@ -230,10 +234,10 @@ class WarpedPage:
                 or mask.dtype not in (np.dtype(bool), np.dtype(np.uint8))
             ):
                 raise ValueError(f"{name} precisa ser máscara 2D bool/uint8 ou None")
-            if mask.shape != self.image.shape[:2]:
+            if self.corners is None and mask.shape != self.image.shape[:2]:
                 raise ValueError(
-                    f"{name} precisa ter a grade de image: "
-                    f"{mask.shape} vs {self.image.shape[:2]}"
+                    f"{name} sem corners segue a grade do warp: "
+                    f"{mask.shape} != {self.image.shape[:2]}"
                 )
             view = mask.view()
             view.flags.writeable = False

@@ -322,9 +322,15 @@ def test_warped_page_rejects_bad_fields():
     with pytest.raises(ValueError):
         _warped_page(visible=np.ones((8, 8), dtype=np.float32))
     with pytest.raises(ValueError):
-        _warped_page(visible=np.ones((9, 9), dtype=bool))
-    with pytest.raises(ValueError):
         _warped_page(coverage=np.ones((8, 8, 3), dtype=bool))
+    # Sem corners a mascara segue a grade do warp (com corners ela
+    # e de camera e o tamanho e o do frame — fora do contrato).
+    with pytest.raises(ValueError):
+        _warped_page(visible=np.ones((6, 8), dtype=bool))
+    with pytest.raises(ValueError):
+        _warped_page(coverage=np.zeros((8, 6), dtype=np.uint8))
+    page = _warped_page(corners=QUAD.copy(), visible=np.ones((6, 8), bool))
+    assert page.visible.shape == (6, 8)
 
 
 def test_warped_page_accepts_2d_and_float_maps():

@@ -64,10 +64,15 @@ class PipelineConfig:
       caso medido com mão (s4, escrita) fica em IoU 0,864. Se
       aparecer, `coverage_iou_floor=0` desliga o piso.
       0 desliga o piso.
-    - ink_divnorm: aplica draw.photometry.division_normalize no
-      retificado antes do page_clean — o domínio de entrada do
-      modelo de tinta v4 (sombra da mão e pauta viram problema
-      supervisionado). Desligado: o v2 congelado espera RGB cru.
+    - ink_divnorm: o retificado sobe cru e a trabalhadora aplica
+      draw.photometry.division_normalize na passada, antes do
+      page_clean — o domínio de entrada do modelo de tinta v4
+      (sombra da mão e pauta viram problema supervisionado).
+      Desligado: o v2 congelado espera RGB cru. O flag precisa
+      bater nos dois lados: `PipelineConfig.ink_divnorm` desliga o
+      preenchimento/ganho na pipeline e o `ink_divnorm` da
+      PageCleanWorker normaliza — ligado num lado só entrega warp
+      sem normalização ao modelo.
     - follow_move (era DRAW_INK_FOLLOW_MOVE): com a geometria de
       tinta congelada sem mão, um deslocamento sustentado da folha
       reparte o histórico de cantos na posição nova.
@@ -95,6 +100,9 @@ class PipelineConfig:
     skip_stale: bool = True
     seg_hand_occlusion: bool = True
     coverage_iou_floor: float = 0.2
+    # Liga junto com o ink_divnorm da PageCleanWorker: os dois lados
+    # precisam bater — ligado num lado só entrega warp sem
+    # normalização ao modelo (ver a docstring acima).
     ink_divnorm: bool = False
     follow_move: bool = True
     ink_auto_gain: bool = True

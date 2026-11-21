@@ -86,6 +86,48 @@ def test_composed_view_does_not_share_the_cached_template():
     assert np.array_equal(second, snapshot)
 
 
+def test_camera_resize_uses_linear_for_the_live_preview(monkeypatch):
+    """Issue #99: o preview da câmera não paga INTER_AREA — LINEAR é
+    ~10x mais barato no downscale e a diferença é invisível na vista
+    ao vivo (o canvas segue com a interpolação de qualidade)."""
+    import cv2
+
+    interps = []
+    real_resize = cv2.resize
+
+    def spy(image, dsize, *args, **kwargs):
+        interps.append(kwargs.get("interpolation"))
+        return real_resize(image, dsize, *args, **kwargs)
+
+    monkeypatch.setattr(cv2, "resize", spy)
+    view_module.compose_view(_camera(), np.full((1200, 850, 3), 255, np.uint8))
+    assert interps[0] == cv2.INTER_LINEAR  # câmera
+    assert interps[1] == cv2.INTER_AREA  # canvas segue AREA no downscale
+
+
+def test_canvas_resize_is_cached_per_publication_version(monkeypatch):
+    """Issue #99: o canvas só muda por publicação; a mesma versão
+    reusa o resize do quadro anterior e versão None sempre
+    redimensiona."""
+    calls = []
+    real_resize = view_module._resize
+
+    def spy(image, w, h):
+        calls.append(1)
+        return real_resize(image, w, h)
+
+    monkeypatch.setattr(view_module, "_resize", spy)
+    cam = _camera()
+    canvas = np.full((1200, 850, 3), 255, np.uint8)
+    view_module.compose_view(cam, canvas, canvas_version=(0, 3))
+    view_module.compose_view(cam, canvas, canvas_version=(0, 3))
+    assert len(calls) == 1  # o segundo quadro bebe do cache
+    view_module.compose_view(cam, canvas, canvas_version=(0, 4))
+    assert len(calls) == 2
+    view_module.compose_view(cam, canvas)
+    assert len(calls) == 3  # sem versão não há cache
+
+
 def test_dead_source_view_uses_the_message_card():
     last = np.full((640, 1600, 3), 200, dtype=np.uint8)
     view = view_module.dead_source_view(last)

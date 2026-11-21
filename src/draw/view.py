@@ -968,6 +968,32 @@ def _resize(image, width, height):
     return cv2.resize(image, (width, height), interpolation=interp)
 
 
+# Cache de uma entrada do resize do canvas do painel. O canvas so
+# muda quando a trabalhadora publica (~4/s) enquanto compose_view
+# roda a cada quadro de UI (~12-30/s): chaveado por
+# (versao, destino, forma) os quadros sem publicacao reutilizam o
+# ultimo resize. Uma entrada basta — a versao e monotonica e so o
+# canvas mais novo e exibido.
+_CANVAS_RESIZE = {}
+
+
+def _resize_canvas(image, width, height, version):
+    """Resize do canvas do painel, reutilizado entre quadros sem publicacao.
+
+    version e o token de conteudo do canvas (ex.: (geracao, versao)
+    da publicacao): a mesma versao garante os mesmos pixels. None
+    desliga o cache — conteudo sem identidade propria (warp de
+    marcadores, folha em branco) re-redimensiona a cada quadro.
+    """
+    if version is None:
+        return _resize(image, width, height)
+    key = (version, width, height, image.shape)
+    if _CANVAS_RESIZE.get("key") != key:
+        _CANVAS_RESIZE["key"] = key
+        _CANVAS_RESIZE["img"] = _resize(image, width, height)
+    return _CANVAS_RESIZE["img"]
+
+
 def compose_view(
     camera_img,
     canvas_img,
@@ -980,6 +1006,7 @@ def compose_view(
     camera_menu=None,
     settings_menu=None,
     hud=None,
+    canvas_version=None,
 ):
     """Janela unica: camera e folha digital em viewports dedicados simetricos.
 
@@ -995,6 +1022,9 @@ def compose_view(
     progress, items); pressed e o indice do botao sob o clique.
     show_base liga o botao [C] Base do rodape: a tecla so tem efeito no
     modo baseline (session_ink), entao fora dele o botao nao aparece.
+    canvas_version e o token de conteudo de canvas_img para o cache do
+    resize do painel (a mesma versao garante os mesmos pixels); None
+    re-redimensiona a cada quadro.
     A cromagem estatica vem do cache de _studio_template; por quadro
     restam os dois resizes, as colagens e as bordas sobre as imagens.
     """
@@ -1007,7 +1037,14 @@ def compose_view(
     def k(v):
         return max(1, int(round(v * sc)))
 
-    cam_resized = _resize(camera_img, geo["inner_cam_w"], geo["inner_cam_h"])
+    # Preview da camera em INTER_LINEAR: ~10x mais barato que AREA
+    # no downscale e a diferenca e invisivel numa vista ao vivo
+    # (nada daqui alimenta modelo ou tinta — issue #99).
+    cam_resized = cv2.resize(
+        camera_img,
+        (geo["inner_cam_w"], geo["inner_cam_h"]),
+        interpolation=cv2.INTER_LINEAR,
+    )
     cam_x, cam_y = geo["cam_x"], geo["cam_y"]
     studio[cam_y : cam_y + geo["inner_cam_h"], cam_x : cam_x + geo["inner_cam_w"]] = (
         cam_resized
@@ -1056,7 +1093,12 @@ def compose_view(
         cv2.LINE_AA,
     )
 
-    sheet_resized = _resize(canvas_img, geo["inner_sheet_w"], geo["inner_sheet_h"])
+    sheet_resized = _resize_canvas(
+        canvas_img,
+        geo["inner_sheet_w"],
+        geo["inner_sheet_h"],
+        canvas_version,
+    )
     sheet_x, sheet_y = geo["sheet_x"], geo["sheet_y"]
     studio[
         sheet_y : sheet_y + geo["inner_sheet_h"],

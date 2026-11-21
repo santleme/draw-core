@@ -86,7 +86,14 @@ def drive(sequence, config=None):
     gen = worker.new_generation()
     for prob, corners in sequence:
         clock.now += 1
-        worker.submit(WarpedPage(prob, gen, corners, np.ones(prob.shape, bool)))
+        worker.submit(
+            WarpedPage(
+                prob,
+                gen,
+                corners,
+                rr.camera_mask(np.ones(prob.shape, bool), corners),
+            )
+        )
         assert worker.pump()
         assert worker.error is None
     return worker
