@@ -59,8 +59,12 @@ pytest -q tests/test_sheet_tracker.py tests/test_tracker_loss_clock.py
 pytest -q --testmon -n 4
 ```
 
-The first Testmon run builds the local `.testmondata` by running the suite.
-Add `--testmon-forceselect` when combining impact selection with a marker
-filter such as `-m 'not slow'`. Run script tests directly (for example,
-`pytest -q tests/test_run_sh.py` after editing `run.sh`). CI runs the full
+Seed `.testmondata` with a serial `pytest -q --testmon` on a fresh worktree.
+To keep `slow` tests serial, add `--testmon-forceselect -m 'not slow'` to
+the parallel command and run `pytest -q -m slow` separately. Use
+`--testmon-forceselect` whenever combining impact selection with `-m`.
+
+Run the corresponding tests directly for scripts and subprocess entry
+points, such as `tests/test_run_sh.py` after changing `run.sh` or
+`tests/test_hvcam.py` after editing the MJPEG worker. CI runs the full
 Python suite.

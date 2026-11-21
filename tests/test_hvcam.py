@@ -1825,20 +1825,22 @@ runpy.run_path(sys.argv[1], run_name="__main__")
 
 
 def test_decoder_has_separate_cold_start_and_frame_deadlines(monkeypatch):
+    launch = subprocess.Popen
+    script = """
+import runpy, sys, time
+time.sleep(0.55)
+runpy.run_path(sys.argv[1], run_name="__main__")
+"""
+
+    def worker(command, **kwargs):
+        return launch([sys.executable, "-c", script, command[1]], **kwargs)
+
+    monkeypatch.setattr(mjpeg_module.subprocess, "Popen", worker)
     ok, jpeg = cv2.imencode(".jpg", np.zeros((16, 16, 3), np.uint8))
     assert ok
-    decoder = mjpeg_module._MjpegDecoder(startup_timeout_s=4.0, timeout_s=0.5)
-    time_limit = decoder._time_limit
-    budgets = []
-
-    def record_budget(seconds, message):
-        budgets.append(seconds)
-        return time_limit(seconds, message)
-
-    monkeypatch.setattr(decoder, "_time_limit", record_budget)
+    decoder = mjpeg_module._MjpegDecoder(timeout_s=0.5)
     try:
         assert decoder.decode(jpeg).shape == (16, 16, 3)
-        assert budgets == [4.0, 0.5]
     finally:
         decoder.close()
 
