@@ -742,6 +742,37 @@ def test_hand_vote_tolerates_narrow_segmentation_gap_at_top_edge(h):
     assert hand_mask_orientation_vote(mask) == "inverted"
 
 
+def test_hand_vote_abstains_on_resized_side_entry_with_gaps_on_both_edges():
+    # Issue #89: mascara 384x384 (linhas 1-95, colunas 1-55) em retrato 720x1280.
+    small = np.zeros((384, 384), dtype=np.uint8)
+    small[1:96, 1:56] = 255
+    mask = cv2.resize(small, (720, 1280), interpolation=cv2.INTER_NEAREST)
+    assert not mask[:, 0].any() and not mask[0, :].any()
+    assert hand_mask_orientation_vote(mask) is None
+    assert hand_mask_orientation_vote(mask[::-1, ::-1].copy()) is None
+
+
+def test_hand_vote_top_entry_with_brief_side_touch_still_votes():
+    # Issue #90: 2 linhas de folga no topo, toque lateral de 19 linhas abaixo.
+    mask = np.zeros((720, 1280), dtype=np.uint8)
+    mask[2:90, 500:780] = 255
+    mask[60:80, 0:780] = 255
+    mask[60:79, 0:1] = 255
+    assert hand_mask_orientation_vote(mask) == "inverted"
+    assert hand_mask_orientation_vote(mask[::-1].copy()) == "upright"
+
+
+def test_hand_vote_abstains_on_dominant_side_entry_near_top():
+    # Issue #90: entrada lateral dominante perto do topo (com e sem toque exato).
+    mask_exact = np.zeros((720, 1280), dtype=np.uint8)
+    mask_exact[0:180, 0:220] = 255
+    assert hand_mask_orientation_vote(mask_exact) is None
+
+    mask_slack = np.zeros((720, 1280), dtype=np.uint8)
+    mask_slack[2:180, 0:220] = 255
+    assert hand_mask_orientation_vote(mask_slack) is None
+
+
 @pytest.mark.parametrize("h", [480, 720, 1280])
 def test_wide_lateral_hand_inside_top_slack_band_abstains(h):
     from draw.auto_orient import hand_mask_orientation_vote
