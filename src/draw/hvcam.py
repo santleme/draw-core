@@ -25,6 +25,7 @@ import ctypes
 import errno
 import hashlib
 import io
+import logging
 import os
 import re
 import selectors
@@ -49,6 +50,7 @@ import numpy as np
 # Porta padrao do servico vsock — a mesma do protocolo hvcam e do
 # ajudante draw (coincidencia util: ambos falam 8765).
 DEFAULT_PORT = 8765
+_LOG = logging.getLogger(__name__)
 
 # Release oficial do hvcam-host.exe (santleme/hvcam) para provisionamento
 # automatico no WSL: o binario roda no lado Windows e transmite a webcam
@@ -1360,6 +1362,7 @@ class HvcamCapture:
         self._on_listening = on_listening
         self._abort_check = abort_check
         self._host_proc = host_process
+        self._managed_host = on_listening is not None or host_process is not None
         self._cam = None
         self._opened = False
         self.last_frame_id = None
@@ -1422,6 +1425,16 @@ class HvcamCapture:
         except (ValueError, cv2.error):
             if info.get("format") == 4:
                 self.mjpeg_decode_errors += 1
+                if self.mjpeg_decode_errors == 1 and not self._managed_host:
+                    # HVCAM v1 so permite pedir o quadro mais recente.
+                    # O formato de captura pertence ao host externo.
+                    _LOG.warning(
+                        "hvcam: MJPEG corrompido recebido do host externo. "
+                        "Se a falha persistir, reinicie o hvcam-host.exe "
+                        "com --format nv12 ou --format yuy2. No WSL, "
+                        "encerre o host externo e execute ./run.sh sem --source "
+                        "para tentar o host gerenciado."
+                    )
             return False, None
         if frame is None:
             return False, None

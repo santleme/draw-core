@@ -242,6 +242,56 @@ def test_hvcam_capture_bad_payload_is_failed_read():
     capture.release()
 
 
+@pytest.mark.parametrize("source", ["hvcam+tcp://127.0.0.1", 0])
+def test_external_hvcam_reports_mjpeg_recovery_once(source, monkeypatch, caplog):
+    corrupt = {**_info(), "format": 4}
+    cam = FakeCamera(
+        [(corrupt, _payload()), (corrupt, _payload())],
+        bgr_result=ValueError("invalid JPEG"),
+    )
+
+    def external_capture(url, **kwargs):
+        expected = "hvcam://" if source == 0 else source
+        assert url == expected
+        return HvcamCapture(url, camera_factory=_factory(cam), **kwargs)
+
+    monkeypatch.setattr(camera_module, "HvcamCapture", external_capture)
+    if source == 0:
+        monkeypatch.setattr(camera_module, "is_wsl", lambda: True)
+        monkeypatch.setattr(camera_module, "_video_nodes", lambda: [])
+        monkeypatch.setattr(camera_module.os.path, "exists", lambda _path: False)
+        _url, capture = camera_module.open_wsl_hvcam_fallback(source)
+    else:
+        capture = camera_module.open_capture(source)
+
+    try:
+        assert capture.read() == (False, None)
+        assert capture.read() == (False, None)
+        assert capture.mjpeg_decode_errors == 2
+        warning = caplog.text
+        assert warning.count("MJPEG corrompido") == 1
+        assert "--format nv12" in warning and "--format yuy2" in warning
+        assert "gerenciado" in warning
+    finally:
+        capture.release()
+
+
+def test_managed_hvcam_probe_does_not_report_external_recovery(caplog):
+    cam = FakeCamera(
+        [({**_info(), "format": 4}, _payload())],
+        bgr_result=ValueError("invalid JPEG"),
+    )
+    capture = HvcamCapture(
+        "hvcam+reverse://", camera_factory=_factory(cam), on_listening=lambda: None
+    )
+    try:
+        assert capture.read() == (False, None)
+        assert capture.mjpeg_decode_errors == 1
+        assert caplog.text == ""
+    finally:
+        capture.release()
+
+
 def test_hvcam_capture_unopened_when_connect_fails():
     cam = FakeCamera([], fail=OSError("connect failed (-110)"))
     capture = HvcamCapture("hvcam://", camera_factory=_factory(cam))
