@@ -1431,9 +1431,9 @@ class HvcamCapture:
                     _LOG.warning(
                         "hvcam: MJPEG corrompido recebido do host externo. "
                         "Se a falha persistir, reinicie o hvcam-host.exe "
-                        "com --format nv12 ou --format yuy2. No WSL, "
-                        "encerre o host externo e execute ./run.sh sem --source "
-                        "para tentar o host gerenciado."
+                        "com --format nv12 ou --format yuy2. Em WSL sem "
+                        "/dev/video*, encerre o host externo e execute ./run.sh "
+                        "sem --source para tentar o host gerenciado."
                     )
             return False, None
         if frame is None:

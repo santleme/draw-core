@@ -271,7 +271,7 @@ def test_external_hvcam_reports_mjpeg_recovery_once(source, monkeypatch, caplog)
         warning = caplog.text
         assert warning.count("MJPEG corrompido") == 1
         assert "--format nv12" in warning and "--format yuy2" in warning
-        assert "gerenciado" in warning
+        assert "WSL sem /dev/video*" in warning and "gerenciado" in warning
     finally:
         capture.release()
 
