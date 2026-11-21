@@ -329,7 +329,8 @@ def test_paper_mm_valida_como_paper_grid():
 
 def test_config_importa_e_erro_claro_sem_cv2_aruco(monkeypatch):
     """Sem cv2.aruco (ex.: opencv-python sem contrib), o import de config
-    não cai e get_dictionary() explica como instalar o pacote contrib."""
+    não cai e tanto get_dictionary() quanto paper._make_detector()
+    explicam como instalar o pacote contrib."""
     import importlib
 
     monkeypatch.delattr(cv2, "aruco", raising=False)
@@ -337,3 +338,5 @@ def test_config_importa_e_erro_claro_sem_cv2_aruco(monkeypatch):
     assert reloaded.ARUCO_DICTIONARY == 0
     with pytest.raises(RuntimeError, match="opencv-contrib-python"):
         reloaded.get_dictionary()
+    with pytest.raises(RuntimeError, match="opencv-contrib-python"):
+        paper._make_detector()

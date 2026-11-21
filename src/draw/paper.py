@@ -44,8 +44,20 @@ _TEXTURE_INTERIOR_SHRINK = 0.86
 
 
 def _make_detector():
-    params = cv2.aruco.DetectorParameters()
-    return cv2.aruco.ArucoDetector(config.get_dictionary(), params)
+    dictionary = config.get_dictionary()
+    aruco = getattr(cv2, "aruco", None)
+    if (
+        aruco is None
+        or not hasattr(aruco, "DetectorParameters")
+        or not hasattr(aruco, "ArucoDetector")
+    ):
+        raise RuntimeError(
+            "O OpenCV instalado nao tem o modulo cv2.aruco (necessario para "
+            "--markers). Instale a roda contrib: pip install "
+            "'opencv-contrib-python>=4.8,<5.1'."
+        )
+    params = aruco.DetectorParameters()
+    return aruco.ArucoDetector(dictionary, params)
 
 
 # O detector ArUco só é usado no modo com marcadores, mas era criado na
