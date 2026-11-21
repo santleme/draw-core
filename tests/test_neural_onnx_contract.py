@@ -308,6 +308,21 @@ def test_plausibility_guard_tries_all_borders_for_corner_cut():
     assert fit_plausible(quad, (720, 1280), mask, 10.0, 10.0) is False
 
 
+def test_plausibility_guard_accepts_sheet_clipped_along_long_edge():
+    # A familia medida na issue #104: a aresta-corte e a LONGA do par —
+    # o comprimento e decidido pela borda da imagem; a curta e a aresta
+    # distante real, interior. Sem suporte de mascara na borda, rejeita.
+    quad = np.array(
+        [[100.0, 50.0], [400.0, 70.0], [1200.0, 714.0], [80.0, 718.0]],
+        dtype=np.float32,
+    )
+    mask = np.zeros((72, 128), np.uint8)
+    mask[5:72, 8:] = 255
+    assert fit_plausible(quad, (720, 1280), mask, 10.0, 10.0) is True
+    mask[71, :] = 0  # papel para uma linha antes da borda: nao e corte
+    assert fit_plausible(quad, (720, 1280), mask, 10.0, 10.0) is False
+
+
 def test_plausibility_guard_refuses_paper_edge_passing_near_border():
     # Uma aresta de papel a ~12 px da borda NAO e corte de frame: a
     # mascara nativa nao alcanca a borda ali, entao a aresta vizinha

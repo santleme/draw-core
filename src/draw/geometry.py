@@ -99,6 +99,21 @@ def _mask_supports_cut(mask, side, p, q, scale_x, scale_y):
     return strip.size > 0 and np.count_nonzero(strip) * 2 >= strip.size
 
 
+def _frame_cut(quad, u, v, border_gap, width, height, mask, scale_x, scale_y):
+    """A aresta quad[u]→quad[v] e corte de frame?
+
+    A aresta precisa correr ao longo de uma borda do quadro e, quando a
+    mascara nativa existe, ter suporte do contorno nela — perto de um
+    canto a aresta pode caber em duas bordas e basta uma ser suportada.
+    """
+    p, q = quad[u % 4], quad[v % 4]
+    sides = _edge_border_sides(p, q, border_gap, width, height)
+    return bool(sides) and (
+        mask is None
+        or any(_mask_supports_cut(mask, side, p, q, scale_x, scale_y) for side in sides)
+    )
+
+
 def fit_plausible(corners, frame_shape, mask=None, scale_x=1.0, scale_y=1.0):
     """True se o quadrilátero passa na guarda de plausibilidade.
 
@@ -124,27 +139,23 @@ def fit_plausible(corners, frame_shape, mask=None, scale_x=1.0, scale_y=1.0):
         if ratio <= _FIT_OPPOSITE_RATIO_MAX:
             continue
         short = a if edges[a] <= edges[b] else b
-        # Isenta corte de frame: a aresta curta e o proprio corte, ou uma
-        # aresta vizinha inteira na borda — o corte que encurtou o canto
-        # dela. O corte vizinho so vale se o contorno da mascara nativa
-        # alcanca a borda ali: uma aresta de papel comum passando perto
-        # da borda nao isenta um vizinho colapsado.
-        on_border = _edge_border_sides(
-            quad[short], quad[(short + 1) % 4], border_gap, width, height
-        )
-        cut = False
-        if not on_border and mask is not None:
-            for u, v in ((short - 1, short), (short + 1, short + 2)):
-                p, q = quad[u % 4], quad[v % 4]
-                # Perto de um canto a aresta pode caber em duas bordas:
-                # vale o recorte se a mascara suporta qualquer uma.
-                if any(
-                    _mask_supports_cut(mask, side, p, q, scale_x, scale_y)
-                    for side in _edge_border_sides(p, q, border_gap, width, height)
-                ):
-                    cut = True
-                    break
-        if not (on_border or cut):
+        other = b if short == a else a
+        # Isenta o par quando uma aresta dele e corte de frame — o
+        # comprimento e decidido pela borda da imagem, nao pela pagina:
+        # a curta pode ser o corte, a longa pode ser o corte (a curta e
+        # entao a aresta distante real, interior), ou um vizinho da
+        # curta e o corte que comeu o canto dela. Com mascara disponivel
+        # o corte precisa de suporte no contorno nativo: aresta de papel
+        # passando perto da borda nao isenta um colapsado.
+        if not any(
+            _frame_cut(quad, u, v, border_gap, width, height, mask, scale_x, scale_y)
+            for u, v in (
+                (short, short + 1),
+                (other, other + 1),
+                (short - 1, short),
+                (short + 1, short + 2),
+            )
+        ):
             return False
     margin = _FIT_EXCURSION_DIAG_FRAC * float(np.hypot(width, height))
     return not (
