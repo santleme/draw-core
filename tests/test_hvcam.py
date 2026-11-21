@@ -1890,6 +1890,7 @@ def test_native_retry_when_requested_host_exits_without_stderr(tmp_path):
     class _Capture:
         def __init__(self, _url, *, on_listening, abort_check, **_kw):
             self._host_proc = None
+            self.last_capture_ts_ms = 0
             on_listening()
             self.opened = "--width" not in cmds[-1]
             assert self.opened != abort_check()
@@ -1897,10 +1898,16 @@ def test_native_retry_when_requested_host_exits_without_stderr(tmp_path):
         def isOpened(self):
             return self.opened
 
+        def read(self):
+            assert self.opened
+            self.last_capture_ts_ms += 33
+            return True, _frame()
+
         def release(self):
             hvcam_module._terminate_host_process(self._host_proc)
 
     cap, idx, name = hvcam_module.open_managed_reverse(
+        try_all=True,
         host_exe=fake_exe,
         devices=[(0, "Native-only camera")],
         popen=fake_popen,
@@ -1912,6 +1919,7 @@ def test_native_retry_when_requested_host_exits_without_stderr(tmp_path):
         assert len(cmds) == 2
         assert "--width" in cmds[0]
         assert "--width" not in cmds[1]
+        assert cap.last_capture_ts_ms == 99
     finally:
         if cap is not None:
             cap.release()
