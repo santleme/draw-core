@@ -4,7 +4,7 @@ const DURATION = 2000;
 const SAMPLES = 96;
 const CENTER_Y = 0.4;
 
-type Shard = { x: number; y: number; vx: number; vy: number; size: number; born: number; life: number; color: string };
+type Shard = { x: number; y: number; vx: number; vy: number; size: number; born: number; moved: number; life: number; color: string };
 
 const ease = (t: number) => 1 - (1 - t) ** 2;
 
@@ -88,6 +88,7 @@ export function runBlast(onCovered: () => void): () => void {
         vy,
         size,
         born,
+        moved: now,
         life: 450 + Math.random() * 700,
         color: palette[Math.floor(Math.random() * palette.length)],
       });
@@ -104,7 +105,6 @@ export function runBlast(onCovered: () => void): () => void {
     if (!start) { start = now; last = now; }
     const elapsed = now - start;
     const gap = (now - last) / 1000;
-    const dt = Math.min(0.05, gap); // fisica limitada; a emissao usa o intervalo real
     last = now;
     const t = Math.min(1, elapsed / DURATION);
     const points = Array.from({ length: SAMPLES }, (_, i) => {
@@ -138,8 +138,12 @@ export function runBlast(onCovered: () => void): () => void {
         const s = shards[i];
         const age = elapsed - s.born;
         if (age > s.life) { shards.splice(i, 1); continue; }
-        s.x += s.vx * dt;
-        s.y += s.vy * dt;
+        // fisica limitada por estilhaco: quem nasceu neste frame nao anda
+        // de novo (a posicao ja veio integrada ate `now`)
+        const step = Math.min(0.05, (elapsed - s.moved) / 1000);
+        s.x += s.vx * step;
+        s.y += s.vy * step;
+        s.moved = elapsed;
         ctx.globalAlpha = 1 - age / s.life;
         ctx.fillStyle = s.color;
         ctx.fillRect(Math.round(s.x / 2) * 2, Math.round(s.y / 2) * 2, s.size, s.size);
