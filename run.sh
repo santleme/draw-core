@@ -54,8 +54,15 @@ assert _gui_backend_compiled(), "headless opencv"
 try:
     import mediapipe
 except ImportError:
-    import sys, os
-    if not os.path.exists(os.path.join(sys.prefix, ".no_hand")):
+    import sys, time
+    from pathlib import Path
+
+    # Evita baixar dependencias a cada abertura em plataformas sem MediaPipe.
+    try:
+        fallback_age = time.time() - (Path(sys.prefix) / ".no_hand").stat().st_mtime
+    except FileNotFoundError:
+        sys.exit(1)
+    if not 0 <= fallback_age < 24 * 60 * 60:
         sys.exit(1)
 ' >/dev/null 2>&1
 }
@@ -63,9 +70,12 @@ except ImportError:
 if ! _venv_ready; then
     echo "Preparando ambiente do Draw (primeira execucao)..."
     if command -v uv >/dev/null 2>&1; then
-        UV_PROJECT_ENVIRONMENT="$VENV_DIR" uv sync --extra gui --extra hand || {
-            UV_PROJECT_ENVIRONMENT="$VENV_DIR" uv sync --extra gui && touch "$VENV_DIR/.no_hand"
-        }
+        if UV_PROJECT_ENVIRONMENT="$VENV_DIR" uv sync --extra gui --extra hand; then
+            rm -f "$VENV_DIR/.no_hand"
+        else
+            UV_PROJECT_ENVIRONMENT="$VENV_DIR" uv sync --extra gui || exit $?
+            touch "$VENV_DIR/.no_hand"
+        fi
         _resolve_venv_paths
         if ! _venv_ready; then
             uv pip uninstall --python "$VENV_PYTHON" opencv-python opencv-python-headless opencv-contrib-python opencv-contrib-python-headless >/dev/null 2>&1 || true
@@ -75,9 +85,12 @@ if ! _venv_ready; then
         python3 -m venv "$VENV_DIR"
         _resolve_venv_paths
         "$VENV_PYTHON" -m pip install --upgrade pip
-        "$VENV_PYTHON" -m pip install -e ".[gui,hand]" || {
-            "$VENV_PYTHON" -m pip install -e ".[gui]" && touch "$VENV_DIR/.no_hand"
-        }
+        if "$VENV_PYTHON" -m pip install -e ".[gui,hand]"; then
+            rm -f "$VENV_DIR/.no_hand"
+        else
+            "$VENV_PYTHON" -m pip install -e ".[gui]" || exit $?
+            touch "$VENV_DIR/.no_hand"
+        fi
         if ! _venv_ready; then
             "$VENV_PYTHON" -m pip uninstall -y opencv-python opencv-python-headless opencv-contrib-python opencv-contrib-python-headless >/dev/null 2>&1 || true
             "$VENV_PYTHON" -m pip install --force-reinstall "opencv-contrib-python>=4.8,<5.1"

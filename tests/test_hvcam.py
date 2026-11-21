@@ -1075,9 +1075,63 @@ def test_confirm_stream_alive_bounds_blocking_backend():
     assert all(t < 0.05 for t in reads)
 
 
-def test_open_managed_reverse_surfaces_host_stderr_on_abort(tmp_path):
-    import io
+def test_confirm_stream_alive_does_not_read_at_deadline():
+    now = 0.0
+    reads = []
 
+    def sleep(delay):
+        nonlocal now
+        now += delay
+
+    class Capture:
+        def read(self):
+            reads.append(now)
+            return False, None
+
+    assert not camera_module._confirm_stream_alive(
+        Capture(), window_s=0.125, retry_s=0.25, now=lambda: now, sleep=sleep
+    )
+    assert now == 0.125
+    assert reads == [0.0]
+
+
+def test_open_managed_reverse_allows_host_to_write_large_stderr(tmp_path):
+    import subprocess
+    import sys
+
+    procs = []
+
+    def popen(_cmd, **kwargs):
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import sys; sys.stderr.buffer.write(b'x' * 2**20)"],
+            **kwargs,
+        )
+        procs.append(proc)
+        return proc
+
+    class ConnectedCapture:
+        def __init__(self, _url, **kwargs):
+            kwargs["on_listening"]()
+
+        def isOpened(self):
+            return True
+
+        def release(self):
+            hvcam_module._terminate_host_process(self._host_proc)
+
+    cap, _, _ = hvcam_module.open_managed_reverse(
+        host_exe=tmp_path / "hvcam-host.exe",
+        devices=[],
+        popen=popen,
+        capture_cls=ConnectedCapture,
+    )
+    try:
+        assert procs[0].wait(timeout=3) == 0
+    finally:
+        cap.release()
+
+
+def test_open_managed_reverse_surfaces_host_stderr_on_abort(tmp_path):
     fake_exe = tmp_path / "hvcam-host.exe"
     fake_exe.write_bytes(b"MZ")
 
@@ -1087,7 +1141,7 @@ def test_open_managed_reverse_surfaces_host_stderr_on_abort(tmp_path):
             self._rc = 1
             self.stdout = None
             self.stdin = None
-            self.stderr = io.StringIO("Failed to open camera: 0x80070490\n")
+            self.stderr = None
 
         def poll(self):
             return self._rc
@@ -1101,7 +1155,8 @@ def test_open_managed_reverse_surfaces_host_stderr_on_abort(tmp_path):
         def kill(self):
             pass
 
-    def fake_popen(cmd, **_kw):
+    def fake_popen(cmd, *, stderr, **_kw):
+        stderr.write(b"x" * 32_768 + b"\nFailed to open camera: 0x80070490\n")
         return _FailingProc(cmd)
 
     class _AbortedCap:
@@ -1127,7 +1182,8 @@ def test_open_managed_reverse_surfaces_host_stderr_on_abort(tmp_path):
             popen=fake_popen,
             capture_cls=_AbortedCap,
         )
-    assert "0x80070490" in str(exc_info.value)
+    assert str(exc_info.value).endswith("Failed to open camera: 0x80070490")
+    assert len(str(exc_info.value)) <= 16_384
 
 
 def test_try_other_local_cameras_skips_camera_that_stalls_permanently(monkeypatch):

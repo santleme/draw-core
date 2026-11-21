@@ -1064,66 +1064,53 @@ def open_managed_reverse(
     last_host_error = None
     for dev_idx, dev_name in order:
         proc_box = [None]
-        stderr_box = [""]
+        # A file lets the host keep logging after connect without a pipe reader.
+        # The child keeps its own descriptor until it exits.
+        with tempfile.TemporaryFile() as stderr_log:
 
-        def _spawn(idx=dev_idx, box=proc_box):
-            proc = popen(
-                [
-                    str(exe),
-                    "--reverse",
-                    "--port",
-                    str(int(port)),
-                    "--device",
-                    str(idx),
-                ],
-                cwd=run_cwd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-            )
-            _MANAGED_HOST_PROCS.add(proc)
-            box[0] = proc
-
-        def _aborted(box=proc_box, sbox=stderr_box):
-            proc = box[0]
-            if proc is not None and proc.poll() is not None:
-                if (
-                    proc.stderr is not None
-                    and hasattr(proc.stderr, "read")
-                    and not sbox[0]
-                ):
-                    try:
-                        raw = proc.stderr.read()
-                        if isinstance(raw, bytes):
-                            sbox[0] = raw.decode("utf-8", errors="replace")
-                        elif isinstance(raw, str):
-                            sbox[0] = raw
-                    except Exception:
-                        pass
-                return True
-            return False
-
-        cap = cls(
-            url,
-            timeout_ms=timeout_ms,
-            connect_timeout_ms=connect_timeout_ms,
-            on_listening=_spawn,
-            abort_check=_aborted,
-        )
-        if cap.isOpened():
-            cap._host_proc = proc_box[0]
-            if not try_all or _probe_hvcam_frame(cap):
-                return cap, dev_idx, dev_name
-            cap.release()
-            continue
-        err_msg = stderr_box[0].strip()
-        if err_msg:
-            last_host_error = err_msg
-            if hasattr(cap, "open_error"):
-                cap.open_error = OSError(
-                    f"{cap.open_error or 'hvcam-host encerrou'}: {err_msg}"
+            def _spawn(idx=dev_idx, box=proc_box):
+                proc = popen(
+                    [
+                        str(exe),
+                        "--reverse",
+                        "--port",
+                        str(int(port)),
+                        "--device",
+                        str(idx),
+                    ],
+                    cwd=run_cwd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=stderr_log,
                 )
-        cap.release()
-        _terminate_host_process(proc_box[0])
+                box[0] = proc
+                _MANAGED_HOST_PROCS.add(proc)
+
+            def _aborted(box=proc_box):
+                proc = box[0]
+                return proc is not None and proc.poll() is not None
+
+            try:
+                cap = cls(
+                    url,
+                    timeout_ms=timeout_ms,
+                    connect_timeout_ms=connect_timeout_ms,
+                    on_listening=_spawn,
+                    abort_check=_aborted,
+                )
+                if cap.isOpened():
+                    if not try_all or _probe_hvcam_frame(cap):
+                        cap._host_proc = proc_box[0]
+                        proc_box[0] = None
+                        return cap, dev_idx, dev_name
+                elif _aborted():
+                    size = stderr_log.seek(0, os.SEEK_END)
+                    stderr_log.seek(max(0, size - 16_384))
+                    err_msg = stderr_log.read(16_384).decode("utf-8", errors="replace")
+                    if err_msg.strip():
+                        last_host_error = err_msg.strip()
+                cap.release()
+            finally:
+                _terminate_host_process(proc_box[0])
     if last_host_error:
         raise RuntimeError(last_host_error)
     return None, None, None
