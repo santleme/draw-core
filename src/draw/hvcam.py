@@ -1698,7 +1698,10 @@ def open_managed_reverse(
     if fps is not None:
         base_mode.extend(["--fps", str(int(fps))])
 
+    connected_box = [False]
+
     def _attempt(dev_idx, extra_args):
+        connected_box[0] = False
         proc_box = [None]
         host_error = None
         # A file lets the host keep logging after connect without a pipe reader.
@@ -1736,6 +1739,7 @@ def open_managed_reverse(
                     abort_check=_aborted,
                 )
                 if cap.isOpened():
+                    connected_box[0] = True
                     needs_probe = try_all or (
                         capture_cls is None and hasattr(cap, "read")
                     )
@@ -1786,6 +1790,7 @@ def open_managed_reverse(
     last_host_error = None
     for dev_idx, dev_name in order:
         cap, mjpeg_failed, measured_fps, err = _attempt(dev_idx, base_mode)
+        requested_connected = connected_box[0]
         if cap is not None:
             # Se 720p reduziu o FPS abaixo de 75% do alvo (ex.: camera so oferece
             # 720p@15fps e 1080p@30fps), testa o modo nativo (rate-first) e fica
@@ -1852,10 +1857,11 @@ def open_managed_reverse(
                 return raw_cap, dev_idx, dev_name
             if raw_err:
                 last_host_error = raw_err
-        if base_mode:
+        if base_mode and (requested_connected or err):
             # O modo pedido (720p) nao abriu ou nao deu video utilizavel: tenta o
             # mesmo dispositivo sem sobrescritas, como antes do 720p, antes de
-            # passar para outra camera.
+            # passar para outra camera. Sem conexao nem erro do host (so
+            # timeout) nao repete: evita somar outro timeout por camera.
             nat_cap, nat_mjpeg, _nf, nat_err = _attempt(dev_idx, [])
             if nat_cap is not None:
                 return nat_cap, dev_idx, dev_name

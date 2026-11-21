@@ -1840,3 +1840,36 @@ def test_unmeasured_native_stream_does_not_replace_working_720p(tmp_path):
     )
     assert cap is not None
     assert "--width" in cap._cmd
+
+
+def test_no_native_retry_when_requested_mode_never_connects(tmp_path):
+    """Sem conexao nem erro do host (so timeout), nao gasta outro timeout com
+    uma tentativa nativa por camera."""
+    fake_exe = tmp_path / "hvcam-host.exe"
+    fake_exe.write_bytes(b"MZ")
+    cmds = []
+
+    def fake_popen(cmd, **_kw):
+        cmds.append(list(cmd))
+        return _ScriptedProc(cmd)
+
+    class _NeverConnects:
+        def __init__(self, url, **kw):
+            kw["on_listening"]()
+
+        def isOpened(self):
+            return False
+
+        def release(self):
+            pass
+
+    cap, _idx, _name = hvcam_module.open_managed_reverse(
+        device=0,
+        try_all=True,
+        host_exe=fake_exe,
+        devices=[(0, "Silent Cam")],
+        popen=fake_popen,
+        capture_cls=_NeverConnects,
+    )
+    assert cap is None
+    assert len(cmds) == 1
