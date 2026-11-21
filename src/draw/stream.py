@@ -448,8 +448,15 @@ class InkStreamPublisher:
                 captured_at_us,
                 anchor,
                 force_full,
+                self._paper_mm,
             )
             self._cond.notify()
+
+    def set_paper_mm(self, paper_mm):
+        """Atualiza as dimensoes fisicas (mm) para as proximas publicacoes."""
+        updated = (float(paper_mm[0]), float(paper_mm[1]))
+        with self._cond:
+            self._paper_mm = updated
 
     def close(self):
         """Encerra; a última publicação pendente ainda é despachada."""
@@ -574,10 +581,15 @@ class InkStreamPublisher:
                 self._prune_dead()
                 if not self._sinks_wanting_full(last):
                     continue
-                item = (*last[:6], False)  # quem chegou recebe FULL de qualquer jeito
+                item = (
+                    *last[:6],
+                    False,
+                    last[7],
+                )  # quem chegou recebe FULL de qualquer jeito
             last = item
+            self._dispatch_paper_mm = item[7]
             try:
-                self._dispatch(*item)
+                self._dispatch(*item[:7])
             except Exception as error:  # noqa: BLE001 - o envio nunca morre
                 self._log(f"Stream de tinta: falha ao despachar ({error!r}).")
             if closed:
@@ -590,8 +602,16 @@ class InkStreamPublisher:
             return any(sink.mask is None for sink in self._sinks)
 
     def _dispatch(
-        self, generation, ink_version, ts_us, mask, captured_at_us, anchor, force_full
+        self,
+        generation,
+        ink_version,
+        ts_us,
+        mask,
+        captured_at_us,
+        anchor,
+        force_full,
     ):
+        paper_mm = getattr(self, "_dispatch_paper_mm", self._paper_mm)
         with self._sinks_lock:
             sinks = list(self._sinks)
         dead = []
@@ -606,6 +626,7 @@ class InkStreamPublisher:
                     captured_at_us,
                     anchor,
                     force_full,
+                    paper_mm,
                 )
                 if data:
                     sink.write(data)
@@ -628,6 +649,7 @@ class InkStreamPublisher:
         captured_at_us=None,
         anchor=None,
         force_full=False,
+        paper_mm=None,
     ):
         full = (
             force_full
@@ -648,7 +670,7 @@ class InkStreamPublisher:
                 ink_version,
                 ts_us,
                 mask,
-                self._paper_mm,
+                self._paper_mm if paper_mm is None else paper_mm,
                 captured_at_us,
                 anchor,
             )

@@ -1174,12 +1174,12 @@ def run(
     helper_token_file=None,
     fullscreen=False,
     rotation=0,
-    auto_rotate=False,
-    auto_orientation=False,
     pipeline_config=None,
     stream_port=None,
     stream_token_file=None,
     stream_record=None,
+    auto_rotate=False,
+    auto_orientation=False,
 ):
     _apply_opencv_thread_cap()
     _require_gui_backend()
@@ -1479,6 +1479,7 @@ def run(
         ui_signature = None
 
         _camera_menu["current"] = parse_source(source)
+        base_rotation = rotation
         seq_offset = 0
         reset_source = False
         auto_rotator = (
@@ -1497,8 +1498,10 @@ def run(
 
             def work():
                 try:
+                    # Nova fonte abre com a rotacao base da CLI (nao herda
+                    # o flip automatico inferido para a camera anterior).
                     candidate = _open_ready_source(
-                        target, helper_token_file, rotation=rotation
+                        target, helper_token_file, rotation=base_rotation
                     )
                     switch["result"] = (target, candidate, None)
                 except Exception as error:
@@ -1508,7 +1511,7 @@ def run(
             switch["thread"].start()
 
         def service_camera_switch():
-            nonlocal frame_source, last_seq, seq_offset, reset_source
+            nonlocal frame_source, last_seq, seq_offset, reset_source, rotation
             target = _camera_menu["request"]
             if target is not None and switch["thread"] is None:
                 _camera_menu["request"] = None
@@ -1528,6 +1531,11 @@ def run(
             old.stop(force=False)
             seq_offset += last_seq
             last_seq = 0
+            rotation = base_rotation
+            if auto_rotator is not None:
+                auto_rotator.reset()
+            if auto_orienter is not None:
+                auto_orienter.reset_streak()
             reset_source = True
             _camera_menu["current"] = target
             print(f"Camera trocada para {_camera_label(target)}.")
@@ -1666,9 +1674,11 @@ def run(
                     and sheet_present
                     and tracker.corners is not None
                 ):
-                    new_orient = auto_orienter.observe(tracker.corners)
+                    new_orient = auto_orienter.observe(tracker.corners, frame.shape)
                     if new_orient is not None:
                         config.apply_format(config.PAPER_FORMAT, new_orient)
+                        if ink_stream is not None:
+                            ink_stream.set_paper_mm(config.paper_mm())
                         reset_source = True
                         print(
                             "Orientacao da folha ajustada automaticamente para "
@@ -1918,7 +1928,8 @@ def main():
         default=None,
         help=(
             "gira o quadro da camera na captura (180 = webcam invertida na "
-            "mesa); sem a flag, detecta e gira automaticamente pela mao"
+            "mesa); sem a flag, detecta e gira automaticamente quando a "
+            "mascara semantica de mao esta disponivel"
         ),
     )
     parser.add_argument(

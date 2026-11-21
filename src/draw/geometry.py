@@ -109,41 +109,59 @@ def _largest_contour(mask_bin):
 def _is_two_page_spread(contour_a, contour_b):
     """True quando dois contornos grandes formam um caderno aberto (2 paginas).
 
-    Quando a lombada ou espiral divide a mascara de papel em duas metades
-    adjacentes e alinhadas de tamanho semelhante, unir as duas evita fechar
-    o quadrilatero em apenas uma pagina do caderno.
+    Projeta os dois contornos no referencial proprio da pagina maior
+    (eixos do `minAreaRect`) para reconhecer cadernos girados na mesa,
+    onde caixas alinhadas aos eixos da camera se sobrepoem falsamente.
     """
     area_a = float(cv2.contourArea(contour_a))
     area_b = float(cv2.contourArea(contour_b))
     if area_a <= 0 or area_b < 0.35 * area_a:
         return False
-    x1, y1, w1, h1 = cv2.boundingRect(contour_a)
-    x2, y2, w2, h2 = cv2.boundingRect(contour_b)
-    if min(w1, h1, w2, h2) <= 0:
+
+    (_cx, _cy), (rw, rh), angle_deg = cv2.minAreaRect(contour_a)
+    if min(rw, rh) <= 0:
+        return False
+    rad = np.deg2rad(angle_deg)
+    u = np.array([np.cos(rad), np.sin(rad)], dtype=np.float64)
+    v = np.array([-np.sin(rad), np.cos(rad)], dtype=np.float64)
+
+    pts_a = contour_a.reshape(-1, 2).astype(np.float64)
+    pts_b = contour_b.reshape(-1, 2).astype(np.float64)
+    ua, va = pts_a @ u, pts_a @ v
+    ub, vb = pts_b @ u, pts_b @ v
+
+    ua_min, ua_max = float(ua.min()), float(ua.max())
+    va_min, va_max = float(va.min()), float(va.max())
+    ub_min, ub_max = float(ub.min()), float(ub.max())
+    vb_min, vb_max = float(vb.min()), float(vb.max())
+
+    wa, ha = ua_max - ua_min, va_max - va_min
+    wb, hb = ub_max - ub_min, vb_max - vb_min
+    if min(wa, ha, wb, hb) <= 0:
         return False
 
-    # Paginas lado a lado (lombada vertical — caso mais comum).
-    v_overlap = min(y1 + h1, y2 + h2) - max(y1, y2)
-    h_gap = max(x1, x2) - min(x1 + w1, x2 + w2)
+    # Separadas ao longo de u, alinhadas ao longo de v.
+    v_overlap = min(va_max, vb_max) - max(va_min, vb_min)
+    u_gap = max(ua_min, ub_min) - min(ua_max, ub_max)
     if (
-        v_overlap >= 0.55 * min(h1, h2)
-        and min(h1, h2) >= 0.65 * max(h1, h2)
-        and -0.15 * min(w1, w2) <= h_gap <= 0.25 * max(w1, w2)
+        v_overlap >= 0.55 * min(ha, hb)
+        and min(ha, hb) >= 0.65 * max(ha, hb)
+        and -0.15 * min(wa, wb) <= u_gap <= 0.25 * max(wa, wb)
     ):
         return True
 
-    # Paginas empilhadas (lombada horizontal / caderno girado 90°).
-    h_overlap = min(x1 + w1, x2 + w2) - max(x1, x2)
-    v_gap = max(y1, y2) - min(y1 + h1, y2 + h2)
+    # Separadas ao longo de v, alinhadas ao longo de u.
+    u_overlap = min(ua_max, ub_max) - max(ua_min, ub_min)
+    v_gap = max(va_min, vb_min) - min(va_max, vb_max)
     return (
-        h_overlap >= 0.55 * min(w1, w2)
-        and min(w1, w2) >= 0.65 * max(w1, w2)
-        and -0.15 * min(h1, h2) <= v_gap <= 0.25 * max(h1, h2)
+        u_overlap >= 0.55 * min(wa, wb)
+        and min(wa, wb) >= 0.65 * max(wa, wb)
+        and -0.15 * min(ha, hb) <= v_gap <= 0.25 * max(ha, hb)
     )
 
 
 def _sheet_contour(mask_bin):
-    """Contorno da folha: maior contorno ou uniao das 2 paginas do caderno."""
+    """Contorno da folha: maior contorno ou uniao densa das 2 paginas do caderno."""
     contours, _ = cv2.findContours(mask_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     if not contours:
         return None
@@ -151,7 +169,18 @@ def _sheet_contour(mask_bin):
         return contours[0]
     ranked = sorted(contours, key=cv2.contourArea, reverse=True)
     if _is_two_page_spread(ranked[0], ranked[1]):
-        return cv2.convexHull(np.vstack([ranked[0], ranked[1]]))
+        hull = cv2.convexHull(np.vstack([ranked[0], ranked[1]]))
+        # Densifica o contorno do casco desenhando-o preenchido numa mascara:
+        # cv2.convexHull devolve apenas ~4-8 vertices e faria _refit_corners
+        # desistir (<8 pontos/aresta), perdendo o refino e a memoria de arestas.
+        merged_mask = np.zeros(mask_bin.shape[:2], dtype=np.uint8)
+        cv2.drawContours(merged_mask, [hull], -1, 255, cv2.FILLED)
+        dense, _ = cv2.findContours(
+            merged_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE
+        )
+        if dense:
+            return max(dense, key=cv2.contourArea)
+        return hull
     return ranked[0]
 
 

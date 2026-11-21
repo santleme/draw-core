@@ -1,8 +1,9 @@
 """Testes de orientacao automatica (180°, retrato/paisagem) e caderno de 2 paginas."""
 
+import cv2
 import numpy as np
 
-from draw import geometry
+from draw import config, contracts, geometry
 from draw.auto_orient import (
     AutoPageOrientation,
     AutoRotationDetector,
@@ -10,24 +11,45 @@ from draw.auto_orient import (
     quad_aspect_ratio,
 )
 from draw.camera import LatestFrameCapture
+from draw.stream import KIND_FULL, InkCanvas, InkStreamPublisher, records_from_file
 
 
-def test_fit_quad_unites_two_page_open_notebook_split_by_spine():
+def test_fit_quad_unites_two_page_open_notebook_split_by_spine_and_keeps_refit():
     """Caderno aberto com lombada dividindo a mascara em 2 paginas adjacentes
-    deve produzir um unico quadrilatero cobrindo as duas paginas."""
+    deve produzir um unico quadrilatero cobrindo as duas paginas E preservar
+    retas ajustadas (para refino e memoria de arestas)."""
     mask = np.zeros((400, 600), dtype=np.uint8)
-    # Pagina esquerda e pagina direita separadas por uma lombada escura de 16 px.
     mask[80:320, 70:292] = 255
     mask[80:320, 308:530] = 255
 
-    quad = geometry.fit_quad(mask)
+    quad, lines, trusted = geometry._fit_quad_impl(mask, None, None)
     assert quad is not None
+    assert lines is not None
+    assert trusted is not None and all(trusted)
     xs = quad[:, 0]
     ys = quad[:, 1]
     assert xs.min() <= 80.0
     assert xs.max() >= 520.0
     assert ys.min() <= 90.0
     assert ys.max() >= 310.0
+
+
+def test_fit_quad_unites_angled_two_page_open_notebook():
+    """Caderno aberto girado 15° na mesa ainda precisa unir as duas paginas."""
+    mask = np.zeros((500, 700), dtype=np.uint8)
+    mask[120:380, 120:340] = 255
+    mask[120:380, 354:574] = 255
+    rot = cv2.getRotationMatrix2D((350.0, 250.0), 15.0, 1.0)
+    rotated = cv2.warpAffine(mask, rot, (700, 500), flags=cv2.INTER_NEAREST)
+
+    quad = geometry.fit_quad(rotated)
+    assert quad is not None
+    # Largura combinada ~454 px; uma unica pagina teria ~220 px.
+    width = 0.5 * (
+        float(np.linalg.norm(quad[1] - quad[0]))
+        + float(np.linalg.norm(quad[2] - quad[3]))
+    )
+    assert width >= 400.0
 
 
 def test_fit_quad_ignores_small_stray_object_next_to_single_page():
@@ -41,7 +63,7 @@ def test_fit_quad_ignores_small_stray_object_next_to_single_page():
     assert quad[:, 0].max() <= 330.0
 
 
-def test_hand_mask_orientation_vote_detects_top_vs_bottom_entry():
+def test_hand_mask_orientation_vote_requires_top_or_bottom_contact():
     top_entry = np.zeros((200, 300), dtype=np.uint8)
     top_entry[0:90, 110:190] = 255
     assert hand_mask_orientation_vote(top_entry) == "inverted"
@@ -50,52 +72,72 @@ def test_hand_mask_orientation_vote_detects_top_vs_bottom_entry():
     bottom_entry[110:200, 110:190] = 255
     assert hand_mask_orientation_vote(bottom_entry) == "upright"
 
+    # Mao entrando pela borda ESQUERDA perto do topo nao toca a borda superior.
+    side_near_top = np.zeros((720, 1280), dtype=np.uint8)
+    side_near_top[55:195, 0:180] = 255
+    assert hand_mask_orientation_vote(side_near_top) is None
+
     floating_center = np.zeros((200, 300), dtype=np.uint8)
     floating_center[70:130, 110:190] = 255
     assert hand_mask_orientation_vote(floating_center) is None
 
 
-def test_auto_rotation_detector_confirms_once_and_does_not_oscillate():
+def test_auto_rotation_detector_confirms_once_and_resets_on_camera_switch():
     det = AutoRotationDetector(confirm_votes=3)
     assert det.observe_vote("inverted") is False
     assert det.observe_vote("inverted") is False
     assert det.observe_vote("upright") is False  # reseta sequencia
     assert det.observe_vote("inverted") is False
-    assert det.observe_vote(None) is False  # ambiguo nao reseta nem conta
+    assert det.observe_vote(None) is False
     assert det.observe_vote("inverted") is False
-    assert det.observe_vote("inverted") is True  # 3 votos seguidos -> flip!
+    assert det.observe_vote("inverted") is True
     assert det.flipped is True
-    # Nao oscila mais depois de virar.
     for _ in range(5):
         assert det.observe_vote("inverted") is False
 
+    det.reset()
+    assert det.flipped is False
+    assert det.observe_vote("inverted") is False
 
-def test_auto_page_orientation_hysteresis_portrait_and_landscape():
+
+def test_auto_page_orientation_hysteresis_and_oblique_portrait_guard():
     orient = AutoPageOrientation(initial="retrato", confirm_frames=3)
-    wide = np.array([[0, 0], [400, 0], [400, 250], [0, 250]], dtype=np.float32)
-    tall = np.array([[0, 0], [250, 0], [250, 400], [0, 400]], dtype=np.float32)
-    square = np.array([[0, 0], [300, 0], [300, 300], [0, 300]], dtype=np.float32)
+    frame_shape = (720, 1280, 3)
 
-    assert quad_aspect_ratio(wide) > 1.5
-    assert orient.observe(square) is None
-    assert orient.observe(wide) is None
-    assert orient.observe(wide) is None
-    assert orient.observe(wide) == "paisagem"
+    # Folha A4 em pe vista sob camera obliqua: razao projetada em pixels e ~1,23,
+    # mas a razao corrigida de perspectiva continua retrato (~0,71).
+    oblique_portrait = np.array(
+        [[451, 234], [782, 228], [781, 454], [542, 451]], dtype=np.float32
+    )
+    for _ in range(6):
+        assert orient.observe(oblique_portrait, frame_shape) is None
+    assert orient.current == "retrato"
+
+    # Caderno aberto / folha paisagem frontal genuina -> troca para paisagem.
+    wide = np.array([[240, 160], [1040, 160], [1040, 560], [240, 560]], np.float32)
+    tall = np.array([[440, 60], [840, 60], [840, 660], [440, 660]], np.float32)
+    square = np.array([[440, 160], [840, 160], [840, 560], [440, 560]], np.float32)
+
+    assert quad_aspect_ratio(wide, frame_shape) > 1.5
+    assert orient.observe(square, frame_shape) is None
+    assert orient.observe(wide, frame_shape) is None
+    assert orient.observe(wide, frame_shape) is None
+    assert orient.observe(wide, frame_shape) == "paisagem"
     assert orient.current == "paisagem"
 
     # Zona morta nao volta para retrato.
     for _ in range(5):
-        assert orient.observe(square) is None
+        assert orient.observe(square, frame_shape) is None
     assert orient.current == "paisagem"
 
     # Folha em pe sustentada volta para retrato.
-    assert orient.observe(tall) is None
-    assert orient.observe(tall) is None
-    assert orient.observe(tall) == "retrato"
+    assert orient.observe(tall, frame_shape) is None
+    assert orient.observe(tall, frame_shape) is None
+    assert orient.observe(tall, frame_shape) == "retrato"
     assert orient.current == "retrato"
 
 
-def test_latest_frame_capture_set_rotation_flips_live():
+def test_latest_frame_capture_set_rotation_guarantees_next_packet_flipped():
     class _FixedCam:
         def __init__(self):
             self.frame = np.full((40, 60, 3), 240, dtype=np.uint8)
@@ -114,16 +156,47 @@ def test_latest_frame_capture_set_rotation_flips_live():
         assert p1.image[2:8, 2:8].mean() < 50
         src.set_rotation(180)
         assert src.rotation == 180
-        # Pega um quadro posterior a troca de rotacao.
-        seq = p1.sequence
-        flipped = False
-        for _ in range(20):
-            p = src.wait_next(seq, timeout=1.0)
-            assert p is not None
-            seq = p.sequence
-            if p.image[32:38, 52:58].mean() < 50:
-                flipped = True
-                break
-        assert flipped
+        # O PRIMEIRO pacote retornado apos set_rotation(180) ja deve vir girado.
+        p2 = src.wait_next(p1.sequence, timeout=2.0)
+        assert p2 is not None
+        assert p2.image[32:38, 52:58].mean() < 50
     finally:
         src.stop()
+
+
+def test_ink_stream_publisher_updates_paper_mm_on_orientation_change(tmp_path):
+    import time
+
+    rec = tmp_path / "orient.dral"
+    pub = InkStreamPublisher(
+        port=None,
+        paper_mm=config.paper_mm("a4", "retrato"),
+        record_path=str(rec),
+    )
+    try:
+        portrait_mask = np.zeros((120, 85), dtype=np.uint8)
+        portrait_mask[10:20, 10:20] = 255
+        pub.publish(contracts.InkPublication(1, 1, portrait_mask))
+        # Aguarda o registro retrato ser gravado antes de publicar a proxima geracao.
+        deadline = time.monotonic() + 2.0
+        while rec.stat().st_size == 0 and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        # Simula transicao para paisagem antes da nova geracao.
+        pub.set_paper_mm(config.paper_mm("a4", "paisagem"))
+        landscape_mask = np.zeros((85, 120), dtype=np.uint8)
+        landscape_mask[10:20, 10:20] = 255
+        pub.publish(contracts.InkPublication(2, 1, landscape_mask))
+    finally:
+        pub.close()
+
+    records = list(records_from_file(rec))
+    fulls = [r for r in records if r.kind == KIND_FULL]
+    assert len(fulls) >= 2
+    canvas = InkCanvas()
+    canvas.apply(fulls[0])
+    assert (fulls[0].width, fulls[0].height) == (85, 120)
+    assert canvas.paper_mm == (210.0, 297.0)
+    canvas.apply(fulls[-1])
+    assert (fulls[-1].width, fulls[-1].height) == (120, 85)
+    assert canvas.paper_mm == (297.0, 210.0)

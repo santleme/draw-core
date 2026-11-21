@@ -85,6 +85,7 @@ class LatestFrameCapture:
         # deteccao, quad, warp, tinta e o 's' de salvar enxergam o
         # mesmo espaco ja orientado (nada de coordenada desalinhada).
         self._rotation = rotation
+        self._frame_rotation = rotation
         self._condition = threading.Condition()
         self._thread = threading.Thread(
             target=self._pump, name="draw-capture", daemon=True
@@ -173,6 +174,7 @@ class LatestFrameCapture:
                         self._dropped += 1
                     self._seq += 1
                     self._frame = frame
+                    self._frame_rotation = rotation
                     self._captured_at = captured_at
                     self._source_frame_id = source_frame_id
                     self._source_ts_ms = source_ts_ms
@@ -199,10 +201,14 @@ class LatestFrameCapture:
         """
         with self._condition:
             self._condition.wait_for(
-                lambda: self._seq > after_seq or self._dead or self._stopped,
+                lambda: (
+                    (self._seq > after_seq and self._frame_rotation == self._rotation)
+                    or self._dead
+                    or self._stopped
+                ),
                 timeout=timeout,
             )
-            if self._seq > after_seq:
+            if self._seq > after_seq and self._frame_rotation == self._rotation:
                 self._taken_seq = self._seq
                 return FramePacket(
                     image=self._frame,
