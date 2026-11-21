@@ -100,6 +100,9 @@ class PipelineConfig:
     skip_stale: bool = True
     seg_hand_occlusion: bool = True
     coverage_iou_floor: float = 0.2
+    # Liga junto com o ink_divnorm da PageCleanWorker: os dois lados
+    # precisam bater — ligado num lado só entrega warp sem
+    # normalização ao modelo (ver a docstring acima).
     ink_divnorm: bool = False
     follow_move: bool = True
     ink_auto_gain: bool = True

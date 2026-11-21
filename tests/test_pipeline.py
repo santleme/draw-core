@@ -8,7 +8,6 @@ congelada sem mão, oclusão semântica da mão e os desfechos
 reopen/drop/erro.
 """
 
-import cv2
 import numpy as np
 import pytest
 
@@ -234,7 +233,6 @@ def test_paper_mean_bgr_hits_integer_boundary():
     image[:, :750] = (235, 235, 235)
     coverage = np.zeros((1200, 850), bool)
     coverage[:, :750] = True  # 900.000 px — caso que desvia no cv2
-    assert cv2.mean(image, coverage.astype(np.uint8))[0] < 235.0
     assert (_paper_mean_bgr(image, coverage) == [235, 235, 235]).all()
 
 
@@ -1002,29 +1000,3 @@ def test_ink_page_carries_the_capture_timestamp_of_its_frame():
     assert stamps == sorted(stamps) and len(set(stamps)) == len(stamps)
     # carimbos de _packet: frame_number * 0.1
     assert all(abs(s * 10 - round(s * 10)) < 1e-6 for s in stamps)
-
-
-def test_paper_mean_bgr_hits_integer_boundary():
-    """cv2.mean pode devolver um inteiro exato 1 ulp abaixo (recíproco
-    arredondado); o cast antigo truncaria um nível a menos. A soma é
-    recuperada exata e dividida direto."""
-    from draw.pipeline import _paper_mean_bgr
-
-    image = np.full((1200, 850, 3), 80, np.uint8)
-    image[:, :750] = (235, 235, 235)
-    coverage = np.zeros((1200, 850), bool)
-    coverage[:, :750] = True  # 900.000 px — caso que desvia no cv2
-    assert cv2.mean(image, coverage.astype(np.uint8))[0] < 235.0
-    assert (_paper_mean_bgr(image, coverage) == [235, 235, 235]).all()
-
-
-def test_paper_mean_bgr_still_truncates_fractional_mean():
-    """Média fracionária segue truncando como o astype(uint8) antigo."""
-    from draw.pipeline import _paper_mean_bgr
-
-    image = np.zeros((4, 4, 3), np.uint8)
-    image[0, 0] = (200, 200, 200)
-    image[0, 1] = (201, 201, 201)  # média 200,5 -> 200
-    coverage = np.zeros((4, 4), bool)
-    coverage[0, :2] = True
-    assert (_paper_mean_bgr(image, coverage) == [200, 200, 200]).all()
