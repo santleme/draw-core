@@ -241,6 +241,25 @@ def test_fit_implausivel_reporta_implausible():
     assert reject["area_ratio"] > geometry._MIN_CONTOUR_AREA_RATIO
 
 
+def test_rejeicao_de_suporte_reporta_unsupported():
+    """A guarda de fill (#107) recusa quad sem apoio da máscara —
+    o veto sobe como motivo próprio no rastro (issue #105)."""
+    det = perception.NeuralSheetDetector("dummy.onnx", verify=None)
+    # Folha na metade inferior + mancha conectada de "falso papel"
+    # acima (o padrão s3_geometria das capturas oblíquas).
+    mask = np.zeros((480, 640), np.uint8)
+    mask[240:479, 60:600] = 255
+    cv2.fillConvexPoly(
+        mask,
+        np.array([[30, 20], [300, 90], [380, 200], [200, 260], [20, 180]]),
+        255,
+    )
+    assert det._fit(mask, None) is None
+    reject = det.last_fit_reject
+    assert reject["reason"] == "unsupported"
+    assert reject["area_ratio"] >= geometry._MIN_CONTOUR_AREA_RATIO
+
+
 def test_presenca_baixa_registra_area_da_mascara():
     """No modelo só-segmentação o logit ausente é fixo: a razão de
     área é o que separa folha pequena sob o piso de quadro vazio."""
@@ -281,6 +300,7 @@ def main():
     test_fit_contorno_minusculo_reporta_min_area()
     test_fit_com_folha_fecha_e_limpa_o_reject()
     test_fit_implausivel_reporta_implausible()
+    test_rejeicao_de_suporte_reporta_unsupported()
     test_presenca_baixa_registra_area_da_mascara()
     print("TESTES DE GUARDAS NEURAIS OK.")
     return 0
