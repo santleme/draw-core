@@ -29,6 +29,27 @@ _HAND_SIDE_DOMINANCE_EXACT = 2.0
 _HAND_SIDE_DOMINANCE_SLACK = 5.0
 
 
+def _side_entry_at_band(side_rows, band):
+    """True se um intervalo contiguo de contato lateral alcanca `band`.
+
+    So um intervalo de linhas contiguas tao alto quanto a propria faixa
+    conta como contato lateral real: um toque breve que entra na faixa
+    nao e entrada pela lateral e segue para a checagem de dominancia.
+    """
+    min_run = band.stop - band.start
+    idx = np.flatnonzero(side_rows)
+    if idx.size == 0:
+        return False
+    for run in np.split(idx, np.flatnonzero(np.diff(idx) > 1) + 1):
+        if (
+            run[-1] - run[0] + 1 >= min_run
+            and run[-1] >= band.start
+            and run[0] < band.stop
+        ):
+            return True
+    return False
+
+
 def hand_mask_orientation_vote(hand_mask):
     """Infere se a mao entra por baixo ('upright') ou por cima ('inverted').
 
@@ -80,10 +101,12 @@ def _hand_orientation_evidence(hand_mask):
             return True
         rows = slice(0, slack) if is_top else slice(h - slack, h)
         exact = bool(comp[0 if is_top else h - 1, :].any())
-        if not exact and bool(side_rows[rows].any()):
-            # Folga sem toque exato e a propria evidencia de topo/base chega a
-            # lateral: e entrada lateral, nao entrada pelo topo/base. Toque
-            # lateral abaixo da folga passa pela checagem de dominancia.
+        if not exact and _side_entry_at_band(
+            side_rows, slice(0, tol) if is_top else slice(h - tol, h)
+        ):
+            # Folga sem toque exato e contato lateral continuo alcancando
+            # a faixa da borda: e entrada lateral, nao entrada pelo
+            # topo/base. Toque lateral breve segue para a dominancia.
             return False
         strength = int(np.count_nonzero(comp[rows, :].any(axis=0)))
         need = _HAND_SIDE_DOMINANCE_EXACT if exact else _HAND_SIDE_DOMINANCE_SLACK

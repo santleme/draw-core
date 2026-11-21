@@ -800,6 +800,19 @@ def test_hand_vote_top_entry_with_brief_side_brush_inside_contact_band_votes():
     assert hand_mask_orientation_vote(mask[:, ::-1].copy()) == "inverted"
 
 
+def test_hand_vote_abstains_on_diagonal_side_entry_below_top_band():
+    # Regressao: braco entra pela esquerda logo abaixo da faixa de contato
+    # (18 linhas a partir da linha 12) e sobe em diagonal ate a linha 2,
+    # abrindo ~233 colunas nas linhas de folga. O contato lateral continuo
+    # precisa vetar o voto mesmo sem toque exato na borda (rev. PR #97).
+    mask = np.zeros((720, 1280), dtype=np.uint8)
+    mask[12:30, 0:8] = 255  # contato lateral real
+    mask[2:30, 6:240] = 255  # contorno sobe por dentro da imagem
+    mask[2:80, 100:240] = 255
+    for m in _flips(mask):
+        assert hand_mask_orientation_vote(m) is None
+
+
 def test_two_edge_ambiguity_resets_pending_inverted_streak_but_empty_frame_does_not():
     top_entry = np.zeros((200, 300), dtype=np.uint8)
     top_entry[0:90, 110:190] = 255
