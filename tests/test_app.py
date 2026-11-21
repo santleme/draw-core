@@ -867,8 +867,26 @@ def test_main_markers_recusa_spread_mode_explicito(monkeypatch):
     assert error.value.code == 2
 
 
+def test_main_spread_mode_explicito_sinaliza_run(monkeypatch):
+    for argv in (["--spread-mode", "auto"], ["--spread-mode", "always"]):
+        kw = _run_main(monkeypatch, *argv)
+        assert kw["spread_mode_explicit"] is True
+
+
+def test_main_sem_spread_mode_nao_sinaliza_explicit(monkeypatch):
+    assert _run_main(monkeypatch)["spread_mode_explicit"] is False
+
+
+@pytest.mark.parametrize(
+    "spread_mode,explicit,aviso",
+    [
+        ("always", False, "spread_mode='always' nao aplicado"),
+        ("auto", True, "spread_mode='auto' nao aplicado"),
+        ("auto", False, None),
+    ],
+)
 def test_run_warns_when_spread_mode_has_no_neural_detector(
-    monkeypatch, tmp_path, capsys
+    monkeypatch, tmp_path, capsys, spread_mode, explicit, aviso
 ):
     from draw.settings import PipelineConfig
 
@@ -889,9 +907,13 @@ def test_run_warns_when_spread_mode_has_no_neural_detector(
     monkeypatch.setattr(app_module, "PageCleanInk", _FailingPageClean)
 
     with pytest.raises(RuntimeError, match="modelo pagina->limpa nao carregou"):
-        app_module.run(pipeline_config=PipelineConfig(spread_mode="always"))
+        app_module.run(
+            pipeline_config=PipelineConfig(spread_mode=spread_mode),
+            spread_mode_explicit=explicit,
+        )
 
-    assert "spread_mode='always' nao aplicado" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert (aviso in out) if aviso is not None else ("nao aplicado" not in out)
 
 
 def test_main_markers_sem_flags_usa_o_preset_legado(monkeypatch):
