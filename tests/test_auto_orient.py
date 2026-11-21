@@ -1,6 +1,7 @@
 """Testes de orientacao automatica (180°, retrato/paisagem) e caderno de 2 paginas."""
 
 import os
+from threading import Event
 
 import cv2
 import numpy as np
@@ -200,9 +201,26 @@ def test_latest_frame_capture_set_rotation_guarantees_next_packet_flipped():
         src.stop()
 
 
-def test_ink_stream_publisher_updates_paper_mm_on_orientation_change(tmp_path):
-    import time
+def test_ink_stream_publisher_updates_paper_mm_on_orientation_change(
+    tmp_path, monkeypatch
+):
+    first_write = Event()
+    open_record = InkStreamPublisher._open_record
 
+    def open_record_signaling_write(path):
+        sink = open_record(path)
+        write = sink.write
+
+        def write_and_signal(data):
+            write(data)
+            first_write.set()
+
+        sink.write = write_and_signal
+        return sink
+
+    monkeypatch.setattr(
+        InkStreamPublisher, "_open_record", staticmethod(open_record_signaling_write)
+    )
     rec = tmp_path / "orient.dral"
     pub = InkStreamPublisher(
         port=None,
@@ -213,10 +231,8 @@ def test_ink_stream_publisher_updates_paper_mm_on_orientation_change(tmp_path):
         portrait_mask = np.zeros((120, 85), dtype=np.uint8)
         portrait_mask[10:20, 10:20] = 255
         pub.publish(contracts.InkPublication(1, 1, portrait_mask))
-        # Aguarda o registro retrato ser gravado antes de publicar a proxima geracao.
-        deadline = time.monotonic() + 2.0
-        while rec.stat().st_size == 0 and time.monotonic() < deadline:
-            time.sleep(0.01)
+        # Aguarda o primeiro write antes que a proxima publicacao possa substitui-lo.
+        assert first_write.wait(timeout=2)
 
         # Simula transicao para paisagem antes da nova geracao.
         pub.set_paper_mm(config.paper_mm("a4", "paisagem"))

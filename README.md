@@ -50,3 +50,17 @@ still requires an explicit port and token file; model verification stays on.
 pip install -e ".[dev]"
 ruff check . && pytest -q
 ```
+
+For a quick local check, run the module's tests directly, then use Testmon for
+changes that can affect other modules.
+
+```sh
+pytest -q tests/test_sheet_tracker.py tests/test_tracker_loss_clock.py
+pytest -q --testmon -n 4
+```
+
+The first Testmon run builds the local `.testmondata` by running the suite.
+Add `--testmon-forceselect` when combining impact selection with a marker
+filter such as `-m 'not slow'`. Run script tests directly (for example,
+`pytest -q tests/test_run_sh.py` after editing `run.sh`). CI runs the full
+Python suite.
