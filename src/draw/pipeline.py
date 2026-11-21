@@ -232,8 +232,14 @@ class Pipeline:
         # em anel — a recalibracao do piso em outras mesas se faz
         # com este dado, nao com chute. Sobem a SessionTelemetry
         # via stats() (merge no snapshot de 1 Hz em draw/app.py).
+        # O lado ACEITO tambem e amostrado: o piso novo se posiciona
+        # entre o maior fantasma e a menor folha real (calibracao
+        # original: fantasma <= 0.108, folha >= 0.298 -> 0.2), e um
+        # anel so de rejeitados nao mostra a distribuicao da folha.
         self._coverage_iou_rejects = 0
         self._coverage_iou_reject_recent = deque(maxlen=32)
+        self._coverage_iou_accepts = 0
+        self._coverage_iou_accept_recent = deque(maxlen=32)
 
     @staticmethod
     def _divnorm_page(ink_warped, coverage):
@@ -339,6 +345,12 @@ class Pipeline:
             self._coverage_iou_rejects += 1
             self._coverage_iou_reject_recent.append(round(float(iou), 4))
             return
+        if iou is not None:
+            # Lado aceito da distribuicao: a recalibracao do piso
+            # precisa ver onde a folha real cai, nao so onde o
+            # fantasma caiu (issue #105).
+            self._coverage_iou_accepts += 1
+            self._coverage_iou_accept_recent.append(round(float(iou), 4))
         ink_warped = self._warp_sheet(frame, warp_corners)
         # Visibilidade na grade da pagina: onde a mao esta, a
         # passada nao ve a folha — a passada nao pode votar com
@@ -912,4 +924,6 @@ class Pipeline:
         return {
             "coverage_iou_rejects_total": self._coverage_iou_rejects,
             "coverage_iou_reject_recent": list(self._coverage_iou_reject_recent),
+            "coverage_iou_accepts_total": self._coverage_iou_accepts,
+            "coverage_iou_accept_recent": list(self._coverage_iou_accept_recent),
         }

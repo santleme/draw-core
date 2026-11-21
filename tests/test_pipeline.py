@@ -374,6 +374,9 @@ def test_coverage_iou_floor_rejections_are_recorded():
     assert stats["coverage_iou_rejects_total"] >= len(recent)
     floor = loop._config.coverage_iou_floor
     assert all(0.0 <= v < floor for v in recent)
+    # Nenhum warp passou: o lado aceito da distribuicao fica vazio.
+    assert stats["coverage_iou_accepts_total"] == 0
+    assert stats["coverage_iou_accept_recent"] == []
     # O registrado é o IoU medido na hora do veto: a cena é estática,
     # recomputar pelo caminho do pipeline devolve o mesmo valor.
     expected = loop._quad_coverage_iou(QUAD)
@@ -395,7 +398,9 @@ def test_coverage_iou_floor_rejections_are_recorded():
     assert 0.0 < expected < floor
     assert all(v == pytest.approx(expected, abs=1e-4) for v in recent)
 
-    # Folha alinhada (IoU alto): nenhum veto, anel vazio.
+    # Folha alinhada (IoU alto): nenhum veto, anel de rejeitados
+    # vazio — e o lado ACEITO registrado: a recalibracao do piso
+    # precisa da distribuicao da folha, nao so da do fantasma.
     aligned = _mask_block(100, 400, 100, 500)
     loop, _det, ink = _make_loop(
         lambda _i: (QUAD.copy(), "paper", {"coverage_mask": aligned})
@@ -405,6 +410,15 @@ def test_coverage_iou_floor_rejections_are_recorded():
     stats = loop.stats()
     assert stats["coverage_iou_rejects_total"] == 0
     assert stats["coverage_iou_reject_recent"] == []
+    assert stats["coverage_iou_accepts_total"] >= 1
+    accepted = stats["coverage_iou_accept_recent"]
+    assert accepted
+    assert stats["coverage_iou_accepts_total"] >= len(accepted)
+    assert all(v >= floor for v in accepted)
+    assert all(
+        v == pytest.approx(loop._quad_coverage_iou(QUAD), abs=1e-4) for v in accepted
+    )
+    assert json.loads(json.dumps(stats)) == stats
 
 
 def test_paisagem_submete_pagina_deitada_a_tinta():
