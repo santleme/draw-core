@@ -9,6 +9,7 @@ sessão falsa não vê: o nome da entrada no arquivo, a forma declarada
 e o lote simbólico. Sem o pacote `onnx`, esses testes saem como skip.
 """
 
+import cv2
 import numpy as np
 import pytest
 
@@ -358,6 +359,28 @@ def test_plausibility_guard_treats_hand_on_border_as_unobserved():
     assert fit_plausible(quad, (720, 1280), **kwargs) is True
     mask[0:6, :] = 0  # sem papel observado na borda, mao nao basta
     assert fit_plausible(quad, (720, 1280), **kwargs) is False
+
+
+def test_detector_rejects_fit_grazing_border_at_one_corner():
+    # Pelo caminho do detector: trapezio que encosta no topo so num
+    # canto — a linha do topo e quase toda fundo visivel, entao a
+    # "aresta no topo" nao e corte de frame e a razao rejeita. Ja uma
+    # folha realmente clipada (linha 0 toda papel) segue aceita.
+    det = NeuralSheetDetector("unused.onnx", verify=None)
+    grazing = np.zeros((480, 640), np.uint8)
+    cv2.fillConvexPoly(
+        grazing,
+        np.array([[40, 0], [450, 8], [280, 280], [200, 280]], np.int32),
+        255,
+    )
+    assert det._fit(grazing) is None
+    clipped = np.zeros((480, 640), np.uint8)
+    cv2.fillConvexPoly(
+        clipped,
+        np.array([[40, 0], [450, 0], [300, 260], [250, 260]], np.int32),
+        255,
+    )
+    assert det._fit(clipped) is not None
 
 
 def test_plausibility_guard_refuses_paper_edge_passing_near_border():
