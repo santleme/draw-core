@@ -107,8 +107,10 @@ export function runBlast(onCovered: () => void): () => void {
     });
 
     if (root) {
-      const hole = `M${points.map(([x, y]) => `${x.toFixed(1)} ${y.toFixed(1)}`).join('L')}Z`;
-      root.style.clipPath = `path(evenodd, "M-10 -10H${w + 10}V${h + 10}H-10Z${hole}")`;
+      // clip-path vive no sistema de coordenadas do #root, que anda com a rolagem; o canvas e fixo na janela.
+      const box = root.getBoundingClientRect();
+      const hole = `M${points.map(([x, y]) => `${(x - box.left).toFixed(1)} ${(y - box.top).toFixed(1)}`).join('L')}Z`;
+      root.style.clipPath = `path(evenodd, "M-10 -10H${w + 10}V${Math.max(box.height, h) + 10}H-10Z${hole}")`;
     }
 
     if (ctx) {
@@ -120,7 +122,11 @@ export function runBlast(onCovered: () => void): () => void {
       points.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
       ctx.closePath();
       ctx.fill();
-      if (t < 0.85) spawn(t, elapsed, Math.round(18 + 40 * (1 - t)));
+      if (t < 0.85) {
+        // quantidade por segundo (nao por quadro), para a densidade ser igual em 60 e 120 Hz
+        const want = (18 + 40 * (1 - t)) * 60 * dt;
+        spawn(t, elapsed, Math.floor(want) + (Math.random() < want % 1 ? 1 : 0));
+      }
       for (let i = shards.length - 1; i >= 0; i -= 1) {
         const s = shards[i];
         const age = elapsed - s.born;
