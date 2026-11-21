@@ -153,7 +153,7 @@ def quad_aspect_ratio(
     perspectiva de `paper.estimate_format` para que uma folha em pe vista
     em angulo obliquo (encurtamento vertical) nao seja confundida com
     paisagem. No regime de inclinacao em um unico eixo (um ponto de fuga no
-    infinito), avalia a faixa plausivel de distancia focal [0.7*W, 2.5*W] e
+    infinito), avalia a faixa plausivel de distancia focal [0.75*W, 1.8*W] e
     so decide quando o intervalo inteiro ultrapassa o limiar (caso contrario
     se abstem com None).
     """

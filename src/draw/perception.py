@@ -429,10 +429,12 @@ class NeuralSheetDetector:
         if not is_spread:
             self._memory_spread_area = 0.0
         else:
-            # Guarda o pico de area do caderno aberto apenas quando o ajuste
-            # aceitou as arestas (sem travas da guarda de outlier), evitando
-            # que uma aresta rejeitada eleve a referencia e trave quadros futuros.
-            if trusted is not None and all(trusted):
+            # Guarda o pico de area do caderno aberto sempre que a guarda de
+            # outlier nao pode ter travado nenhuma aresta (fallback=None ou
+            # todas as arestas confiaveis), evitando tanto que uma aresta
+            # travada eleve a referencia quanto um loop infinito de
+            # spread_expanded=True quando ha uma aresta ocluida.
+            if fallback is None or (trusted is not None and all(trusted)):
                 self._memory_spread_area = max(prev_area, contour_area)
         return corners
 

@@ -314,3 +314,73 @@ def test_neural_detector_uncovers_final_strip_of_spread_under_5_percent_area():
         assert q2 is not None
         # A borda direita deve expandir para o novo limite (~326 * scale_x = ~1086 px)
         assert q2[:, 0].max() >= 324.0 * scale_x - 5.0
+
+
+def test_neural_detector_sideways_slide_does_not_leave_stale_trailing_edge():
+    """Uma translacao lateral da folha (40 px para a direita em 1280x720) move
+    as duas arestas verticais juntas; a guarda de outlier unico NAO pode
+    contar apenas a aresta traseira e manter a folha esticada."""
+    from draw.perception import NeuralSheetDetector
+
+    det = NeuralSheetDetector("unused.onnx", verify=None)
+    m1 = np.zeros((720, 1280), dtype=np.uint8)
+    m1[120:600, 250:910] = 255
+    q1 = det._fit(m1)
+    assert q1 is not None
+    assert abs(q1[:, 0].min() - 250.0) <= 5.0
+    assert abs(q1[:, 0].max() - 910.0) <= 5.0
+
+    # Desliza 40 px para a direita (x=290..950, alta sobreposicao com m1).
+    m2 = np.zeros((720, 1280), dtype=np.uint8)
+    m2[120:600, 290:950] = 255
+    for _ in range(3):
+        q2 = det._fit(m2)
+        assert q2 is not None
+        assert abs(q2[:, 0].min() - 290.0) <= 6.0
+        assert abs(q2[:, 0].max() - 950.0) <= 6.0
+
+
+def test_neural_detector_updates_spread_peak_when_expanded_with_untrusted_edge(
+    monkeypatch,
+):
+    """Se o caderno aberto expande > 5% enquanto uma aresta esta nao-confiavel
+    (ex.: antebraco na borda inferior), fallback e None nesse quadro e o pico
+    de area precisa acompanhar o novo tamanho para nao desabilitar a memoria
+    de arestas nos quadros seguintes."""
+    from draw import geometry as _geometry
+    from draw.perception import NeuralSheetDetector
+
+    det = NeuralSheetDetector("unused.onnx", verify=None)
+    m1 = np.zeros((400, 600), dtype=np.uint8)
+    m1[80:320, 70:260] = 255
+    m1[80:320, 270:460] = 255
+    assert det._fit(m1) is not None
+    initial_peak = det._memory_spread_area
+    assert initial_peak > 0
+
+    # Expande > 5% (pagina direita cresce de 190 para 230 px) enquanto a
+    # aresta inferior volta nao-confiavel.
+    m2 = np.zeros((400, 600), dtype=np.uint8)
+    m2[80:320, 70:260] = 255
+    m2[80:320, 270:500] = 255
+
+    orig_fit = _geometry._fit_quad_impl
+    seen_fallbacks = []
+
+    def _fit_with_untrusted_bottom(mask, frame, fallback, sx, sy, **kwargs):
+        seen_fallbacks.append(fallback)
+        corners, lines, trusted = orig_fit(mask, frame, fallback, sx, sy, **kwargs)
+        if trusted is not None:
+            trusted = [trusted[0], trusted[1], False, trusted[3]]
+        return corners, lines, trusted
+
+    monkeypatch.setattr(_geometry, "_fit_quad_impl", _fit_with_untrusted_bottom)
+
+    # Quadro da expansao: fallback e None e o pico deve subir.
+    assert det._fit(m2) is not None
+    assert seen_fallbacks[-1] is None
+    assert det._memory_spread_area > initial_peak * 1.05
+
+    # Quadro seguinte com a mesma mascara: memoria de arestas volta ativa.
+    assert det._fit(m2) is not None
+    assert seen_fallbacks[-1] is not None

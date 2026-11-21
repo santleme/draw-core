@@ -451,26 +451,27 @@ def _refit_corners(contour, quad, frame_shape, fallback_lines=None, scale=(1.0, 
                 ang > _MEMORY_SINGLE_OUTLIER_ANGLE_DEG
                 or shf > _MEMORY_SINGLE_OUTLIER_SHIFT_PX * pixel_scale
             ):
-                # Oclusao de mao/antepraco move a aresta para DENTRO (na direcao do
-                # centroide da folha). Salto para FORA (afastando do centroide)
-                # com angulo estavel e desobstrucao ou expansao de pagina.
-                dir_prev, pt_prev = prev
-                norm_out = np.array([-dir_prev[1], dir_prev[0]], dtype=np.float64)
-                norm_out /= max(float(np.linalg.norm(norm_out)), 1e-9)
-                if float((centroid - pt_prev) @ norm_out) > 0:
-                    norm_out = -norm_out
-                shift_outward = float((proj_mid - pt_prev) @ norm_out)
-                if (
-                    shift_outward > 2.0 * pixel_scale
-                    and ang <= _MEMORY_STATIONARY_ANGLE_DEG * 1.5
-                ):
-                    continue
-                jumped.append(i)
+                jumped.append((i, proj_mid, ang))
         if len(steady) >= 2 and len(jumped) == 1:
-            bad = jumped[0]
-            lines[bad] = fallback_lines[bad]
-            locked[bad] = True
-            trusted[bad] = False
+            bad, proj_mid, ang = jumped[0]
+            # Oclusao de mao/antebraco move a aresta para DENTRO (na direcao do
+            # centroide da folha). Salto unico para FORA (afastando do centroide)
+            # com angulo estavel e desobstrucao ou expansao de pagina — mas so
+            # isenta depois de confirmar que apenas UMA aresta saltou, para nao
+            # confundir translacao lateral (2 arestas saltando) com outlier unico.
+            dir_prev, pt_prev = fallback_lines[bad]
+            norm_out = np.array([-dir_prev[1], dir_prev[0]], dtype=np.float64)
+            norm_out /= max(float(np.linalg.norm(norm_out)), 1e-9)
+            if float((centroid - pt_prev) @ norm_out) > 0:
+                norm_out = -norm_out
+            shift_outward = float((proj_mid - pt_prev) @ norm_out)
+            if not (
+                shift_outward > 2.0 * pixel_scale
+                and ang <= _MEMORY_STATIONARY_ANGLE_DEG * 1.5
+            ):
+                lines[bad] = fallback_lines[bad]
+                locked[bad] = True
+                trusted[bad] = False
 
     refined = quad.copy()
     for i in range(4):
