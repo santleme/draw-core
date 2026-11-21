@@ -303,6 +303,10 @@ class NeuralSheetDetector:
         self._memory_geometry = None
         self._reject_streak = 0
         self.last_presence_logit = None
+        # Por que o último _fit não fechou quadrilátero, quando
+        # falhou: {"reason": ..., "area_ratio": ...}. None quando
+        # fechou ou quando o _fit não rodou na chamada.
+        self.last_fit_reject = None
         # Cobertura de folha da última previsão (0/255, resolução da
         # máscara devolvida): classes de folha sob qualquer ocupante
         # — papel, tinta E mão. A mão fica dentro para a cobertura
@@ -440,6 +444,26 @@ class NeuralSheetDetector:
         corners, lines, trusted = impl(
             mask, frame, fallback, scale_x, scale_y, **kwargs
         )
+        # Issue #105: a folha distante (<1% da máscara) virava "sem
+        # contorno" em silêncio; o motivo agora sobe no rastro de
+        # aquisição.
+        mask_area = float(mask.shape[0] * mask.shape[1])
+        if corners is None:
+            if contour is None:
+                self.last_fit_reject = {"reason": "no_contour", "area_ratio": 0.0}
+            elif contour_area < mask_area * _geometry._MIN_CONTOUR_AREA_RATIO:
+                self.last_fit_reject = {
+                    "reason": "min_area",
+                    "area_ratio": contour_area / mask_area,
+                }
+            else:
+                # O impl devolveu None por outra via (ex.: dublê de
+                # teste): sem contorno/área para apontar, registra a
+                # falha nua.
+                self.last_fit_reject = {
+                    "reason": "fit_failed",
+                    "area_ratio": contour_area / mask_area,
+                }
         ref_shape = (
             frame.shape
             if frame is not None
@@ -447,6 +471,10 @@ class NeuralSheetDetector:
         )
         if corners is not None and not _geometry.fit_plausible(corners, ref_shape):
             self._note_rejected_fit()
+            self.last_fit_reject = {
+                "reason": "implausible",
+                "area_ratio": contour_area / mask_area,
+            }
             return None
         if (
             corners is None
@@ -461,6 +489,13 @@ class NeuralSheetDetector:
             # retas guardadas e gravava a máscara recusada como
             # referência — uma aresta ocluída deixava de ser recuperável.
             self._note_rejected_fit()
+            # O motivo da recusa sobe no rastro de aquisição como
+            # "unsupported" — é o veto da guarda de fill, calibrado
+            # na mesa oblíqua, que a issue #105 quer ver como dado.
+            self.last_fit_reject = {
+                "reason": "unsupported",
+                "area_ratio": contour_area / mask_area,
+            }
             return None
         self._reject_streak = 0
         if lines is not None:
@@ -496,6 +531,8 @@ class NeuralSheetDetector:
                 fallback is None or (trusted is not None and all(trusted))
             ):
                 self._memory_spread_area = max(prev_area, contour_area)
+        if corners is not None:
+            self.last_fit_reject = None
         return corners
 
     def predict(self, frame, *, native=False):
@@ -619,11 +656,16 @@ class NeuralSheetDetector:
     def __call__(self, frame, *, return_mask=True):
         if frame is None or frame.size == 0:
             self.last_presence_logit = None
+            self.last_fit_reject = None
             return None, None, None
         presence, mask = self.predict(frame, native=True)
         frame_h, frame_w = frame.shape[:2]
         mask_h, mask_w = mask.shape
         corners = None
+        # O motivo de rejeição só vale para o _fit desta chamada:
+        # presença não-positiva não ajusta e não pode herdar o
+        # motivo de uma chamada anterior.
+        self.last_fit_reject = None
         if presence > 0:
             corners = self._fit(
                 mask, frame, scale_x=frame_w / mask_w, scale_y=frame_h / mask_h

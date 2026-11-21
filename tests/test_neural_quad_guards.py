@@ -171,11 +171,69 @@ def test_rigid_guard_vetoes_single_edge_sleeve_but_allows_real_sheet_rotation():
     )
 
 
+def test_fit_sem_contorno_reporta_no_contour():
+    det = perception.NeuralSheetDetector("dummy.onnx", verify=None)
+    mask = np.zeros((720, 1280), dtype=np.uint8)
+    assert det._fit(mask, None) is None
+    assert det.last_fit_reject == {"reason": "no_contour", "area_ratio": 0.0}
+
+
+def test_fit_contorno_minusculo_reporta_min_area():
+    det = perception.NeuralSheetDetector("dummy.onnx", verify=None)
+    mask = np.zeros((720, 1280), dtype=np.uint8)
+    # 20x20 px: ~0,04% da mascara, abaixo do piso de 1% do ajuste.
+    cv2.rectangle(mask, (100, 100), (119, 119), 255, -1)
+    assert det._fit(mask, None) is None
+    reject = det.last_fit_reject
+    assert reject["reason"] == "min_area"
+    _, _, contour_area = geometry._sheet_contour_with_spread(mask)
+    expected = contour_area / float(mask.shape[0] * mask.shape[1])
+    assert reject["area_ratio"] == expected
+    assert 0.0 < reject["area_ratio"] < geometry._MIN_CONTOUR_AREA_RATIO
+
+
+def test_fit_com_folha_fecha_e_limpa_o_reject():
+    shape = (720, 1280)
+    true_quad = np.array(
+        [[280.0, 90.0], [980.0, 105.0], [1010.0, 630.0], [255.0, 615.0]],
+        dtype=np.float32,
+    )
+    det = perception.NeuralSheetDetector("dummy.onnx", verify=None)
+    # Rejeicao anterior nao pode vazar para o quadro que fecha.
+    empty = np.zeros(shape, dtype=np.uint8)
+    assert det._fit(empty, None) is None
+    assert det.last_fit_reject is not None
+    mask = _poly_mask(shape, true_quad)
+    corners = det._fit(mask, None)
+    assert corners is not None
+    assert det.last_fit_reject is None
+
+
+def test_fit_implausivel_reporta_implausible():
+    # Trapezio com arestas opostas 9:1 — fecha na escada de epsilon
+    # mas a guarda de plausibilidade recusa.
+    shape = (720, 1280)
+    pts = np.array(
+        [[100.0, 100.0], [1180.0, 100.0], [700.0, 400.0], [580.0, 400.0]],
+        dtype=np.float32,
+    )
+    mask = _poly_mask(shape, pts)
+    det = perception.NeuralSheetDetector("dummy.onnx", verify=None)
+    assert det._fit(mask, None) is None
+    reject = det.last_fit_reject
+    assert reject["reason"] == "implausible"
+    assert reject["area_ratio"] > geometry._MIN_CONTOUR_AREA_RATIO
+
+
 def main():
     test_predict_matches_legacy_softmax_and_normalization()
     test_middle_arm_notch_recovers_straight_chord_without_memory()
     test_curved_arm_with_high_coverage_does_not_poison_memory()
     test_rigid_guard_vetoes_single_edge_sleeve_but_allows_real_sheet_rotation()
+    test_fit_sem_contorno_reporta_no_contour()
+    test_fit_contorno_minusculo_reporta_min_area()
+    test_fit_com_folha_fecha_e_limpa_o_reject()
+    test_fit_implausivel_reporta_implausible()
     print("TESTES DE GUARDAS NEURAIS OK.")
     return 0
 

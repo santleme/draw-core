@@ -138,6 +138,51 @@ def test_sem_neural_e_classico_puro_e_extras_limpos(classic):
     assert extras == {}
 
 
+def test_margem_do_veto_medida_no_rastro(classic):
+    classic["result"] = (_corners(), "blank_maybe")
+    neural = _FakeNeural(None, None, logit=-1.0, mask=None)
+    _, _, trace, _ = app_module._detect_sheet_combined_traced(_frame(), neural)
+    assert trace["veto_margin"] == pytest.approx(-1.0 - PRESENCE_VETO_LOGIT)
+
+
+def test_margem_do_veto_no_limiar_veta_e_marca_zero(classic):
+    classic["result"] = (_corners(), "paper")
+    neural = _FakeNeural(None, None, logit=PRESENCE_VETO_LOGIT, mask=None)
+    corners, verdict, trace, _ = app_module._detect_sheet_combined_traced(
+        _frame(), neural
+    )
+    assert (corners, verdict) == (None, None)
+    assert trace["veto_margin"] == pytest.approx(0.0)
+    assert trace["source"] == "veto"
+
+
+def test_margem_do_veto_e_none_sem_logit(classic):
+    neural = _FakeNeural(None, None, logit=None, mask=None)
+    _, _, trace, _ = app_module._detect_sheet_combined_traced(_frame(), neural)
+    assert trace["veto_margin"] is None
+
+
+def test_fit_reject_sobe_no_rastro(classic):
+    neural = _FakeNeural(None, None, logit=2.0, mask=None)
+    neural.last_fit_reject = {"reason": "min_area", "area_ratio": 0.005}
+    _, _, trace, _ = app_module._detect_sheet_combined_traced(_frame(), neural)
+    assert trace["fit_reject"] == {"reason": "min_area", "area_ratio": 0.005}
+
+
+def test_fit_reject_e_none_sem_o_atributo(classic):
+    # _FakeNeural nao define last_fit_reject: o getattr cai no None.
+    neural = _FakeNeural(None, None, logit=2.0, mask=None)
+    _, _, trace, _ = app_module._detect_sheet_combined_traced(_frame(), neural)
+    assert trace["fit_reject"] is None
+
+
+def test_classico_puro_reporta_chaves_novas_como_none(classic):
+    classic["result"] = (_corners(), "paper")
+    _, _, trace, _ = app_module._detect_sheet_combined_traced(_frame(), None)
+    assert trace["veto_margin"] is None
+    assert trace["fit_reject"] is None
+
+
 def test_check_models_avisa_modelo_ausente(monkeypatch, tmp_path, capsys):
     fake = {"modelo_ausente_xyz.onnx": {"sha256": "0" * 64, "bytes": 1}}
     monkeypatch.setattr(

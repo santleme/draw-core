@@ -150,8 +150,10 @@ def _detect_sheet_combined_traced(frame, neural_detector):
         "neural_ran": neural_detector is not None,
         "presence_logit": None,
         "veto_logit": None,
+        "veto_margin": None,
         "neural_corners": None,
         "neural_verdict": None,
+        "fit_reject": None,
         "classic_ran": False,
         "classic_verdict": None,
         "classic_corners": None,
@@ -217,6 +219,14 @@ def _detect_sheet_combined_traced(frame, neural_detector):
                 extras["hand_mask"] = hand_mask
         logit = neural_detector.last_presence_logit
         trace["presence_logit"] = None if logit is None else float(logit)
+        # A distância do logit ao limiar é o dado que a recalibração
+        # do veto em outras mesas precisa (issue #105); hoje o rastro
+        # só mostra source:"veto".
+        trace["veto_margin"] = (
+            None if logit is None else float(logit - neural_module.PRESENCE_VETO_LOGIT)
+        )
+        # getattr: dublês de teste podem não definir last_fit_reject.
+        trace["fit_reject"] = getattr(neural_detector, "last_fit_reject", None)
         trace["neural_corners"] = _corners_json(corners)
         trace["neural_verdict"] = verdict
         if corners is not None:
@@ -1670,6 +1680,10 @@ def run(
                 tel_fields.update(ink_worker.stats())
             if detection_worker is not None:
                 tel_fields.update(detection_worker.stats())
+            # Contadores do laço — rejeições do piso de cobertura —
+            # entram no retrato de 1 Hz.
+            if pipeline is not None:
+                tel_fields.update(pipeline.stats())
             telemetry.update(**tel_fields)
             session_report.update(**tel_fields)
             if auto_capture and loop_frames % 10 == 0:
