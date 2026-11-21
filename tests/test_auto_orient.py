@@ -129,6 +129,17 @@ def test_auto_page_orientation_hysteresis_and_oblique_portrait_guard():
     assert orient_tilted.observe(tilted_landscape, frame_shape) is None
     assert orient_tilted.observe(tilted_landscape, frame_shape) == "paisagem"
 
+    # Pagina quase quadrada (razao fisica 1,16, dentro da zona morta) sob pitch
+    # de 14°: apenas um extremo da faixa focal passa de 1,18 -> deve abster-se.
+    near_square_tilted = np.array(
+        [[337.31, 106.81], [942.69, 106.81], [924.01, 597.57], [355.99, 597.57]],
+        dtype=np.float32,
+    )
+    orient_near_sq = AutoPageOrientation(initial="retrato", confirm_frames=3)
+    for _ in range(6):
+        assert orient_near_sq.observe(near_square_tilted, frame_shape) is None
+    assert orient_near_sq.current == "retrato"
+
     assert quad_aspect_ratio(wide, frame_shape) > 1.5
     assert orient.observe(square, frame_shape) is None
     assert orient.observe(wide, frame_shape) is None
@@ -235,3 +246,27 @@ def test_neural_detector_expands_from_single_page_to_gradually_uncovered_spread(
         q = det._fit(step_mask)
         assert q is not None
         assert q[:, 0].max() >= 308 + right_w - 12.0
+
+
+def test_neural_detector_keeps_spread_edge_under_hand_occlusion():
+    """Depois de estabelecer um caderno aberto completo, uma oclusao de mao
+    cobrindo a faixa externa da pagina direita NAO pode descartar a memoria
+    de arestas nem encolher o quadrilatero."""
+    from draw.perception import NeuralSheetDetector
+
+    det = NeuralSheetDetector("unused.onnx", verify=None)
+    full_spread = np.zeros((500, 600), dtype=np.uint8)
+    full_spread[60:444, 72:296] = 255
+    full_spread[60:444, 304:528] = 255
+
+    q_full = det._fit(full_spread)
+    assert q_full is not None
+    assert q_full[:, 0].max() >= 518.0
+
+    # Mao cobre os 132 px externos da pagina direita (overlap ~0,705).
+    occluded = full_spread.copy()
+    occluded[:, 396:] = 0
+    for _ in range(3):
+        q_occ = det._fit(occluded)
+        assert q_occ is not None
+        assert q_occ[:, 0].max() >= 510.0

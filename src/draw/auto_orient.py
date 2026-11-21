@@ -122,18 +122,19 @@ def _ratio_for_focal(centered_quad, focal):
 
 
 def _single_vp_ratio_bounds(quad, frame_shape):
-    """Faixa [r_min, r_max] de razao fisica para f em [0.5*W, 3.0*W].
+    """Faixa [r_min, r_max] de razao fisica para f em [0.7*W, 2.5*W].
 
     Quando a camera inclina em torno de um unico eixo (ex.: pitch puro sobre
     a mesa), um par de arestas segue paralelo (ponto de fuga no infinito) e
     `paper.estimate_format` se abstem. Como a razao fisica w/h e monotonica
-    em f^2, avaliar nos extremos da faixa plausivel de distancia focal decide
-    com seguranca quando toda a faixa cai do mesmo lado do limiar.
+    em f^2, avaliar nos extremos da faixa tipica de distancia focal de
+    webcams (~22° a ~71° HFOV) permite decidir com seguranca apenas quando
+    o intervalo inteiro ultrapassa o limiar de orientacao.
     """
     height, width = frame_shape[:2]
     centered = quad - np.array([width / 2.0, height / 2.0], dtype=np.float64)
-    r_low_f = _ratio_for_focal(centered, 0.5 * width)
-    r_high_f = _ratio_for_focal(centered, 3.0 * width)
+    r_low_f = _ratio_for_focal(centered, 0.7 * width)
+    r_high_f = _ratio_for_focal(centered, 2.5 * width)
     if r_low_f is None or r_high_f is None:
         return None
     return min(r_low_f, r_high_f), max(r_low_f, r_high_f)
@@ -152,8 +153,9 @@ def quad_aspect_ratio(
     perspectiva de `paper.estimate_format` para que uma folha em pe vista
     em angulo obliquo (encurtamento vertical) nao seja confundida com
     paisagem. No regime de inclinacao em um unico eixo (um ponto de fuga no
-    infinito), avalia a faixa plausivel de distancia focal [0.5*W, 3.0*W] e
-    so decide quando toda a faixa concorda; caso contrario se abstem (None).
+    infinito), avalia a faixa plausivel de distancia focal [0.7*W, 2.5*W] e
+    so decide quando o intervalo inteiro ultrapassa o limiar (caso contrario
+    se abstem com None).
     """
     quad = np.asarray(corners, dtype=np.float64)
     if quad.shape != (4, 2) or not np.all(np.isfinite(quad)):
@@ -168,13 +170,10 @@ def quad_aspect_ratio(
             if bounds is None:
                 return None
             r_min, r_max = bounds
-            # So decide quando toda a faixa plausivel de distancia focal
-            # [0.5*W, 3.0*W] fica estritamente do mesmo lado da fronteira
-            # quadrado (1.0) e o extremo atinge o limiar da orientacao.
-            if r_min >= 1.05 and r_max >= landscape_ratio:
-                return r_max
-            if r_max <= 0.95 and r_min <= portrait_ratio:
+            if r_min >= landscape_ratio:
                 return r_min
+            if r_max <= portrait_ratio:
+                return r_max
         return None
     top = float(np.linalg.norm(quad[1] - quad[0]))
     bottom = float(np.linalg.norm(quad[2] - quad[3]))

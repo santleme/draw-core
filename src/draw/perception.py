@@ -380,21 +380,26 @@ class NeuralSheetDetector:
             self._edge_lines = None
             self._memory_mask = None
             self._memory_is_spread = False
-            self._memory_spread_ratio = 0.0
+            self._memory_spread_area = 0.0
             self._memory_geometry = geometry
-        _contour, is_spread, spread_ratio = _geometry._sheet_contour_with_spread(mask)
+        contour, is_spread, contour_area = _geometry._sheet_contour_with_spread(mask)
         prev_spread = getattr(self, "_memory_is_spread", False)
-        prev_ratio = getattr(self, "_memory_spread_ratio", 0.0)
-        # Nao reutiliza retas da pagina unica quando o contorno passa a ser um
-        # caderno aberto (ou enquanto a segunda pagina ainda esta expandindo),
-        # senao o guarda de outlier mantem a borda antiga presa na lombada.
-        spread_changed = is_spread != prev_spread or (
-            is_spread and abs(spread_ratio - prev_ratio) > 0.05
+        prev_area = getattr(self, "_memory_spread_area", 0.0)
+        # Invalida a memoria de arestas apenas na transicao pagina unica ->
+        # caderno aberto ou quando o caderno esta EXPANDINDO para fora (nunca
+        # quando encolhe sob oclusao de mao, para preservar a guarda de outlier).
+        spread_expanded = (is_spread and not prev_spread) or (
+            is_spread and prev_area > 0 and contour_area > prev_area * 1.05
         )
-        fallback = None if spread_changed else self._fallback_lines(mask)
-        corners, lines, trusted = _geometry._fit_quad_impl(
-            mask, frame, fallback, scale_x, scale_y
-        )
+        fallback = None if spread_expanded else self._fallback_lines(mask)
+        try:
+            corners, lines, trusted = _geometry._fit_quad_impl(
+                mask, frame, fallback, scale_x, scale_y, contour=contour
+            )
+        except TypeError:
+            corners, lines, trusted = _geometry._fit_quad_impl(
+                mask, frame, fallback, scale_x, scale_y
+            )
         ref_shape = (
             frame.shape
             if frame is not None
@@ -421,7 +426,12 @@ class NeuralSheetDetector:
             self._edge_lines = stored
         self._memory_mask = mask[::_MEMORY_MASK_STRIDE, ::_MEMORY_MASK_STRIDE] > 0
         self._memory_is_spread = is_spread
-        self._memory_spread_ratio = spread_ratio
+        if not is_spread:
+            self._memory_spread_area = 0.0
+        else:
+            # Guarda o pico de area do caderno aberto: uma oclusao de mao
+            # encolhe temporariamente a area, mas nao rebaixa a referencia.
+            self._memory_spread_area = max(prev_area, contour_area)
         return corners
 
     def predict(self, frame, *, native=False):

@@ -161,18 +161,15 @@ def _is_two_page_spread(contour_a, contour_b):
 
 
 def _sheet_contour_with_spread(mask_bin):
-    """Devolve `(contorno, is_spread, spread_ratio)` para distinguir folha unica
-    de caderno aberto (e detectar quando a segunda pagina ainda esta crescendo)."""
+    """Devolve `(contorno, is_spread, contour_area)` para distinguir folha unica
+    de caderno aberto sem duplicar a extracao de contorno no detector."""
     contours, _ = cv2.findContours(mask_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     if not contours:
         return None, False, 0.0
     if len(contours) == 1:
-        return contours[0], False, 0.0
+        return contours[0], False, float(cv2.contourArea(contours[0]))
     ranked = sorted(contours, key=cv2.contourArea, reverse=True)
     if _is_two_page_spread(ranked[0], ranked[1]):
-        area0 = float(cv2.contourArea(ranked[0]))
-        area1 = float(cv2.contourArea(ranked[1]))
-        ratio = area1 / area0 if area0 > 0 else 0.0
         hull = cv2.convexHull(np.vstack([ranked[0], ranked[1]]))
         # Densifica o contorno do casco desenhando-o preenchido numa mascara:
         # cv2.convexHull devolve apenas ~4-8 vertices e faria _refit_corners
@@ -182,15 +179,14 @@ def _sheet_contour_with_spread(mask_bin):
         dense, _ = cv2.findContours(
             merged_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE
         )
-        if dense:
-            return max(dense, key=cv2.contourArea), True, ratio
-        return hull, True, ratio
-    return ranked[0], False, 0.0
+        merged = max(dense, key=cv2.contourArea) if dense else hull
+        return merged, True, float(cv2.contourArea(merged))
+    return ranked[0], False, float(cv2.contourArea(ranked[0]))
 
 
 def _sheet_contour(mask_bin):
     """Contorno da folha: maior contorno ou uniao densa das 2 paginas do caderno."""
-    contour, _is_spread, _ratio = _sheet_contour_with_spread(mask_bin)
+    contour, _is_spread, _area = _sheet_contour_with_spread(mask_bin)
     return contour
 
 
@@ -497,14 +493,17 @@ def _refine_inside(frame, corners):
     return refined.astype(np.float32)
 
 
-def _fit_quad_impl(mask_bin, frame, fallback_lines, scale_x=1.0, scale_y=1.0):
+def _fit_quad_impl(
+    mask_bin, frame, fallback_lines, scale_x=1.0, scale_y=1.0, *, contour=None
+):
     """O ajuste completo sobre a máscara, com herança opcional.
 
     Retorna (quadrilatero ou None, retas usadas ou None, confiavel
     por aresta ou None). fallback_lines são as retas confiáveis da
     chamada anterior, oferecidas às arestas sem cobertura.
     """
-    contour = _sheet_contour(mask_bin)
+    if contour is None:
+        contour = _sheet_contour(mask_bin)
     if contour is None:
         return None, None, None
     frame_area = float(mask_bin.shape[0] * mask_bin.shape[1])
