@@ -69,6 +69,16 @@ _FIT_EDGE_BORDER_GAP_FRAC = 0.02
 _FIT_EXCURSION_DIAG_FRAC = 0.15
 
 
+def _edge_on_border(p, q, border_gap, width, height):
+    """True se a aresta p→q corre ao longo de uma borda do quadro."""
+    return (
+        max(p[0], q[0]) <= border_gap
+        or max(p[1], q[1]) <= border_gap
+        or width - min(p[0], q[0]) <= border_gap
+        or height - min(p[1], q[1]) <= border_gap
+    )
+
+
 def fit_plausible(corners, frame_shape):
     """True se o quadrilátero passa na guarda de plausibilidade.
 
@@ -94,14 +104,24 @@ def fit_plausible(corners, frame_shape):
         if ratio <= _FIT_OPPOSITE_RATIO_MAX:
             continue
         short = a if edges[a] <= edges[b] else b
-        pts = quad[[short, (short + 1) % 4]]
-        on_border = (
-            pts[:, 0].max() <= border_gap
-            or pts[:, 1].max() <= border_gap
-            or width - pts[:, 0].min() <= border_gap
-            or height - pts[:, 1].min() <= border_gap
-        )
-        if not on_border:
+        # Isenta corte de frame: a aresta curta e o proprio corte, ou uma
+        # aresta vizinha inteira na borda — o corte que encurtou o canto
+        # dela (aresta curta com um vertice na borda e outro no papel).
+        if not (
+            _edge_on_border(
+                quad[short], quad[(short + 1) % 4], border_gap, width, height
+            )
+            or _edge_on_border(
+                quad[(short - 1) % 4], quad[short], border_gap, width, height
+            )
+            or _edge_on_border(
+                quad[(short + 1) % 4],
+                quad[(short + 2) % 4],
+                border_gap,
+                width,
+                height,
+            )
+        ):
             return False
     margin = _FIT_EXCURSION_DIAG_FRAC * float(np.hypot(width, height))
     return not (
