@@ -15,6 +15,7 @@ import cv2
 import numpy as np
 import pytest
 
+from draw import _hvcam_mjpeg as mjpeg_module
 from draw import app as app_module
 from draw import camera as camera_module
 from draw import hvcam as hvcam_module
@@ -1704,19 +1705,39 @@ def _open_fd_count():
 
 
 @pytest.mark.skipif(not os.path.isdir("/proc/self/fd"), reason="requer /proc")
-def test_strict_decoder_does_not_leak_fd_when_tempfile_fails(monkeypatch):
+def test_strict_decoder_releases_pipes_on_close():
     img = np.full((16, 16, 3), 90, dtype=np.uint8)
     ok, enc = cv2.imencode(".jpg", img)
     assert ok
 
-    def boom(*_a, **_k):
-        raise OSError("sem espaco")
-
-    monkeypatch.setattr(hvcam_module.tempfile, "TemporaryFile", boom)
     before = _open_fd_count()
-    for _ in range(20):
-        hvcam_module._imdecode_mjpeg_strict(enc)
+    decoder = mjpeg_module._MjpegDecoder()
+    try:
+        decoder.decode(enc)
+        worker = decoder._process
+        decoder.decode(enc)
+        assert decoder._process is worker
+    finally:
+        decoder.close()
+    assert worker.poll() is not None
     assert _open_fd_count() == before
+
+
+def test_strict_decoder_restarts_after_worker_exits():
+    ok, jpeg = cv2.imencode(".jpg", np.zeros((16, 16, 3), np.uint8))
+    assert ok
+    decoder = mjpeg_module._MjpegDecoder()
+    try:
+        decoder.decode(jpeg)
+        worker = decoder._process
+        worker.kill()
+        worker.wait(timeout=5)
+        with pytest.raises(ValueError, match="processo de decode MJPEG indisponivel"):
+            decoder.decode(jpeg)
+        assert decoder.decode(jpeg).shape == (16, 16, 3)
+        assert decoder._process is not worker
+    finally:
+        decoder.close()
 
 
 def _jpeg_with_tail_before_eoi(tail):
@@ -1744,11 +1765,47 @@ def test_strict_decoder_rejects_extraneous_scan_bytes_before_eoi():
 def test_classify_warning_is_per_line():
     pad = np.frombuffer(b"\x01\x02" + b"\x00" * 8 + b"\xff\xd9", dtype=np.uint8)
     ext = "Corrupt JPEG data: 8 extraneous bytes before marker 0xd9"
-    assert hvcam_module._classify_mjpeg_warning(ext, pad) == "padding"
+    assert mjpeg_module._classify_mjpeg_warning(ext, pad) == "padding"
     bad = "Corrupt JPEG data: bad Huffman code"
-    assert hvcam_module._classify_mjpeg_warning(bad, pad) == "corrupt"
+    assert mjpeg_module._classify_mjpeg_warning(bad, pad) == "corrupt"
     wrong_n = "Corrupt JPEG data: 9 extraneous bytes before marker 0xd9"
-    assert hvcam_module._classify_mjpeg_warning(wrong_n, pad) == "corrupt"
+    assert mjpeg_module._classify_mjpeg_warning(wrong_n, pad) == "corrupt"
+
+
+@pytest.mark.parametrize("corrupt", [False, True])
+def test_strict_decoder_preserves_concurrent_stderr(corrupt, monkeypatch, capfdbinary):
+    import threading
+
+    buf = _jpeg_with_tail_before_eoi(bytes(range(1, 41)) if corrupt else b"")
+    reading = threading.Event()
+    logged = threading.Event()
+    message = b"other thread diagnostics " + b"x" * 8192 + b"\n"
+    receive = mjpeg_module._MjpegDecoder._receive
+
+    def receive_after_log(pipe):
+        reading.set()
+        assert logged.wait(5)
+        return receive(pipe)
+
+    def write_log():
+        if reading.wait(5):
+            os.write(2, message)
+            logged.set()
+
+    monkeypatch.setattr(
+        mjpeg_module._MjpegDecoder, "_receive", staticmethod(receive_after_log)
+    )
+    writer = threading.Thread(target=write_log)
+    writer.start()
+    try:
+        if corrupt:
+            with pytest.raises(ValueError, match="corrompido"):
+                hvcam_module._imdecode_mjpeg_strict(buf)
+        else:
+            assert hvcam_module._imdecode_mjpeg_strict(buf).shape == (96, 96, 3)
+    finally:
+        writer.join(timeout=6)
+    assert capfdbinary.readouterr().err == message
 
 
 def test_native_raw_tries_yuy2_when_nv12_is_too_slow(tmp_path):

@@ -32,9 +32,7 @@ import shutil
 import socket
 import struct
 import subprocess
-import sys
 import tempfile
-import threading
 import time
 import urllib.error
 import urllib.parse
@@ -45,6 +43,8 @@ from urllib.parse import urlparse
 
 import cv2
 import numpy as np
+
+from ._hvcam_mjpeg import decode_mjpeg as _imdecode_mjpeg_strict
 
 # Porta padrao do servico vsock — a mesma do protocolo hvcam e do
 # ajudante draw (coincidencia util: ambos falam 8765).
@@ -974,9 +974,6 @@ _MJPEG_STANDARD_DHT = bytes(
 )
 
 
-_STDERR_REDIRECT_LOCK = threading.Lock()
-
-
 def _sanitize_mjpeg(frame):
     """Valida e saneia um payload MJPEG antes do `cv2.imdecode`.
 
@@ -1042,79 +1039,6 @@ def _sanitize_mjpeg(frame):
     if soi == 0 and eoi + 2 == n and isinstance(frame, np.ndarray):
         return frame
     return np.frombuffer(bytes(view[soi : eoi + 2]), dtype=np.uint8)
-
-
-_EXTRANEOUS_RE = re.compile(r"(\d+) extraneous bytes before marker 0xd9")
-
-
-def _classify_mjpeg_warning(line, buf):
-    """Classifica uma linha de aviso do libjpeg: "corrupt", "padding" ou "other".
-
-    "extraneous bytes before marker 0xd9" so e inofensivo se os N bytes logo
-    antes do EOI forem padding (0x00/0xFF), como em varias webcams UVC. Se forem
-    dados de scan, o decode consumiu menos bytes do que devia (dano real).
-    """
-    lower = line.lower()
-    if "premature end" in lower:
-        return "corrupt"
-    if "corrupt jpeg" not in lower:
-        return "other"
-    m = _EXTRANEOUS_RE.search(lower)
-    if m is None:
-        return "corrupt"
-    n = int(m.group(1))
-    data = np.asarray(buf, dtype=np.uint8).reshape(-1)
-    if n <= 0 or data.size < n + 2 or data[-2] != 0xFF or data[-1] != 0xD9:
-        return "corrupt"
-    tail = data[-2 - n : -2]
-    return "padding" if bool(np.all((tail == 0x00) | (tail == 0xFF))) else "corrupt"
-
-
-def _imdecode_mjpeg_strict(buf):
-    """Decodifica MJPEG e falha se o libjpeg emitir aviso de scan corrompido.
-
-    Quando um scan MJPEG termina prematuramente mas mantem `FF D9` no fim,
-    `cv2.imdecode` devolve uma imagem metade-cinza acompanhada de aviso
-    `Corrupt JPEG data` no stderr C (fd 2). Capturar o fd 2 sob lock transforma
-    esse aviso em `ValueError` para que o fallback NV12/YUY2 seja acionado.
-    """
-    warn = ""
-    try:
-        with _STDERR_REDIRECT_LOCK:
-            try:
-                sys.stderr.flush()
-            except Exception:  # noqa: BLE001
-                pass
-            with tempfile.TemporaryFile() as tmp:
-                saved_fd = os.dup(2)
-                try:
-                    os.dup2(tmp.fileno(), 2)
-                    img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
-                finally:
-                    os.dup2(saved_fd, 2)
-                    os.close(saved_fd)
-                tmp.seek(0)
-                warn = tmp.read(4096).decode("utf-8", errors="replace")
-    except OSError:
-        img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
-    if warn:
-        passthrough = []
-        for line in warn.splitlines():
-            if not line.strip():
-                continue
-            verdict = _classify_mjpeg_warning(line, buf)
-            if verdict == "corrupt":
-                raise ValueError(f"hvcam: payload MJPEG corrompido ({line.strip()})")
-            if verdict == "other":
-                passthrough.append(line)
-        if passthrough:
-            try:
-                sys.stderr.write("\n".join(passthrough) + "\n")
-            except Exception:  # noqa: BLE001
-                pass
-    if img is None or img.size == 0:
-        raise ValueError("hvcam: payload MJPEG falhou no decode")
-    return img
 
 
 class Camera:
