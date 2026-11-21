@@ -549,6 +549,46 @@ def test_ink_auto_gain_brightens_dark_page_before_ink():
     assert float(lit.min()) < 0.5 * float(np.percentile(lit, 90))
 
 
+def test_ink_auto_gain_smoothing_reaches_the_page_clean_input():
+    """Devin Review PR #140: o replay do issue-133 derivava a prob do
+    escalar de ganho; aqui a página efetivamente entregue ao page_clean
+    prova que a LUT aplicada é a saída do suavizador, não o alvo cru. O
+    p90 do papel oscila ±2,5% — dentro da banda morta de 3%, então o
+    ganho fica ~2,5; com o alvo cru a sombra oscilaria ~6 níveis."""
+    loop, _det, ink = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", None),
+        config=PipelineConfig(ink_auto_gain=True),
+    )
+
+    def scene(level):
+        frame = np.full((720, 1280, 3), 225, np.uint8)
+        frame[100:400, 100:500] = level
+        frame[150:250, 200:300] = 50  # sombra local não altera o p90 do papel
+        return frame
+
+    _drive(loop, 40, frame=scene(80))
+    ink.pages.clear()
+    shadow_samples = []
+    applied_gains = []
+    for level in (80, 78, 82, 78, 80, 82, 80):
+        loop.step(_packet(loop, scene(level)))
+        page = ink.pages[-1].image
+        # page[270:295, 300:350] cai sobre a sombra (y 150-250, x 200-300
+        # do frame) na grade retificada (1200, 850).
+        shadow_samples.append(float(page[270:295, 300:350].mean()))
+        # last_ink_gain é o ganho declarado pelo passo que produziu
+        # pages[-1]: a cadência pode pular quadros, mas o par
+        # (página, ganho) é sempre da mesma passada.
+        applied_gains.append(loop.last_ink_gain)
+
+    # A sombra 50 sobe a ~50 x ganho declarado, pixel a pixel: sem o
+    # apply_gain a página leria ~50; com o alvo cru leria ~128/122.
+    for sample, gain in zip(shadow_samples, applied_gains, strict=True):
+        assert sample == pytest.approx(50.0 * gain, abs=1.5)
+    assert max(applied_gains) - min(applied_gains) <= 0.01
+    assert max(shadow_samples) - min(shadow_samples) <= 1.0
+
+
 def test_ink_auto_gain_ignores_bright_desk_inside_the_quad():
     """Review #52: o quad abrange papel escuro (86%) e mesa clara (14%);
     o ganho é estimado só sobre a folha (cobertura), então o papel é

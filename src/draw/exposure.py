@@ -13,7 +13,8 @@ máscara de cobertura da folha, só os pixels da folha entram na conta:
 a mesa clara que o quad abrange não cancela o ganho do papel escuro
 (review do PR #52). Nunca escurece (ganho >= 1: página bem exposta
 passa intacta) e tem teto _MAX_GAIN (frame quase preto não vira ruído
-amplificado). Linear e por quadro: não muda a ordem dos níveis.
+amplificado). O ganho continua linear, mas sua estimativa é suavizada entre
+quadros para o ruído do p90 não oscilar a entrada do modelo.
 
 Custo: roda no laço de UI (orçamento de 33 ms a 30 fps). O percentil
 sai de uma amostra esparsa (1 pixel a cada _SAMPLE_STRIDE por eixo) e o
@@ -21,12 +22,16 @@ ganho se aplica por tabela (cv2.LUT): ~1 ms num warp A4, contra ~24 ms
 do cálculo ingênuo sobre todos os pixels.
 """
 
+import math
+
 import cv2
 import numpy as np
 
 _TARGET_P90 = 200.0
 _MAX_GAIN = 3.0
 _SAMPLE_STRIDE = 8
+_GAIN_TIME_CONSTANT_SECONDS = 0.35
+_GAIN_DEADBAND_LOG = math.log1p(0.03)
 
 
 def paper_gain(image, mask=None):
@@ -50,7 +55,62 @@ def paper_gain(image, mask=None):
 def apply_paper_gain(image, mask=None):
     """(imagem uint8 com ganho aplicado, ganho usado)."""
     gain = paper_gain(image, mask)
+    return apply_gain(image, gain), gain
+
+
+def apply_gain(image, gain):
+    """Aplica um ganho linear em [1, _MAX_GAIN] com LUT uint8."""
+    gain = float(np.clip(gain, 1.0, _MAX_GAIN))
     if gain == 1.0:
-        return image, gain
+        return image
     table = np.clip(np.arange(256, dtype=np.float32) * gain, 0, 255).astype(np.uint8)
-    return cv2.LUT(image, table), gain
+    return cv2.LUT(image, table)
+
+
+class PaperGainSmoother:
+    """Amortece pequenas oscilações do ganho estimado entre passadas.
+
+    A banda morta de 3% evita que ruído do p90 altere a LUT. Mudanças
+    maiores são seguidas em escala logarítmica, com constante de tempo
+    curta para não prender a exposição quando a iluminação realmente muda.
+    Alvo 1,0 é bypass, não amortecimento: papel já bem exposto não pode
+    esperar a banda morta liberar o resíduo — cada passada ganhada clipa
+    o traço claro junto do papel.
+    """
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self._gain = None
+        self._updated_at = None
+
+    def update(self, target_gain, timestamp):
+        """Retorna o ganho temporalmente estabilizado para `timestamp` (s)."""
+        target = float(np.clip(target_gain, 1.0, _MAX_GAIN))
+        now = float(timestamp)
+        if not math.isfinite(now):
+            raise ValueError(f"timestamp precisa ser finito: {timestamp!r}")
+        if self._gain is None or self._updated_at is None:
+            self._gain = target
+            self._updated_at = now
+            return self._gain
+
+        elapsed = now - self._updated_at
+        if elapsed <= 0.0:
+            return self._gain
+        self._updated_at = now
+
+        if target == 1.0:
+            self._gain = target
+            return self._gain
+
+        current_log = math.log(self._gain)
+        target_log = math.log(target)
+        error = target_log - current_log
+        if abs(error) <= _GAIN_DEADBAND_LOG:
+            return self._gain
+
+        alpha = -math.expm1(-elapsed / _GAIN_TIME_CONSTANT_SECONDS)
+        self._gain = math.exp(current_log + alpha * error)
+        return self._gain

@@ -339,6 +339,7 @@ class Pipeline:
         self.last_tracker_event = None
         # Ganho digital do ultimo warp de tinta (ink_auto_gain); 1.0 sem ganho.
         self.last_ink_gain = 1.0
+        self._paper_gain_smoother = exposure.PaperGainSmoother()
         self.generation_events = {"drop": 0, "reopen": 0}
         # Telemetria do piso de cobertura (issue #105): o
         # coverage_iou_floor nao tem denominador natural para
@@ -527,7 +528,12 @@ class Pipeline:
                     gain_mask &= coverage
                 if visible is not None:
                     gain_mask &= visible
-                frame, self.last_ink_gain = exposure.apply_paper_gain(frame, gain_mask)
+                target_gain = exposure.paper_gain(frame, gain_mask)
+                gain_at = self._clock() if captured_at is None else captured_at
+                self.last_ink_gain = self._paper_gain_smoother.update(
+                    target_gain, gain_at
+                )
+                frame = exposure.apply_gain(frame, self.last_ink_gain)
             fill_color = None
             if coverage is not None and coverage.any():
                 # Fora da folha o warp é preto: a transição
@@ -639,6 +645,7 @@ class Pipeline:
         self.clean_display_version = 0
         # A tinta antiga morreu: a saida ao vivo precisa saber (canvas limpo).
         self._on_ink(contracts.InkPublication(-1, 0, None))
+        self._paper_gain_smoother.reset()
         self.tracker.reset()
         detect_wake = getattr(self, "_detect_wake", None)
         if detect_wake is not None:
@@ -990,6 +997,7 @@ class Pipeline:
                 self.clean_generation = self.ink_worker.new_generation(
                     preserve_identity=self.clean_recovery_pending
                 )
+                self._paper_gain_smoother.reset()
                 self.clean_recovery_pending = False
                 self.clean_display_version = 0
                 self.clean_provisional_mask = None

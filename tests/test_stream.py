@@ -440,17 +440,21 @@ def test_worker_generation_maps_to_monotonic_stream_generation(monkeypatch):
 
 
 def test_reset_source_publishes_clear():
+    from draw import exposure
     from draw import pipeline as pipeline_module
 
     calls = []
     pipe = pipeline_module.Pipeline.__new__(pipeline_module.Pipeline)
     pipe._on_ink = calls.append
+    pipe._paper_gain_smoother = exposure.PaperGainSmoother()
+    pipe._paper_gain_smoother.update(2.5, 0.0)
     pipe._source_id = 0
     pipe.ink_worker = type("I", (), {"set_hand_presence": lambda *_: None})()
     pipe.tracker = type("T", (), {"reset": lambda self: None})()
     pipe.corner_history = type("C", (), {"clear": lambda self: None})()
     pipe.reset_source(1.0)
     assert len(calls) == 1 and calls[0].confirmed is None
+    assert pipe._paper_gain_smoother.update(1.5, 1.0) == pytest.approx(1.5)
 
 
 def test_reconnect_at_capacity_does_not_evict_healthy_consumer(monkeypatch):
