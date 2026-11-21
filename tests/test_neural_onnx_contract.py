@@ -267,6 +267,27 @@ def test_plausibility_guard_still_accepts_a_normal_sheet():
     assert fit_plausible(quad, (720, 1280)) is True
 
 
+def test_plausibility_guard_accepts_clipped_sheet_with_border_short_edge():
+    # Issue #104: folha cortada pelo frame tem a aresta curta na borda —
+    # e o recorte do frame, nao um colapso. A razao entre opostas (aqui
+    # ~28x) nao pode rejeitar.
+    quad = np.array(
+        [[0.0, 50.0], [30.0, 60.0], [900.0, 700.0], [0.0, 680.0]],
+        dtype=np.float32,
+    )
+    assert fit_plausible(quad, (720, 1280)) is True
+
+
+def test_plausibility_guard_still_refuses_collapsed_interior_short_edge():
+    # A assinatura do colapso por oclusao e a aresta curta interior ao
+    # quadro: a razao entre opostas continua rejeitando.
+    quad = np.array(
+        [[300.0, 300.0], [340.0, 310.0], [900.0, 700.0], [280.0, 690.0]],
+        dtype=np.float32,
+    )
+    assert fit_plausible(quad, (720, 1280)) is False
+
+
 # ------------------------------------------------------- ONNX de verdade
 onnx_fixtures = pytest.importorskip("onnx_fixtures")
 
