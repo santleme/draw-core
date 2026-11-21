@@ -97,7 +97,8 @@ export function runBlast(onCovered: () => void): () => void {
   const frame = (now: number) => {
     if (!start) { start = now; last = now; }
     const elapsed = now - start;
-    const dt = Math.min(0.05, (now - last) / 1000);
+    const gap = (now - last) / 1000;
+    const dt = Math.min(0.05, gap); // fisica limitada; a emissao usa o intervalo real
     last = now;
     const t = Math.min(1, elapsed / DURATION);
     const points = Array.from({ length: SAMPLES }, (_, i) => {
@@ -124,7 +125,7 @@ export function runBlast(onCovered: () => void): () => void {
       ctx.fill();
       if (t < 0.85) {
         // quantidade por segundo (nao por quadro), para a densidade ser igual em 60 e 120 Hz
-        const want = (18 + 40 * (1 - t)) * 60 * dt;
+        const want = (18 + 40 * (1 - t)) * 60 * gap;
         spawn(t, elapsed, Math.floor(want) + (Math.random() < want % 1 ? 1 : 0));
       }
       for (let i = shards.length - 1; i >= 0; i -= 1) {
