@@ -860,6 +860,40 @@ def test_main_spread_mode_entra_na_pipeline_config(monkeypatch):
     assert pipeline.spread_mode == "always"
 
 
+def test_main_markers_recusa_spread_mode_explicito(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["draw", "--markers", "--spread-mode", "auto"])
+    with pytest.raises(SystemExit) as error:
+        app_module.main()
+    assert error.value.code == 2
+
+
+def test_run_warns_when_spread_mode_has_no_neural_detector(
+    monkeypatch, tmp_path, capsys
+):
+    from draw.settings import PipelineConfig
+
+    monkeypatch.setattr(app_module, "_apply_opencv_thread_cap", lambda: None)
+    monkeypatch.setattr(app_module, "_require_gui_backend", lambda: None)
+    monkeypatch.setattr(app_module, "_open_window", lambda _fullscreen: None)
+    monkeypatch.setattr(app_module, "_provision_official_models", lambda *_args: None)
+    monkeypatch.setattr(app_module, "_DEFAULT_SHEET_MODEL", tmp_path / "missing.onnx")
+    monkeypatch.setattr(app_module.cv2, "destroyAllWindows", lambda: None)
+
+    class _FailingPageClean:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def load(self):
+            raise RuntimeError("stop before camera setup")
+
+    monkeypatch.setattr(app_module, "PageCleanInk", _FailingPageClean)
+
+    with pytest.raises(RuntimeError, match="modelo pagina->limpa nao carregou"):
+        app_module.run(pipeline_config=PipelineConfig(spread_mode="always"))
+
+    assert "spread_mode='always' nao aplicado" in capsys.readouterr().out
+
+
 def test_main_markers_sem_flags_usa_o_preset_legado(monkeypatch):
     pipeline = _run_main(monkeypatch, "--markers")["pipeline_config"]
     assert pipeline.ink == app_module.InkConfig()

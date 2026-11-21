@@ -747,6 +747,22 @@ def test_pipeline_config_exposes_validated_spread_mode():
         PipelineConfig(spread_mode="sometimes")
 
 
+def test_neural_detector_honors_spread_mode_never():
+    from draw.perception import NeuralSheetDetector
+
+    mask = np.zeros((400, 800), dtype=np.uint8)
+    mask[50:350, 50:300] = 255
+    mask[50:350, 310:560] = 255
+
+    automatic = NeuralSheetDetector("unused.onnx", verify=None)
+    automatic._fit(mask)
+    never = NeuralSheetDetector("unused.onnx", verify=None, spread_mode="never")
+    never._fit(mask)
+
+    assert automatic._memory_is_spread is True
+    assert never._memory_is_spread is False
+
+
 def test_fit_does_not_swallow_typeerror_from_geometry(monkeypatch):
     from draw import geometry as geometry_module
     from draw.perception import NeuralSheetDetector
