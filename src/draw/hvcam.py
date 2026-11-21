@@ -1798,24 +1798,30 @@ def open_managed_reverse(
             ):
                 cap.release()
                 nat_cap, nat_mjpeg, nat_fps, nat_err = _attempt(dev_idx, [])
-                native_raw_fmt = None
-                if nat_cap is not None and (
-                    nat_fps is None or nat_fps > measured_fps * 1.15
-                ):
+                # Ultimo recurso se 720p sumir: modo nativo que funcionou mas nao
+                # provou ser mais rapido.
+                native_last_args = None
+
+                def _faster(f, m=measured_fps):
+                    # Taxa desconhecida (ex.: um unico quadro) nao e upgrade.
+                    return f is not None and f > m * 1.15
+
+                if nat_cap is not None and _faster(nat_fps):
                     return nat_cap, dev_idx, dev_name
                 if nat_cap is not None:
                     nat_cap.release()
+                    native_last_args = []
                 elif nat_mjpeg:
                     # Raw nativo costuma ser mais lento (USB2): so troca o 720p
                     # MJPEG limpo se a taxa medida for claramente maior.
                     raw_cap, raw_err, native_raw_fmt = _try_raw_formats(
-                        dev_idx,
-                        [],
-                        accept=lambda f, m=measured_fps: f is None or f > m * 1.15,
+                        dev_idx, [], accept=_faster
                     )
                     if raw_cap is not None:
                         return raw_cap, dev_idx, dev_name
-                    if raw_err:
+                    if native_raw_fmt is not None:
+                        native_last_args = ["--format", native_raw_fmt]
+                    elif raw_err:
                         last_host_error = raw_err
                 if nat_err:
                     last_host_error = nat_err
@@ -1831,11 +1837,8 @@ def open_managed_reverse(
                         return raw_cap, dev_idx, dev_name
                     if raw_err:
                         last_host_error = raw_err
-                if native_raw_fmt is not None:
-                    # Ultimo recurso: o raw nativo lento que ja passou no probe.
-                    raw_cap, _m, _f, _e = _attempt(
-                        dev_idx, ["--format", native_raw_fmt]
-                    )
+                if native_last_args is not None:
+                    raw_cap, _m, _f, _e = _attempt(dev_idx, native_last_args)
                     if raw_cap is not None:
                         return raw_cap, dev_idx, dev_name
                 continue
@@ -1849,6 +1852,21 @@ def open_managed_reverse(
                 return raw_cap, dev_idx, dev_name
             if raw_err:
                 last_host_error = raw_err
+        if base_mode:
+            # O modo pedido (720p) nao abriu ou nao deu video utilizavel: tenta o
+            # mesmo dispositivo sem sobrescritas, como antes do 720p, antes de
+            # passar para outra camera.
+            nat_cap, nat_mjpeg, _nf, nat_err = _attempt(dev_idx, [])
+            if nat_cap is not None:
+                return nat_cap, dev_idx, dev_name
+            if nat_err:
+                last_host_error = nat_err
+            if nat_mjpeg:
+                raw_cap, raw_err, _rej = _try_raw_formats(dev_idx, [])
+                if raw_cap is not None:
+                    return raw_cap, dev_idx, dev_name
+                if raw_err:
+                    last_host_error = raw_err
     if last_host_error:
         raise RuntimeError(last_host_error)
     return None, None, None

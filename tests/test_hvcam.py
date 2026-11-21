@@ -911,12 +911,14 @@ def test_open_managed_reverse_falls_back_to_working_device_and_cleans_up(tmp_pat
     )
     assert cap is not None
     assert (dev_idx, dev_name) == (1, "Working Cam")
-    assert len(procs) == 2
+    # Dispositivo 0: 720p e depois nativo (ambos sem quadros), entao dispositivo 1.
+    assert len(procs) == 3
     assert procs[0].terminated is True
-    assert procs[1].terminated is False
+    assert procs[1].terminated is True
+    assert procs[2].terminated is False
 
     cap.release()
-    assert procs[1].terminated is True
+    assert procs[2].terminated is True
 
 
 def test_windows_cache_dir_handles_accented_utf8_profile(monkeypatch):
@@ -1779,3 +1781,62 @@ def test_slow_native_raw_is_last_resort_when_720p_is_gone(tmp_path):
     cap, _cmds = _scripted_open(tmp_path, behave)
     assert cap is not None
     assert "--format" in cap._cmd and "--width" not in cap._cmd
+
+
+def test_requested_mode_that_cannot_start_falls_back_to_native(tmp_path):
+    """720p nao produz video algum (nem raw); o modo nativo (sem argumentos)
+    funcionava antes e precisa ser tentado antes de abandonar a camera."""
+
+    def behave(cmd, n):
+        if "--width" in cmd:
+            return True, 67  # 720p (e 720p raw) corrompidos
+        return False, 33  # nativo OK
+
+    cap, cmds = _scripted_open(tmp_path, behave)
+    assert cap is not None
+    assert "--width" not in cap._cmd and "--format" not in cap._cmd
+
+
+def test_unmeasured_native_stream_does_not_replace_working_720p(tmp_path):
+    """Nativo entrega 1 quadro e para: FPS desconhecido nao e upgrade."""
+    fake_exe = tmp_path / "hvcam-host.exe"
+    fake_exe.write_bytes(b"MZ")
+    cmds = []
+
+    def fake_popen(cmd, **_kw):
+        cmds.append(list(cmd))
+        return _ScriptedProc(cmd)
+
+    class _Cap:
+        def __init__(self, url, **kw):
+            self.mjpeg_decode_errors = 0
+            self.last_capture_ts_ms = None
+            kw["on_listening"]()
+            self._cmd = cmds[-1]
+            self._native = "--width" not in self._cmd
+            self._opened = True
+            self._n = 0
+
+        def isOpened(self):
+            return self._opened
+
+        def read(self):
+            self._n += 1
+            if self._native and self._n > 1:
+                return False, None  # nativo trava depois do 1o quadro
+            self.last_capture_ts_ms = self._n * 67
+            return True, _frame()
+
+        def release(self):
+            self._opened = False
+
+    cap, _idx, _name = hvcam_module.open_managed_reverse(
+        device=0,
+        try_all=True,
+        host_exe=fake_exe,
+        devices=[(0, "Stalling Native Cam")],
+        popen=fake_popen,
+        capture_cls=_Cap,
+    )
+    assert cap is not None
+    assert "--width" in cap._cmd
