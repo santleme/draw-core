@@ -139,7 +139,28 @@ class _PurePythonHvcamLib:
     - hvcam_connect_tcp(host_bytes, port) -> fd ou -1
     - hvcam_grab_next(fd, hdr_ptr, buf, cap, last_ptr, timeout_ms) -> bytes, -2 (timeout) ou -1 (erro)
     - hvcam_close(fd)
+
+    Usa `socket.socket` (send/recv/close) para funcionar tambem no Windows
+    nativo (onde um handle Winsock nao e um fd da CRT para os.read/os.write).
     """
+
+    def __init__(self):
+        self._sockets = {}
+
+    def _register(self, sock):
+        fd = sock.fileno()
+        self._sockets[fd] = sock
+        return fd
+
+    def _socket_for(self, fd):
+        sock = self._sockets.get(fd)
+        if sock is not None:
+            return sock
+        # Conexao aceita externamente (ex.: _listen_vsock_bounded que retorna
+        # um fd destacado via conn.detach()): reencapsula sem duplicar o fd.
+        sock = socket.socket(fileno=fd)
+        self._sockets[fd] = sock
+        return sock
 
     def hvcam_connect(self, port):
         af_vsock = getattr(socket, "AF_VSOCK", 40)
@@ -151,11 +172,10 @@ class _PurePythonHvcamLib:
         try:
             sock.connect((cid_host, int(port)))
             sock.setblocking(True)
-            return sock.detach()
+            return self._register(sock)
         except OSError as error:
-            return -(error.errno or errno.EIO)
-        finally:
             sock.close()
+            return -(error.errno or errno.EIO)
 
     def hvcam_connect_tcp(self, host_bytes, port):
         host = (
@@ -177,18 +197,17 @@ class _PurePythonHvcamLib:
                 sock = socket.socket(family, socktype, proto)
                 sock.connect(sockaddr)
                 sock.setblocking(True)
-                return sock.detach()
+                return self._register(sock)
             except OSError:
-                continue
-            finally:
                 if sock is not None:
                     sock.close()
+                continue
         return -1
 
     @staticmethod
-    def _wait_readable(fd, deadline):
+    def _wait_readable(sock, deadline):
         with selectors.DefaultSelector() as sel:
-            sel.register(fd, selectors.EVENT_READ)
+            sel.register(sock, selectors.EVENT_READ)
             while True:
                 left = deadline - time.monotonic()
                 if left <= 0:
@@ -204,17 +223,17 @@ class _PurePythonHvcamLib:
                 return 0
 
     @classmethod
-    def _read_full(cls, fd, total, deadline):
+    def _read_full(cls, sock, total, deadline):
         chunks = bytearray()
         remaining = total
         while remaining > 0:
-            w = cls._wait_readable(fd, deadline)
+            w = cls._wait_readable(sock, deadline)
             if w == -2:
                 return None, (-1 if len(chunks) > 0 else -2)
             if w != 0:
                 return None, w
             try:
-                data = os.read(fd, remaining)
+                data = sock.recv(remaining)
             except InterruptedError:
                 continue
             except BlockingIOError:
@@ -228,12 +247,12 @@ class _PurePythonHvcamLib:
         return bytes(chunks), 0
 
     @staticmethod
-    def _write_full(fd, data):
+    def _write_full(sock, data):
         view = memoryview(data)
         sent = 0
         while sent < len(view):
             try:
-                n = os.write(fd, view[sent:])
+                n = sock.send(view[sent:])
             except InterruptedError:
                 continue
             except OSError:
@@ -244,10 +263,10 @@ class _PurePythonHvcamLib:
         return 0
 
     @classmethod
-    def _pull_frame(cls, fd, hdr, buf, cap, deadline):
-        if cls._write_full(fd, _HVCAM_REQ) < 0:
+    def _pull_frame(cls, sock, hdr, buf, cap, deadline):
+        if cls._write_full(sock, _HVCAM_REQ) < 0:
             return -1
-        raw_hdr, rc = cls._read_full(fd, _HEADER_STRUCT.size, deadline)
+        raw_hdr, rc = cls._read_full(sock, _HEADER_STRUCT.size, deadline)
         if rc != 0:
             return rc
         (
@@ -276,7 +295,7 @@ class _PurePythonHvcamLib:
             or payload_bytes > _MAX_PAYLOAD
         ):
             return -1
-        raw_payload, rc = cls._read_full(fd, payload_bytes, deadline)
+        raw_payload, rc = cls._read_full(sock, payload_bytes, deadline)
         if rc == -2:
             return -1
         if rc != 0:
@@ -287,6 +306,10 @@ class _PurePythonHvcamLib:
         return stored
 
     def hvcam_grab_next(self, fd, hdr_ptr, buf, cap, last_ptr, timeout_ms):
+        try:
+            sock = self._socket_for(fd)
+        except OSError:
+            return -1
         hdr = hdr_ptr._obj if hasattr(hdr_ptr, "_obj") else hdr_ptr.contents
         last = last_ptr._obj if hasattr(last_ptr, "_obj") else last_ptr.contents
         deadline = time.monotonic() + (timeout_ms / 1000.0)
@@ -297,7 +320,7 @@ class _PurePythonHvcamLib:
                 return -2
             if drained and left < _MIN_REQ_SECONDS:
                 return -2
-            n = self._pull_frame(fd, hdr, buf, cap, deadline)
+            n = self._pull_frame(sock, hdr, buf, cap, deadline)
             if n == -2:
                 return -1
             if n < 0:
@@ -307,16 +330,24 @@ class _PurePythonHvcamLib:
                 last.value = hdr.seq_num
                 return n
             nap_end = min(time.monotonic() + _NAP_SECONDS, deadline)
-            w = self._wait_readable(fd, nap_end)
+            w = self._wait_readable(sock, nap_end)
             if w == -1:
                 return -1
 
     def hvcam_close(self, fd):
-        if fd >= 0:
+        if fd < 0:
+            return
+        sock = self._sockets.pop(fd, None)
+        if sock is not None:
             try:
-                os.close(fd)
+                sock.close()
             except OSError:
                 pass
+            return
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 _PYTHON_LIB = _PurePythonHvcamLib()

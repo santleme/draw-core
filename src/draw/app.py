@@ -271,10 +271,24 @@ def run_check(source=0, helper_token_file=None):
 
     nodes = _video_nodes()
     if not nodes:
+        if source == 0 and is_wsl():
+            candidate, hv_cap = camera_module.open_wsl_hvcam_fallback(source)
+            if hv_cap is not None:
+                ok, frame = hv_cap.read()
+                hv_cap.release()
+                if ok and frame is not None:
+                    print(
+                        f"PASS: quadro lido da fonte hvcam ({candidate}). "
+                        f"Formato (altura, largura, canais): {frame.shape}."
+                    )
+                    return 0 if all_ok else 1
+                print(f"FAIL: a fonte {candidate} abriu, mas nenhum quadro chegou.")
+                return 1
         print("FAIL: nenhum /dev/video* existe neste sistema.")
         if is_wsl():
             print(
-                "  Correcao: anexe a camera com "
+                "  Correcao: no Windows rode 'hvcam-host.exe --reverse' "
+                "(santleme/hvcam) ou anexe a camera com "
                 "bash scripts/setup_camera_wsl.sh. A alternativa e uma "
                 "camera via rede com --source."
             )

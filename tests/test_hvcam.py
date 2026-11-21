@@ -632,3 +632,78 @@ def test_open_capture_on_wsl_without_dev_video0_falls_back_to_hvcam(monkeypatch)
         assert ok and frame.shape == (48, 64, 3)
     finally:
         capture.release()
+
+
+def test_pure_python_hvcam_lib_tcp_loopback_end_to_end(monkeypatch):
+    """Testa o caminho publico hvcam+tcp:// usando socket.socket (send/recv/close),
+    compativel tambem com Winsock no Windows nativo."""
+    import socket
+    import struct
+    import threading
+
+    monkeypatch.setattr(hvcam_module, "_LIB", None)
+    monkeypatch.setattr(
+        hvcam_module,
+        "_load",
+        lambda: (_ for _ in ()).throw(OSError("sem libhvcam.so")),
+    )
+    payload = np.arange(4 * 2 * 3, dtype=np.uint8).tobytes()
+    header = struct.pack(
+        "<IHHQQHHII",
+        0x4856434D,
+        1,
+        1,
+        7,
+        555_000,
+        4,
+        2,
+        1,
+        len(payload),
+    )
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("127.0.0.1", 0))
+    port = server.getsockname()[1]
+    server.listen(1)
+
+    def serve():
+        conn, _ = server.accept()
+        try:
+            req = conn.recv(1)
+            assert req == b"Q"
+            conn.sendall(header + payload)
+        finally:
+            conn.close()
+            server.close()
+
+    t = threading.Thread(target=serve, daemon=True)
+    t.start()
+    cap = HvcamCapture(f"hvcam+tcp://127.0.0.1:{port}", timeout_ms=2000)
+    try:
+        assert cap.isOpened()
+        ok, frame = cap.read()
+        assert ok and frame.shape == (2, 4, 3)
+        assert cap.last_frame_id == 7
+    finally:
+        cap.release()
+        t.join(timeout=2.0)
+
+
+def test_run_check_on_wsl_without_dev_video_uses_hvcam_fallback(monkeypatch, capsys):
+    cam = FakeCamera([(_info(), _payload())])
+    hv_cap = HvcamCapture("hvcam+reverse://", camera_factory=_factory(cam))
+
+    monkeypatch.setattr(app_module.sys, "platform", "linux")
+    monkeypatch.setattr(app_module, "_require_gui_backend", lambda: None)
+    monkeypatch.setattr(app_module, "_check_models", lambda: True)
+    monkeypatch.setattr(app_module, "_video_nodes", lambda: [])
+    monkeypatch.setattr(app_module, "is_wsl", lambda: True)
+    monkeypatch.setattr(
+        camera_module,
+        "open_wsl_hvcam_fallback",
+        lambda source, **kw: ("hvcam+reverse://", hv_cap),
+    )
+
+    assert app_module.run_check(0) == 0
+    assert cam.closed is True
+    out = capsys.readouterr().out
+    assert "quadro lido da fonte hvcam (hvcam+reverse://)" in out

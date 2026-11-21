@@ -493,6 +493,40 @@ def _local_open_hint(source):
     )
 
 
+_WSL_HVCAM_CANDIDATES = ("hvcam://", "hvcam+reverse://")
+
+
+def open_wsl_hvcam_fallback(source, *, connect_timeout_ms=None):
+    """Tenta abrir a camera do Windows via hvcam quando WSL nao tem /dev/video0.
+
+    Compartilhado entre `open_capture` e `run_check` para que `draw --check`
+    valide exatamente o mesmo fallback que `draw` usa na abertura ao vivo.
+    Devolve `(source_url, HvcamCapture)` ou `(None, None)`.
+    """
+    if source != 0 or not sys.platform.startswith("linux") or not is_wsl():
+        return None, None
+    if os.path.exists("/dev/video0") or _video_nodes():
+        return None, None
+    print(
+        "WSL sem /dev/video0: tentando camera do Windows via hvcam "
+        "(hvcam:// e hvcam+reverse:// na porta 8765)..."
+    )
+    for candidate in _WSL_HVCAM_CANDIDATES:
+        if candidate == "hvcam+reverse://":
+            print(
+                "Aguardando hvcam-host.exe --reverse conectar no Windows (ate 35 s)..."
+            )
+        kwargs = {}
+        if connect_timeout_ms is not None:
+            kwargs["connect_timeout_ms"] = connect_timeout_ms
+        hv_cap = HvcamCapture(candidate, **kwargs)
+        if hv_cap.isOpened():
+            print(f"Camera do Windows conectada via {candidate}.")
+            return candidate, hv_cap
+        hv_cap.release()
+    return None, None
+
+
 def open_capture(source, capture_factory=None, helper_token_file=None):
     global _LAST_OPEN_PROBE
     _LAST_OPEN_PROBE = None
@@ -546,29 +580,10 @@ def open_capture(source, capture_factory=None, helper_token_file=None):
             return capture
     hint = f"Nao consegui abrir a fonte de video: {source!r}. "
     if isinstance(source, int):
-        if (
-            default_factory
-            and source == 0
-            and sys.platform.startswith("linux")
-            and is_wsl()
-        ):
-            node = f"/dev/video{source}"
-            if not os.path.exists(node) and not _video_nodes():
-                print(
-                    "WSL sem /dev/video0: tentando camera do Windows via hvcam "
-                    "(hvcam:// e hvcam+reverse:// na porta 8765)..."
-                )
-                for hvcam_candidate in ("hvcam://", "hvcam+reverse://"):
-                    if hvcam_candidate == "hvcam+reverse://":
-                        print(
-                            "Aguardando hvcam-host.exe --reverse conectar no Windows "
-                            "(ate 35 s)..."
-                        )
-                    hv_cap = HvcamCapture(hvcam_candidate)
-                    if hv_cap.isOpened():
-                        print(f"Camera do Windows conectada via {hvcam_candidate}.")
-                        return hv_cap
-                    hv_cap.release()
+        if default_factory:
+            _candidate, hv_cap = open_wsl_hvcam_fallback(source)
+            if hv_cap is not None:
+                return hv_cap
         hint += _local_open_hint(source)
     else:
         hint += (
