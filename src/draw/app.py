@@ -1051,6 +1051,61 @@ def _window_size():
     return rect if rect and rect[0] >= 320 and rect[1] >= 160 else default
 
 
+def _raise_window_on_wsl():
+    """Traz a janela para frente do desktop Windows (WSLg).
+
+    O WSLg mapeia a janela abaixo da janela ativa do Windows — com um
+    browser maximizado ela nasce invisivel mesmo dentro da tela. O
+    Wayland nao deixa o cliente se levantar (move/raise/_NET_ACTIVE_WINDOW
+    e o TOPMOST do Qt sao engolidos), entao a subida vai pelo lado
+    Windows: AttachThreadInput na thread da janela ativa +
+    SetForegroundWindow, depois de achar a janela pelo titulo (ate
+    10 s). Fire-and-forget: falhar em qualquer passo so perde a
+    subida, nada mais.
+    """
+    if "WSL_DISTRO_NAME" not in os.environ:
+        return
+    ps = (
+        "$s='using System;using System.Text;using System.Runtime.InteropServices;"
+        'public class W{[DllImport("user32.dll")]public static extern bool '
+        "EnumWindows(E e,IntPtr l);public delegate bool E(IntPtr h,IntPtr l);"
+        '[DllImport("user32.dll")]public static extern int GetWindowTextA('
+        'IntPtr h,StringBuilder s,int n);[DllImport("user32.dll")]public static '
+        'extern IntPtr GetForegroundWindow();[DllImport("user32.dll")]public '
+        "static extern uint GetWindowThreadProcessId(IntPtr h,out uint p);"
+        '[DllImport("user32.dll")]public static extern bool AttachThreadInput('
+        'uint a,uint b,bool at);[DllImport("user32.dll")]public static extern '
+        'bool SetForegroundWindow(IntPtr h);[DllImport("user32.dll")]public '
+        "static extern bool BringWindowToTop(IntPtr h);"
+        '[DllImport("user32.dll")]public static extern bool ShowWindowAsync('
+        'IntPtr h,int n);[DllImport("kernel32.dll")]public static extern uint '
+        "GetCurrentThreadId();}';"
+        "Add-Type -TypeDefinition $s;$t=[IntPtr]::Zero;$n=0;"
+        "while($t -eq [IntPtr]::Zero -and $n -lt 40){$n++;"
+        "[W]::EnumWindows({param($h,$l)$b=New-Object Text.StringBuilder 512;"
+        "[W]::GetWindowTextA($h,$b,512)|Out-Null;"
+        "if($b.ToString() -like 'Draw (*)'){$script:t=$h};return $true},"
+        "[IntPtr]::Zero)|Out-Null;"
+        "if($t -eq [IntPtr]::Zero){Start-Sleep -Milliseconds 250}};"
+        "if($t -ne [IntPtr]::Zero){$fg=[W]::GetForegroundWindow();"
+        "$ft=[W]::GetWindowThreadProcessId($fg,[ref]([uint32]$p=0));"
+        "$me=[W]::GetCurrentThreadId();"
+        "[W]::AttachThreadInput($me,$ft,$true)|Out-Null;"
+        "[W]::ShowWindowAsync($t,5)|Out-Null;"
+        "[W]::BringWindowToTop($t)|Out-Null;"
+        "[W]::SetForegroundWindow($t)|Out-Null;"
+        "[W]::AttachThreadInput($me,$ft,$false)|Out-Null}"
+    )
+    try:
+        subprocess.Popen(
+            ["powershell.exe", "-NoProfile", "-Command", ps],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        pass
+
+
 def _open_window(fullscreen):
     """Cria a janela do Draw: sem barras do Qt, redimensionavel, com mouse."""
     cv2.namedWindow(
@@ -1062,6 +1117,7 @@ def _open_window(fullscreen):
     _settings["on"]["fullscreen"] = fullscreen
     _fullscreen_applied[0] = False
     cv2.setMouseCallback(_WINDOW, _on_mouse)
+    _raise_window_on_wsl()
 
 
 def _ui_wait_seconds():
