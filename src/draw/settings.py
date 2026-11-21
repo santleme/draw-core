@@ -56,10 +56,11 @@ class PipelineConfig:
       caso existe ainda; o pior caso medido com mão (s4, escrita) fica
       em IoU 0,864. Se aparecer, `coverage_iou_floor=0` desliga o piso.
       0 desliga o piso.
-    - ink_divnorm: aplica draw.photometry.division_normalize no
-      retificado antes do page_clean — o domínio de entrada do
-      modelo de tinta v4 (sombra da mão e pauta viram problema
-      supervisionado). Desligado: o v2 congelado espera RGB cru.
+    - ink_divnorm: o retificado sobe cru e a trabalhadora aplica
+      draw.photometry.division_normalize na passada, antes do
+      page_clean — o domínio de entrada do modelo de tinta v4
+      (sombra da mão e pauta viram problema supervisionado).
+      Desligado: o v2 congelado espera RGB cru.
     - follow_move (era DRAW_INK_FOLLOW_MOVE): com a geometria de
       tinta congelada sem mão, um deslocamento sustentado da folha
       reparte o histórico de cantos na posição nova.

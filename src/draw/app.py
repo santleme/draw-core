@@ -1283,6 +1283,9 @@ def run(
                 page_clean,
                 hand_masker,
                 config=None if pipeline_config is None else pipeline_config.ink,
+                ink_divnorm=(
+                    False if pipeline_config is None else pipeline_config.ink_divnorm
+                ),
             ).start()
             print(
                 "Tinta em thread propria: o laco principal nao espera "

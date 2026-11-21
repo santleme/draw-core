@@ -34,7 +34,7 @@ import cv2
 import numpy as np
 
 from . import config as config_module
-from . import contracts, exposure, paper, photometry, tracker
+from . import contracts, exposure, paper, tracker
 from .ink import render as ink_render
 from .settings import PipelineConfig
 from .tracker import _SHEET_LOST_MIN_FRAMES
@@ -72,6 +72,17 @@ _FROZEN_SHEET_MOVE_PX = 25.0
 
 
 _STALE_PASS_MIN_FRAMES = _SHEET_LOST_MIN_FRAMES
+
+
+def _paper_mean_bgr(image, coverage):
+    """Média BGR sobre os pixels cobertos, sem materializar a seleção.
+
+    cv2.mean reduz numa passada sobre a máscara; o caminho
+    `image[coverage].mean(axis=0)` copiava os ~700-800k pixels do
+    papel (~24 ms por submit medidos na VM, issue #98) antes de
+    reduzir — mesmo resultado, ~43x mais barato.
+    """
+    return np.array(cv2.mean(image, coverage.astype(np.uint8))[:3], np.uint8)
 
 
 def _acquisition_record(trace, frame_index, consumed, before, after, tracker_event):
@@ -219,25 +230,6 @@ class Pipeline:
         self.last_ink_gain = 1.0
         self.generation_events = {"drop": 0, "reopen": 0}
 
-    @staticmethod
-    def _divnorm_page(ink_warped, coverage):
-        """ink_divnorm: domínio de entrada do modelo de tinta v4.
-
-        Paridade com o treino (draw-training pack_round4: mask_sheet
-        -> division_normalize): o fora-da-folha é preenchido ANTES da
-        normalização. Sem isso a mesa clara entra no blur de
-        iluminação e escurece a faixa de papel encostada nela — uma
-        borda falsa dentro da cobertura, que o preenchimento final
-        não alcança. O preenchimento usa a média da própria página
-        (o mesmo do caminho sem divnorm), não um branco fixo: papel
-        sob sombra ao lado de um branco fixo repetiria a borda.
-        """
-        if coverage is not None and coverage.any():
-            filled = ink_warped.copy()
-            filled[~coverage] = ink_warped[coverage].mean(axis=0).astype(np.uint8)
-            return photometry.division_normalize(filled)
-        return photometry.division_normalize(ink_warped)
-
     def _sheet_coverage_page(self, warp_corners):
         """Cobertura da folha na grade da página, ou None sem evidência.
 
@@ -372,20 +364,19 @@ class Pipeline:
             ink_warped, self.last_ink_gain = exposure.apply_paper_gain(
                 ink_warped, gain_mask
             )
-        if self._config.ink_divnorm:
-            ink_warped = self._divnorm_page(ink_warped, coverage)
         if coverage is not None:
             # Fora da folha o warp é preto: a transição
             # folha->preto é uma aresta artificial que o page_clean
             # lê como tinta. A cor média da própria página preenche o
             # entorno — o modelo deixa de ver a aresta sintética e
-            # a borda da folha para de votar como traço.
+            # a borda da folha para de votar como traço. Com
+            # ink_divnorm a imagem sobe crua: o mesmo par de
+            # preenchimentos e a normalização rolam dentro da
+            # passada da trabalhadora (issue #101), fora do laço.
             ink_submit = ink_warped
-            if coverage.any():
+            if coverage.any() and not self._config.ink_divnorm:
                 ink_submit = ink_warped.copy()
-                ink_submit[~coverage] = (
-                    ink_warped[coverage].mean(axis=0).astype(np.uint8)
-                )
+                ink_submit[~coverage] = _paper_mean_bgr(ink_warped, coverage)
             self.ink_worker.submit(
                 contracts.WarpedPage(
                     ink_submit,

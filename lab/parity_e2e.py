@@ -182,7 +182,11 @@ def run_new(
         ink=InkConfig(), ink_auto_gain=False, detect_wake=False
     )
     worker = PageCleanWorker(
-        page_clean, hand_masker, clock=clock, config=legacy_config.ink
+        page_clean,
+        hand_masker,
+        clock=clock,
+        config=legacy_config.ink,
+        ink_divnorm=legacy_config.ink_divnorm,
     )
     loop = Pipeline(
         detection_worker=det,

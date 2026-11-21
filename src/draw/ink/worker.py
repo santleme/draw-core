@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 
 from .. import config as paper_config
+from .. import photometry
 from ..contracts import InkDelta, InkDisplaySnapshot, InkSnapshot
 from . import accumulator, identity, motion, registration, ruling, votes
 from . import anchor as anchor_mod
@@ -117,6 +118,21 @@ _WORKER_HISTORY = (256, 128)
 _SYNC_CADENCE_EPS_SECONDS = 1e-9
 
 
+def _fill_page_outside(image, coverage):
+    """Fora da folha := média BGR da própria página por canal.
+
+    Mesma regra do laço: a transição folha->preto do warp é uma
+    aresta artificial que o page_clean lê como tinta; a cor média
+    do papel a apaga sem fabricar uma borda branca. A média usa o
+    fancy-indexing do numpy de propósito — mesma ordem de soma da
+    receita que o laco aplicava, bit-identica (cv2.mean diverge
+    por 1 ulp no truncamento).
+    """
+    filled = image.copy()
+    filled[~coverage] = image[coverage].mean(axis=0).astype(np.uint8)
+    return filled
+
+
 def _bbox_of(mask):
     """(y0, y1, x0, x1) meio-aberto do que e True em mask, ou None."""
     rows = np.flatnonzero(mask.any(axis=1))
@@ -192,9 +208,16 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         clock=time.monotonic,
         history=_WORKER_HISTORY,
         config=None,
+        ink_divnorm=False,
     ):
         self._page_clean = page_clean
         self._config = config if config is not None else InkConfig()
+        # ink_divnorm (PipelineConfig.ink_divnorm): aplica
+        # photometry.division_normalize no warp dentro da passada —
+        # o domínio do modelo de tinta v4. A normalização mora aqui
+        # porque a passada tem folga de cadência; o laço principal
+        # não paga o blur de página inteira (~42 ms/submit, #101).
+        self._ink_divnorm = bool(ink_divnorm)
         # Filtro de pauta (InkConfig.ruling_removal, opt-in): modelo em cache
         # por folha; zerado quando a geracao vira (outra folha, outro quad).
         self._ruling = ruling.RulingFilter() if self._config.ruling_removal else None
@@ -1024,6 +1047,19 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         force_publish = False
         reg_info = {}
         try:
+            if self._ink_divnorm:
+                # O warp sobe cru; a imagem que o modelo vê é a
+                # mesma que o laço submetia: fora-da-folha
+                # preenchido com a média do papel ANTES da divisão
+                # (a mesa clara não escurece a borda do papel) e
+                # de novo DEPOIS, sobre o normalizado.
+                if coverage is not None and coverage.any():
+                    warped = photometry.division_normalize(
+                        _fill_page_outside(warped, coverage)
+                    )
+                    warped = _fill_page_outside(warped, coverage)
+                else:
+                    warped = photometry.division_normalize(warped)
             if visible is None and self._hand_masker is not None:
                 hand_mask = self._hand_masker.mask(warped)
                 if hand_mask is not None:

@@ -479,12 +479,11 @@ def test_ink_auto_gain_excludes_the_hand_from_the_classic_hand_masker():
     assert loop.last_ink_gain == 1.0
 
 
-def test_ink_divnorm_toggle_normalizes_submitted_page():
-    """ink_divnorm=True: o retificado chega já normalizado à tinta.
-
-    Frame com gradiente suave de iluminação: sem o toggle o warp
-    preserva o gradiente; com ele a imagem submetida sai achatada
-    (~branco de referência, std baixo) — o domínio do modelo v4.
+def test_ink_divnorm_submits_the_raw_warp_to_the_worker():
+    """ink_divnorm=True: o retificado sobe cru à tinta — a
+    normalização rola dentro da passada da trabalhadora (issue
+    #101), que tem folga de cadência para o blur de página
+    inteira. A imagem submetida é a mesma do caminho sem o toggle.
     """
     grad = np.linspace(80, 220, 1280, dtype=np.float32)
     frame = np.repeat(grad[None, :], 720, axis=0)[..., None]
@@ -500,63 +499,34 @@ def test_ink_divnorm_toggle_normalizes_submitted_page():
         config=PipelineConfig(ink_divnorm=True),
     )
     _drive(loop, 40, frame=frame)
-    dn_img = ink_dn.pages[-1].image
-    assert float(dn_img.std()) < float(raw_img.std()) * 0.6
-    assert float(dn_img.mean()) > 200.0  # papel achatado ~branco
+    np.testing.assert_array_equal(ink_dn.pages[-1].image, raw_img)
 
 
-def test_ink_divnorm_bright_desk_does_not_darken_paper_edge():
-    """Review #48: mesa clara dentro do quad não pode escurecer a faixa
-    de papel encostada nela. O fora-da-folha é preenchido antes da
-    normalização (paridade com o treino: mask_sheet -> divnorm)."""
+def test_ink_divnorm_skips_the_fill_and_the_gain():
+    """Com ink_divnorm o laço não preenche o fora-da-folha nem ganha:
+    as duas coisas acontecem na trabalhadora sobre o warp cru (o
+    preenchimento faz parte da paridade com o treino, review #48; o
+    ganho clipava o papel claro antes da normalização, review #52)."""
     frame = np.full((720, 1280, 3), 220, np.uint8)  # mesa clara
     frame[100:400, 100:350] = 100  # papel (mais escuro que a mesa)
     coverage = np.zeros((720, 1280), np.uint8)
     coverage[100:400, 100:350] = 255
     loop, _det, ink = _make_loop(
         lambda _i: (QUAD.copy(), "paper", {"coverage_mask": coverage}),
-        config=PipelineConfig(ink_divnorm=True),
-    )
-    _drive(loop, 40, frame=frame)
-    page = ink.pages[-1]
-    img = page.image.mean(axis=2)
-    paper = page.coverage
-    assert paper is not None and paper.any()
-    vals = img[paper]
-    # Sem o preenchimento prévio o papel perto da mesa caía para ~155
-    # contra ~235 no interior; aqui a página sai uniforme.
-    assert float(vals.max() - vals.min()) < 12.0
-    assert float(vals.min()) > 220.0
-
-
-def test_ink_divnorm_skips_the_gain_so_bright_paper_is_not_clipped():
-    """Review #48: com os dois ligados, o ganho clipava em 255 o papel
-    claro de uma folha com luz desigual, e o traço fraco sobre ele sumia
-    antes da normalização. Como a divisão por I/blur(I) já anula a
-    escala, o divnorm dispensa o ganho: o traço sobrevive."""
-    frame = np.full((720, 1280, 3), 70, np.uint8)  # papel escuro (maioria)
-    frame[100:400, 440:464] = 200  # faixa bem iluminada (6%: fora do p90)
-    frame[200:300, 450:454] = 175  # traço fraco sobre a parte clara
-
-    loop, _det, ink = _make_loop(
-        lambda _i: (QUAD.copy(), "paper", None),
         config=PipelineConfig(ink_divnorm=True, ink_auto_gain=True),
     )
     _drive(loop, 40, frame=frame)
-    assert loop.last_ink_gain == 1.0  # o divnorm dispensa o ganho
-    page = ink.pages[-1].image.mean(axis=2)
-    # Na grade da página (850 de largura para 400 px de quad) a faixa
-    # clara cai em x ~ 723-773 e o traço em x ~ 744-752, y ~ 400-800.
-    stroke = page[450:750, 745:751].mean()
-    paper = page[450:750, 758:770].mean()
-    assert paper - stroke > 15  # o traço continua visível ao modelo
-
-    alone, _det, ink_alone = _make_loop(
-        lambda _i: (QUAD.copy(), "paper", None),
-        config=PipelineConfig(ink_divnorm=True),
-    )
-    _drive(alone, 40, frame=frame)
-    np.testing.assert_array_equal(ink.pages[-1].image, ink_alone.pages[-1].image)
+    assert loop.last_ink_gain == 1.0
+    page = ink.pages[-1]
+    assert page.coverage is not None and page.coverage.any()
+    # Fora da folha fica o warp cru (mesa 220 dentro do quad / preto
+    # fora dele) — sem o preenchimento da média do papel no laço.
+    # (O quad 100-500 mapeia para a página 0-850; a mesa cobre
+    # x>350 -> página x>531.)
+    assert float(page.image[100:1100, 600:800].mean()) > 200.0
+    # E dentro da cobertura vai o pixel cru da cena (papel 100), não
+    # o ganho nem o normalizado.
+    assert float(page.image[page.coverage].mean()) < 110.0
 
 
 def _seen_then_lost():
