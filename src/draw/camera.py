@@ -22,6 +22,7 @@ from pathlib import Path
 
 import cv2
 
+from . import hvcam as hvcam_module
 from .contracts import FramePacket
 from .hvcam import HvcamCapture, is_hvcam_source
 from .protocol import HelperCapture, is_helper_source
@@ -497,36 +498,97 @@ _WSL_HVCAM_CANDIDATES = ("hvcam://", "hvcam+reverse://")
 
 
 def open_wsl_hvcam_fallback(source, *, timeout_ms=None, connect_timeout_ms=None):
-    """Tenta abrir a camera do Windows via hvcam quando WSL nao tem /dev/video0.
+    """Tenta abrir a camera do Windows via hvcam quando WSL nao tem /dev/video*.
 
     Compartilhado entre `open_capture` e `run_check` para que `draw --check`
     valide exatamente o mesmo fallback que `draw` usa na abertura ao vivo.
+    Se nenhum hvcam-host.exe estiver rodando no Windows, provisiona e sobe
+    `hvcam-host.exe --reverse` automaticamente via interop do WSL, escolhendo
+    a primeira webcam disponivel quando `source == 0`.
     Devolve `(source_url, HvcamCapture)` ou `(None, None)`.
     """
-    if source != 0 or not sys.platform.startswith("linux") or not is_wsl():
+    if (
+        not isinstance(source, int)
+        or source < 0
+        or not sys.platform.startswith("linux")
+        or not is_wsl()
+    ):
         return None, None
     if os.path.exists("/dev/video0") or _video_nodes():
         return None, None
-    print(
-        "WSL sem /dev/video0: tentando camera do Windows via hvcam "
-        "(hvcam:// e hvcam+reverse:// na porta 8765)..."
-    )
-    for candidate in _WSL_HVCAM_CANDIDATES:
-        if candidate == "hvcam+reverse://":
-            print(
-                "Aguardando hvcam-host.exe --reverse conectar no Windows (ate 35 s)..."
-            )
-        kwargs = {}
-        if timeout_ms is not None:
-            kwargs["timeout_ms"] = timeout_ms
-        if connect_timeout_ms is not None:
-            kwargs["connect_timeout_ms"] = connect_timeout_ms
-        hv_cap = HvcamCapture(candidate, **kwargs)
+    print("WSL sem /dev/video*: conectando na camera do Windows via hvcam...")
+    kwargs = {}
+    if timeout_ms is not None:
+        kwargs["timeout_ms"] = timeout_ms
+    if connect_timeout_ms is not None:
+        kwargs["connect_timeout_ms"] = connect_timeout_ms
+
+    # 1. Tenta hvcam:// primeiro (instantaneo se o usuario ja registrou o servico).
+    if source == 0:
+        hv_cap = HvcamCapture("hvcam://", **kwargs)
         if hv_cap.isOpened():
-            print(f"Camera do Windows conectada via {candidate}.")
-            return candidate, hv_cap
+            print("Camera do Windows conectada via hvcam://.")
+            return "hvcam://", hv_cap
         hv_cap.release()
+
+    # 2. Sobe hvcam-host.exe --reverse automaticamente (baixa se ausente e
+    #    escolhe a primeira webcam funcional quando source == 0).
+    if HvcamCapture is hvcam_module.HvcamCapture:
+        managed_kwargs = {}
+        if timeout_ms is not None:
+            managed_kwargs["timeout_ms"] = timeout_ms
+        if connect_timeout_ms is not None:
+            managed_kwargs["connect_timeout_ms"] = connect_timeout_ms
+        try:
+            hv_cap, dev_idx, dev_name = hvcam_module.open_managed_reverse(
+                device=source,
+                try_all=(source == 0),
+                **managed_kwargs,
+            )
+        except RuntimeError as error:
+            print(f"Aviso: inicio automatico do hvcam-host.exe falhou ({error}).")
+            hv_cap = None
+            dev_idx = None
+            dev_name = None
+        if hv_cap is not None:
+            print(
+                f"Camera do Windows conectada via hvcam-host.exe "
+                f"([{dev_idx}] {dev_name})."
+            )
+            return "hvcam+reverse://", hv_cap
+
+    # 3. Fallback manual: escuta hvcam+reverse:// caso o usuario suba o host a mao.
+    print("Aguardando hvcam-host.exe --reverse conectar no Windows (ate 35 s)...")
+    hv_cap = HvcamCapture("hvcam+reverse://", **kwargs)
+    if hv_cap.isOpened():
+        print("Camera do Windows conectada via hvcam+reverse://.")
+        return "hvcam+reverse://", hv_cap
+    hv_cap.release()
     return None, None
+
+
+def _try_other_local_cameras(source, capture_factory):
+    """Quando o indice padrao (0) falha, tenta outras webcams locais disponiveis."""
+    if source != 0:
+        return None
+    if sys.platform.startswith("linux"):
+        candidates = [
+            int(node[len("/dev/video") :])
+            for node in _video_nodes()
+            if int(node[len("/dev/video") :]) != 0
+        ]
+    else:
+        candidates = [1, 2, 3, 4]
+    for idx in candidates:
+        cap = capture_factory(idx)
+        if cap.isOpened():
+            _configure_local_capture(cap)
+            cap = _supervise_local_open(idx, cap, capture_factory)
+            if cap.isOpened():
+                print(f"Camera {source} indisponivel; usando camera local {idx}.")
+                return cap
+        cap.release()
+    return None
 
 
 def open_capture(source, capture_factory=None, helper_token_file=None):
@@ -583,6 +645,9 @@ def open_capture(source, capture_factory=None, helper_token_file=None):
     hint = f"Nao consegui abrir a fonte de video: {source!r}. "
     if isinstance(source, int):
         if default_factory:
+            other = _try_other_local_cameras(source, capture_factory)
+            if other is not None:
+                return other
             _candidate, hv_cap = open_wsl_hvcam_fallback(source)
             if hv_cap is not None:
                 return hv_cap

@@ -20,13 +20,25 @@ last_capture_ts_ms, source_dropped por salto de seq) que o
 LatestFrameCapture usa na telemetria.
 """
 
+import atexit
 import ctypes
 import errno
+import hashlib
+import io
 import os
+import re
 import selectors
+import shutil
 import socket
 import struct
+import subprocess
+import tempfile
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import zipfile
+from pathlib import Path
 from urllib.parse import urlparse
 
 import cv2
@@ -35,6 +47,56 @@ import numpy as np
 # Porta padrao do servico vsock — a mesma do protocolo hvcam e do
 # ajudante draw (coincidencia util: ambos falam 8765).
 DEFAULT_PORT = 8765
+
+# Release oficial do hvcam-host.exe (santleme/hvcam) para provisionamento
+# automatico no WSL: o binario roda no lado Windows e transmite a webcam
+# via AF_HYPERV sem admin nem instalacao manual.
+HVCAM_HOST_RELEASE_URL = (
+    "https://github.com/santleme/hvcam/releases/download/"
+    "v0.1.1-rc.1/hvcam-v0.1.1-rc.1-windows-x86_64.zip"
+)
+HVCAM_HOST_ZIP_SHA256 = (
+    "4bb9aeaf72ca983950b7ed65df3188ead146b7fdcd5a2b53e4280d82e8247c6e"
+)
+HVCAM_HOST_ZIP_MEMBER = "hvcam-v0.1.1-rc.1-windows-x86_64/hvcam-host.exe"
+_HVCAM_HOST_MAX_ZIP_BYTES = 16 << 20
+_HVCAM_HOST_DOWNLOAD_TIMEOUT_S = 60
+_MANAGED_CONNECT_TIMEOUT_MS = 10_000
+_DEVICE_LINE_RE = re.compile(r"^\s*\[(\d+)\]\s*(.+?)\s*$")
+
+_MANAGED_HOST_PROCS = set()
+
+
+def _terminate_host_process(proc):
+    """Encerra um hvcam-host.exe iniciado pelo Draw, sem vazar processo."""
+    if proc is None:
+        return
+    _MANAGED_HOST_PROCS.discard(proc)
+    try:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=2.0)
+    except OSError:
+        pass
+    finally:
+        for stream in (proc.stdout, proc.stderr, proc.stdin):
+            if stream is not None:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+
+
+def _cleanup_managed_hosts():
+    for proc in list(_MANAGED_HOST_PROCS):
+        _terminate_host_process(proc)
+
+
+atexit.register(_cleanup_managed_hosts)
 
 _TIMEOUT_MS = 1000
 # No Hyper-V (AF_HYPERV), uma tentativa de connect() do host antes de o
@@ -368,6 +430,8 @@ def _listen_vsock_bounded(
     socket_factory=socket.socket,
     selector_factory=selectors.DefaultSelector,
     clock=time.monotonic,
+    on_listening=None,
+    abort_check=None,
 ):
     """Escuta em AF_VSOCK com prazo de accept e exige peer CID do host (2).
 
@@ -375,6 +439,11 @@ def _listen_vsock_bounded(
     sem checar o CID de origem; aqui o listener fecha no timeout com
     `-ETIMEDOUT` (para nao travar o startup nem o `--check`) e descarta
     conexoes que nao venham de `VMADDR_CID_HOST`.
+
+    `on_listening`, se fornecido, roda logo apos `listen(1)` (ideal para
+    subir `hvcam-host.exe --reverse` sem corrida de 30 s no AF_HYPERV).
+    `abort_check`, se fornecido, e consultado periodicamente para abortar
+    cedo caso o processo host tenha saido com erro.
     """
     if timeout_ms is not None and timeout_ms <= 0:
         return -errno.ETIMEDOUT
@@ -389,14 +458,23 @@ def _listen_vsock_bounded(
         listener.setblocking(False)
         listener.bind((cid_any, int(port)))
         listener.listen(1)
+        if on_listening is not None:
+            on_listening()
         deadline = None if timeout_ms is None else clock() + (timeout_ms / 1000.0)
         with selector_factory() as selector:
             selector.register(listener, selectors.EVENT_READ)
             while True:
+                if abort_check is not None and abort_check():
+                    return -errno.ECONNABORTED
                 remaining = None if deadline is None else deadline - clock()
                 if remaining is not None and remaining <= 0:
                     return -errno.ETIMEDOUT
-                if not selector.select(remaining):
+                wait_s = remaining
+                if abort_check is not None:
+                    wait_s = 0.2 if wait_s is None else min(wait_s, 0.2)
+                if not selector.select(wait_s):
+                    if abort_check is not None:
+                        continue
                     return -errno.ETIMEDOUT
                 try:
                     conn, peer = listener.accept()
@@ -431,6 +509,8 @@ class Camera:
         listen=False,
         timeout_ms=_LISTEN_TIMEOUT_MS,
         listener=None,
+        on_listening=None,
+        abort_check=None,
     ):
         if host is not None and listen:
             raise ValueError("hvcam: listen mode cannot use a TCP host")
@@ -441,8 +521,18 @@ class Camera:
         if host is not None:
             self.fd = lib.hvcam_connect_tcp(host.encode(), port)
         elif listen:
-            listen_fn = _listen_vsock_bounded if listener is None else listener
-            self.fd = listen_fn(port, timeout_ms)
+            if listener is None:
+                if on_listening is None and abort_check is None:
+                    self.fd = _listen_vsock_bounded(port, timeout_ms)
+                else:
+                    self.fd = _listen_vsock_bounded(
+                        port,
+                        timeout_ms,
+                        on_listening=on_listening,
+                        abort_check=abort_check,
+                    )
+            else:
+                self.fd = listener(port, timeout_ms)
         else:
             self.fd = lib.hvcam_connect(port)
         if self.fd < 0:
@@ -638,10 +728,16 @@ class HvcamCapture:
         timeout_ms=_TIMEOUT_MS,
         camera_factory=None,
         connect_timeout_ms=None,
+        on_listening=None,
+        abort_check=None,
+        host_process=None,
     ):
         self.source = str(source).strip()
         self._timeout_ms = timeout_ms
         self._connect_timeout_ms = connect_timeout_ms
+        self._on_listening = on_listening
+        self._abort_check = abort_check
+        self._host_proc = host_process
         self._cam = None
         self._opened = False
         self.last_frame_id = None
@@ -668,12 +764,18 @@ class HvcamCapture:
                 listen_kwargs = {"port": port, "listen": True}
                 if self._connect_timeout_ms is not None:
                     listen_kwargs["timeout_ms"] = self._connect_timeout_ms
+                if self._on_listening is not None:
+                    listen_kwargs["on_listening"] = self._on_listening
+                if self._abort_check is not None:
+                    listen_kwargs["abort_check"] = self._abort_check
                 self._cam = camera_factory(**listen_kwargs)
             else:
                 self._cam = camera_factory(port=port)
         except OSError as error:
             self._cam = None
             self.open_error = error
+            _terminate_host_process(self._host_proc)
+            self._host_proc = None
             return
         self._opened = True
 
@@ -710,3 +812,278 @@ class HvcamCapture:
             except Exception:  # noqa: BLE001 - release nunca levanta
                 pass
             self._cam = None
+        if self._host_proc is not None:
+            _terminate_host_process(self._host_proc)
+            self._host_proc = None
+
+
+def _windows_cache_dir():
+    """Pasta de cache no filesystem do Windows (%LOCALAPPDATA%\\draw).
+
+    Windows Media Foundation bloqueia o acesso a camera com 0x80070490
+    quando hvcam-host.exe e executado a partir de um caminho UNC do WSL
+    (\\\\wsl.localhost\\...). Copiar/extrair o binario para o disco do
+    Windows evita esse bloqueio sem exigir configuracao manual.
+    """
+    cwd = "/mnt/c" if os.path.isdir("/mnt/c") else None
+    try:
+        raw = subprocess.check_output(
+            ["cmd.exe", "/c", "echo %LOCALAPPDATA%"],
+            cwd=cwd,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=5,
+        ).strip()
+        if not raw or raw == "%LOCALAPPDATA%":
+            return None
+        wsl_path = subprocess.check_output(
+            ["wslpath", raw],
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=5,
+        ).strip()
+        if not wsl_path:
+            return None
+        return Path(wsl_path) / "draw"
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _local_hvcam_host_candidates():
+    """Locais onde um checkout/instalacao local do hvcam-host.exe pode morar."""
+    here = Path(__file__).resolve().parent
+    candidates = [
+        here.parents[2] / "hvcam" / "dist" / "hvcam-host.exe",
+        here.parents[2] / "hvcam" / "build" / "Release" / "hvcam-host.exe",
+        Path.home() / "hvcam" / "dist" / "hvcam-host.exe",
+        Path.home() / "hvcam" / "build" / "Release" / "hvcam-host.exe",
+    ]
+    found_in_path = shutil.which("hvcam-host.exe")
+    if found_in_path:
+        candidates.append(Path(found_in_path))
+    return tuple(candidates)
+
+
+def _atomic_write_executable(target, payload_bytes):
+    """Grava `payload_bytes` em `target` de forma atomica com permissao +x."""
+    target = Path(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd = None
+    tmp_path = None
+    try:
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{target.name}.", suffix=".part", dir=str(target.parent)
+        )
+        tmp_path = Path(tmp_name)
+        with os.fdopen(fd, "wb") as handle:
+            fd = None
+            handle.write(payload_bytes)
+        try:
+            os.chmod(tmp_path, 0o755)
+        except OSError:
+            pass
+        os.replace(tmp_path, target)
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if tmp_path is not None and tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+    return target
+
+
+def ensure_hvcam_host(
+    *,
+    cache_dir=None,
+    urlopen=None,
+    release_url=None,
+    expected_sha256=None,
+    local_candidates=None,
+):
+    """Garante hvcam-host.exe pronto no disco do Windows (copia local ou download).
+
+    Verifica o SHA-256 do pacote zip oficial antes de extrair (fail-closed).
+    Devolve o Path do executavel ou levanta RuntimeError em caso de falha.
+    """
+    win_dir = Path(cache_dir) if cache_dir is not None else _windows_cache_dir()
+    if win_dir is None:
+        raise RuntimeError(
+            "nao consegui localizar %LOCALAPPDATA% no Windows via interop do WSL"
+        )
+    target = win_dir / "hvcam-host.exe"
+    if target.is_file() and target.stat().st_size > 0:
+        try:
+            os.chmod(target, 0o755)
+        except OSError:
+            pass
+        return target
+
+    candidates = (
+        _local_hvcam_host_candidates() if local_candidates is None else local_candidates
+    )
+    for cand in candidates:
+        cand_path = Path(cand)
+        if cand_path.is_file() and cand_path.stat().st_size > 0:
+            try:
+                _atomic_write_executable(target, cand_path.read_bytes())
+                return target
+            except OSError:
+                continue
+
+    url = (release_url or HVCAM_HOST_RELEASE_URL).strip()
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme != "https" or not parsed.netloc:
+        raise RuntimeError(f"URL de release do hvcam precisa ser https://: {url!r}")
+    want_sha = (expected_sha256 or HVCAM_HOST_ZIP_SHA256).strip().lower()
+    opener = urllib.request.urlopen if urlopen is None else urlopen
+    print("Baixando hvcam-host.exe da Release oficial (santleme/hvcam)...")
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "draw-core/0.1"})
+        with opener(req, timeout=_HVCAM_HOST_DOWNLOAD_TIMEOUT_S) as resp:
+            chunks = bytearray()
+            while True:
+                chunk = resp.read(1 << 20)
+                if not chunk:
+                    break
+                chunks.extend(chunk)
+                if len(chunks) > _HVCAM_HOST_MAX_ZIP_BYTES:
+                    raise RuntimeError(
+                        f"download do hvcam excedeu {_HVCAM_HOST_MAX_ZIP_BYTES} bytes"
+                    )
+    except (urllib.error.URLError, OSError) as error:
+        raise RuntimeError(
+            f"falha ao baixar hvcam-host.exe de {url}: {error}"
+        ) from error
+
+    actual_sha = hashlib.sha256(chunks).hexdigest()
+    if actual_sha != want_sha:
+        raise RuntimeError(
+            f"sha256 divergente no download do hvcam: {actual_sha} != {want_sha}"
+        )
+    try:
+        with zipfile.ZipFile(io.BytesIO(chunks)) as zf:
+            member = HVCAM_HOST_ZIP_MEMBER
+            if member not in zf.namelist():
+                matches = [
+                    name
+                    for name in zf.namelist()
+                    if name.lower().endswith("/hvcam-host.exe")
+                    or name.lower() == "hvcam-host.exe"
+                ]
+                if not matches:
+                    raise RuntimeError("hvcam-host.exe nao encontrado no pacote zip")
+                member = matches[0]
+            exe_bytes = zf.read(member)
+    except zipfile.BadZipFile as error:
+        raise RuntimeError(f"pacote zip do hvcam corrompido: {error}") from error
+
+    _atomic_write_executable(target, exe_bytes)
+    print(f"hvcam-host.exe salvo e verificado em {target}.")
+    return target
+
+
+def list_hvcam_devices(host_exe):
+    """Lista webcams disponiveis no Windows via `hvcam-host.exe --list`."""
+    exe = Path(host_exe)
+    cwd = "/mnt/c" if os.path.isdir("/mnt/c") else str(exe.parent)
+    try:
+        output = subprocess.check_output(
+            [str(exe), "--list"],
+            cwd=cwd,
+            stderr=subprocess.STDOUT,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    try:
+        text = output.decode("utf-8")
+    except UnicodeDecodeError:
+        text = output.decode("cp1252", errors="replace")
+    devices = []
+    for line in text.splitlines():
+        match = _DEVICE_LINE_RE.match(line)
+        if match:
+            devices.append((int(match.group(1)), match.group(2).strip()))
+    return devices
+
+
+def open_managed_reverse(
+    port=DEFAULT_PORT,
+    device=0,
+    *,
+    timeout_ms=_TIMEOUT_MS,
+    connect_timeout_ms=_MANAGED_CONNECT_TIMEOUT_MS,
+    host_exe=None,
+    devices=None,
+    try_all=False,
+    popen=subprocess.Popen,
+    capture_cls=None,
+):
+    """Sobe `hvcam-host.exe --reverse` automaticamente e conecta via vsock.
+
+    Quando `try_all=True` (padrao para `--source 0`), tenta primeiro o
+    indice pedido e, se a camera nao abrir, percorre as demais webcams
+    encontradas no Windows ate achar uma que funcione. O processo host
+    fica preso ao `HvcamCapture` retornado e e encerrado no `release()`.
+    Devolve `(HvcamCapture, device_index, device_name)` ou `(None, None, None)`.
+    """
+    exe = Path(host_exe) if host_exe is not None else ensure_hvcam_host()
+    discovered = list_hvcam_devices(exe) if devices is None else list(devices)
+    names = dict(discovered)
+
+    order = [(int(device), names.get(int(device), f"Camera {device}"))]
+    if try_all:
+        for idx, name in discovered:
+            if idx != int(device):
+                order.append((idx, name))
+
+    url = (
+        "hvcam+reverse://"
+        if int(port) == DEFAULT_PORT
+        else f"hvcam+reverse://:{int(port)}"
+    )
+    run_cwd = "/mnt/c" if os.path.isdir("/mnt/c") else str(exe.parent)
+    cls = HvcamCapture if capture_cls is None else capture_cls
+
+    for dev_idx, dev_name in order:
+        proc_box = [None]
+
+        def _spawn(idx=dev_idx, box=proc_box):
+            proc = popen(
+                [
+                    str(exe),
+                    "--reverse",
+                    "--port",
+                    str(int(port)),
+                    "--device",
+                    str(idx),
+                ],
+                cwd=run_cwd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+            _MANAGED_HOST_PROCS.add(proc)
+            box[0] = proc
+
+        def _aborted(box=proc_box):
+            proc = box[0]
+            return proc is not None and proc.poll() is not None
+
+        cap = cls(
+            url,
+            timeout_ms=timeout_ms,
+            connect_timeout_ms=connect_timeout_ms,
+            on_listening=_spawn,
+            abort_check=_aborted,
+        )
+        if cap.isOpened():
+            cap._host_proc = proc_box[0]
+            return cap, dev_idx, dev_name
+        cap.release()
+        _terminate_host_process(proc_box[0])
+    return None, None, None

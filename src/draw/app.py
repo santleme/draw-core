@@ -271,7 +271,7 @@ def run_check(source=0, helper_token_file=None):
 
     nodes = _video_nodes()
     if not nodes:
-        if source == 0 and is_wsl():
+        if source >= 0 and is_wsl():
             candidate, hv_cap = camera_module.open_wsl_hvcam_fallback(
                 source, timeout_ms=5000
             )
