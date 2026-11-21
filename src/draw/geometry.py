@@ -109,15 +109,28 @@ def _largest_contour(mask_bin):
 # Calha maxima entre as paginas (fracao da extensao maior). Folhas soltas lado a
 # lado ficam bem alem disso; so um caderno aberto tem calha estreita.
 _SPREAD_MAX_GUTTER = 0.10
+_SPREAD_MODES = ("auto", "always", "never")
 
 
-def _is_two_page_spread(contour_a, contour_b):
+def _validate_spread_mode(mode):
+    if mode not in _SPREAD_MODES:
+        choices = ", ".join(_SPREAD_MODES)
+        raise ValueError(f"spread_mode deve ser um de: {choices}")
+
+
+def _is_two_page_spread(contour_a, contour_b, *, mode="auto"):
     """True quando dois contornos grandes formam um caderno aberto (2 paginas).
 
     Projeta os dois contornos no referencial proprio da pagina maior
     (eixos do `minAreaRect`) para reconhecer cadernos girados na mesa,
-    onde caixas alinhadas aos eixos da camera se sobrepoem falsamente.
+    onde caixas alinhadas aos eixos da camera se sobrepoem falsamente. `auto`
+    exige calha de ate 10%; `always` ignora apenas esse limite; `never`
+    desativa a uniao.
     """
+    _validate_spread_mode(mode)
+    if mode == "never":
+        return False
+
     area_a = float(cv2.contourArea(contour_a))
     area_b = float(cv2.contourArea(contour_b))
     if area_a <= 0 or area_b < 0.35 * area_a:
@@ -151,7 +164,8 @@ def _is_two_page_spread(contour_a, contour_b):
     if (
         v_overlap >= 0.55 * min(ha, hb)
         and min(ha, hb) >= 0.65 * max(ha, hb)
-        and -0.15 * min(wa, wb) <= u_gap <= _SPREAD_MAX_GUTTER * max(wa, wb)
+        and -0.15 * min(wa, wb) <= u_gap
+        and (mode == "always" or u_gap <= _SPREAD_MAX_GUTTER * max(wa, wb))
     ):
         return True
 
@@ -161,20 +175,22 @@ def _is_two_page_spread(contour_a, contour_b):
     return (
         u_overlap >= 0.55 * min(wa, wb)
         and min(wa, wb) >= 0.65 * max(wa, wb)
-        and -0.15 * min(ha, hb) <= v_gap <= _SPREAD_MAX_GUTTER * max(ha, hb)
+        and -0.15 * min(ha, hb) <= v_gap
+        and (mode == "always" or v_gap <= _SPREAD_MAX_GUTTER * max(ha, hb))
     )
 
 
-def _sheet_contour_with_spread(mask_bin):
+def _sheet_contour_with_spread(mask_bin, *, spread_mode="auto"):
     """Devolve `(contorno, is_spread, contour_area)` para distinguir folha unica
     de caderno aberto sem duplicar a extracao de contorno no detector."""
+    _validate_spread_mode(spread_mode)
     contours, _ = cv2.findContours(mask_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     if not contours:
         return None, False, 0.0
     if len(contours) == 1:
         return contours[0], False, float(cv2.contourArea(contours[0]))
     ranked = sorted(contours, key=cv2.contourArea, reverse=True)
-    if _is_two_page_spread(ranked[0], ranked[1]):
+    if _is_two_page_spread(ranked[0], ranked[1], mode=spread_mode):
         hull = cv2.convexHull(np.vstack([ranked[0], ranked[1]]))
         # Densifica o contorno do casco desenhando-o preenchido numa mascara:
         # cv2.convexHull devolve apenas ~4-8 vertices e faria _refit_corners

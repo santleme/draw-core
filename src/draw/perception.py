@@ -270,18 +270,30 @@ class NeuralSheetDetector:
     para decidir se a reserva clássica pode falar.
     """
 
-    def __init__(self, model_path, *, verify, intra_threads=None, timing=False):
+    def __init__(
+        self,
+        model_path,
+        *,
+        verify,
+        intra_threads=None,
+        timing=False,
+        spread_mode="auto",
+    ):
         """model_path é obrigatório; verify é um callable
         Callable[[Path | str], None] | None obrigatório chamado sobre
         o arquivo antes de abrir a sessão (o pipeline injeta
         draw.infra.manifest.verify_model; verify=None é o opt-out
         explícito). intra_threads é o teto intra-op da sessão ORT
         (None = 3, o valor medido na mesa). timing=True liga o
-        cronômetro de fases (get_timing_stats)."""
+        cronômetro de fases (get_timing_stats). spread_mode controla a
+        união de duas páginas: auto aplica o limite de calha de 10%,
+        always ignora esse limite e never desativa a união."""
+        _geometry._validate_spread_mode(spread_mode)
         self.model_path = str(model_path)
         self._timing_enabled = bool(timing)
         self._verify = verify
         self._intra_threads = intra_threads
+        self._spread_mode = spread_mode
         self._session = None
         self._contract = None
         self._contract_session = None
@@ -383,7 +395,9 @@ class NeuralSheetDetector:
             self._memory_is_spread = False
             self._memory_spread_area = 0.0
             self._memory_geometry = geometry
-        contour, is_spread, contour_area = _geometry._sheet_contour_with_spread(mask)
+        contour, is_spread, contour_area = _geometry._sheet_contour_with_spread(
+            mask, spread_mode=getattr(self, "_spread_mode", "auto")
+        )
         prev_spread = getattr(self, "_memory_is_spread", False)
         prev_area = getattr(self, "_memory_spread_area", 0.0)
         # Invalida a memoria de arestas apenas na transicao pagina unica ->

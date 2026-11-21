@@ -718,6 +718,35 @@ def test_notebook_with_narrow_gutter_is_still_a_spread():
     assert _is_two_page_spread(a, b) is True
 
 
+def test_wide_notebook_gutter_requires_explicit_spread_mode():
+    from draw.geometry import _is_two_page_spread
+
+    a = _contour_of(50, 50, 300, 350)
+    b = _contour_of(340, 50, 590, 350)
+    assert _is_two_page_spread(a, b) is False
+    assert _is_two_page_spread(a, b, mode="always") is True
+    assert _is_two_page_spread(a, b, mode="never") is False
+
+
+def test_spread_mode_rejects_unknown_values():
+    from draw.geometry import _is_two_page_spread
+
+    a = _contour_of(50, 50, 300, 350)
+    b = _contour_of(310, 50, 560, 350)
+    with pytest.raises(ValueError, match="spread_mode"):
+        _is_two_page_spread(a, b, mode="sometimes")
+
+
+def test_pipeline_config_exposes_validated_spread_mode():
+    from draw.settings import PipelineConfig
+
+    assert PipelineConfig().spread_mode == "auto"
+    assert PipelineConfig(spread_mode="always").spread_mode == "always"
+    assert PipelineConfig(spread_mode="never").spread_mode == "never"
+    with pytest.raises(ValueError, match="spread_mode"):
+        PipelineConfig(spread_mode="sometimes")
+
+
 def test_fit_does_not_swallow_typeerror_from_geometry(monkeypatch):
     from draw import geometry as geometry_module
     from draw.perception import NeuralSheetDetector

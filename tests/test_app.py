@@ -855,6 +855,11 @@ def test_main_ink_vote_e_interval_ajustam_o_preset(monkeypatch):
     assert ink == app_module.InkConfig.production(vote_level=0.9, pass_interval_s=0.4)
 
 
+def test_main_spread_mode_entra_na_pipeline_config(monkeypatch):
+    pipeline = _run_main(monkeypatch, "--spread-mode", "always")["pipeline_config"]
+    assert pipeline.spread_mode == "always"
+
+
 def test_main_markers_sem_flags_usa_o_preset_legado(monkeypatch):
     pipeline = _run_main(monkeypatch, "--markers")["pipeline_config"]
     assert pipeline.ink == app_module.InkConfig()

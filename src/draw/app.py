@@ -1222,7 +1222,11 @@ def run(
             neural_model = str(_DEFAULT_SHEET_MODEL)
         if neural_model is not None and not markers_mode:
             neural_detector = NeuralSheetDetector(
-                neural_model, verify=manifest_module.verify_model
+                neural_model,
+                verify=manifest_module.verify_model,
+                spread_mode=(
+                    "auto" if pipeline_config is None else pipeline_config.spread_mode
+                ),
             )
             neural_detector.load()
             print(
@@ -1970,6 +1974,16 @@ def main():
         ),
     )
     parser.add_argument(
+        "--spread-mode",
+        choices=("auto", "always", "never"),
+        default="auto",
+        help=(
+            "união de duas páginas: auto limita a calha a 10%%; always aceita "
+            "calhas maiores quando tamanho e alinhamento combinam; never "
+            "mantém os contornos separados"
+        ),
+    )
+    parser.add_argument(
         "--ink-vote",
         type=float,
         default=None,
@@ -2081,6 +2095,7 @@ def main():
         ink=ink_config,
         ink_auto_gain=not legacy_ink,
         detect_wake=not legacy_ink,
+        spread_mode=args.spread_mode,
     )
     if args.stream_port is not None and not args.stream_token_file:
         parser.error("--stream-port exige --stream-token-file")
