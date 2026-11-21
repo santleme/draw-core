@@ -30,6 +30,7 @@ O custo está em duas parcelas: a estimativa (cara, ~poucos ms) roda a cada
 (deslocamento vertical) e se aplica o portão.
 """
 
+import dataclasses
 from dataclasses import dataclass, field
 
 import cv2
@@ -62,6 +63,14 @@ _PROB_MARGIN = 0.045  # margem sobre a mediana da pauta para proteger um braço
 _PROB_SMOOTH = 9  # colunas da média móvel da probabilidade ao longo da linha
 _PROB_SIGMAS = 4.0  # margem em desvios robustos do ruído da própria pauta
 _PROB_MIN_RUN = 12  # colunas mínimas contínuas para proteger um braço
+# Vinco sombreado: a sombra engrossa TODAS as linhas numa faixa larga de colunas.
+# Um cruzamento de caneta também engrossa todas, mas só por poucas colunas; por
+# isso a faixa exige >= _GUTTER_MIN_W colunas seguidas com a maioria das linhas
+# grossas, e nela a espessura apagável sobe de _GUTTER_EXTRA px.
+_GUTTER_FRAC = 0.6  # fração das linhas grossas na coluna
+_GUTTER_MIN_W = 16  # colunas contínuas (mais largo que qualquer traço de caneta)
+_GUTTER_EDGE_RUN = 3  # colunas bastam num trecho que encosta na divisa
+_GUTTER_EXTRA = 4  # px a mais de espessura apagável dentro da faixa
 
 
 @dataclass(frozen=True)
@@ -72,6 +81,8 @@ class Segment:
     x1: int
     paths: np.ndarray  # (K, x1 - x0) float32, px da grade da página
     period: float
+    # (K,) True nas linhas extrapoladas além dos picos medidos (None: nenhuma)
+    extended: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -158,7 +169,7 @@ def _sheared_profile(score, a, b, slope):
 
 
 def _seeds(score, c_lo, c_hi):
-    """Melhor faixa da metade: (coluna-semente, posições das linhas, lag, inclinação)."""
+    """Melhor faixa da metade: (coluna-semente, linhas, extrapoladas?, lag, inclinação)."""
     best = None
     for frac in (0.5, 0.3, 0.7, 0.15, 0.85):
         center = int(c_lo + frac * (c_hi - c_lo))
@@ -187,7 +198,33 @@ def _seeds(score, c_lo, c_hi):
     peaks = _peaks(smooth, 0.6 * lag, float(smooth.mean() + 0.5 * smooth.std()))
     if peaks.size < _MIN_LINES:
         return None
-    return c_seed, peaks, lag, slope
+    # com a folha inclinada, linhas fora da faixa-semente entram na vista pelo
+    # lado: estende além das bordas pelo deslocamento máximo da inclinação
+    reach = int(np.ceil(abs(slope) * (c_hi - c_lo))) + 1
+    full, ext = _extend_peaks(peaks, score.shape[0], reach)
+    return c_seed, full, ext, lag, slope
+
+
+def _extend_peaks(peaks, h_s, reach=0):
+    """Estende o pente, no passo mediano, até as bordas do mapa.
+
+    Os picos da faixa-semente somem onde a pauta enfraquece (sombra, margens
+    e, com a folha inclinada, as linhas que só entram na vista mais longe da
+    semente): as linhas além do primeiro/último pico ficavam sem caminho e
+    sobreviviam como riscos soltos. As linhas extrapoladas ficam marcadas e só
+    valem com suporte próprio (`_drop_unsupported`): uma previsão não se valida
+    pelas linhas medidas, nem por uma marca local de caneta que caia nela.
+    """
+    step = float(np.median(np.diff(peaks)))
+    if step < 2:
+        return peaks, np.zeros(peaks.size, bool)
+    lo = np.arange(peaks[0] - step, -1.0 - reach, -step)[::-1]
+    hi = np.arange(peaks[-1] + step, h_s - 1.0 + reach, step)
+    full = np.concatenate([lo, peaks, hi]).astype(np.float32)
+    ext = np.concatenate(
+        [np.ones(lo.size, bool), np.zeros(peaks.size, bool), np.ones(hi.size, bool)]
+    )
+    return full, ext
 
 
 def _shifted_max(prev, slope, penalty):
@@ -274,7 +311,7 @@ def _segment(score, c_lo, c_hi, width, height):
     found = _seeds(score, c_lo, c_hi)
     if found is None:
         return None
-    c_seed, seeds, lag, slope = found
+    c_seed, seeds, ext_rows, lag, slope = found
     dmax = int(1.2 * lag) + 2
     d_cols = _comb_track(score, seeds, c_seed, c_lo, c_hi, dmax, slope)
     rows = _refine(score, seeds, d_cols, c_lo, c_hi, c_seed, slope)  # (C, K)
@@ -289,10 +326,18 @@ def _segment(score, c_lo, c_hi, width, height):
     x1 = width if c_hi >= w_s else int(round(c_hi * rx))
     xs = np.arange(x0, x1, dtype=np.float32)
     full = (rows + 0.5) * ry - 0.5
-    paths = np.stack(
-        [np.interp(xs, xc, full[:, k]) for k in range(full.shape[1])]
-    ).astype(np.float32)
-    return Segment(x0=x0, x1=x1, paths=paths, period=float(lag * ry))
+    # linhas estendidas que nunca entram na imagem não têm o que apagar (e o
+    # grampo da janela as jogaria para a borda)
+    inside = ((full >= 0) & (full <= height - 1)).any(axis=0)
+    keep = np.flatnonzero(inside)
+    paths = np.stack([np.interp(xs, xc, full[:, k]) for k in keep]).astype(np.float32)
+    return Segment(
+        x0=x0,
+        x1=x1,
+        paths=paths,
+        period=float(lag * ry),
+        extended=ext_rows[keep],
+    )
 
 
 def estimate(prob, visible=None):
@@ -308,7 +353,13 @@ def estimate(prob, visible=None):
         seg = _segment(score, c_lo, c_hi, w, h)
         if seg is not None:
             segments.append(seg)
-    segments = [seg for seg in segments if _support(prob, seg) >= _MIN_SUPPORT]
+    marks = [_ink_on_path(prob, seg) for seg in segments]  # um remap por segmento
+    kept = [
+        (seg, has)
+        for seg, has in zip(segments, marks, strict=True)
+        if _support(prob, seg, has) >= _MIN_SUPPORT
+    ]
+    segments = [_drop_unsupported(prob, seg, has) for seg, has in kept]
     if not segments:
         return None
     h_pauta = _estimate_h(prob, segments)
@@ -426,16 +477,24 @@ def _dilate_cols(mask, pad):
     return out
 
 
-def _support(prob, seg):
+def _ink_on_path(prob, seg):
+    """(K, X) bool: há tinta fina sobre o caminho. Um remap por segmento."""
+    ink = (prob > _T_RUN).view(np.uint8)
+    pattern, _ = _Track(seg, prob.shape).window(ink)
+    return _lut()[0][pattern] >= 1
+
+
+def _support(prob, seg, has=None):
     """Fração das janelas de _SUPPORT_W px, ao longo da pagina, em que a linha
     tem tinta fina sobre o caminho (mediana das linhas).
 
     Pauta de verdade corre a largura da folha; um tracejado de caneta, ou
     qualquer coisa periodica numa faixa so, nao: seu suporte e local.
     """
-    ink = (prob > _T_RUN).view(np.uint8)
-    pattern, _ = _Track(seg, prob.shape).window(ink)
-    has = _lut()[0][pattern] >= 1  # (K, X)
+    if has is None:
+        has = _ink_on_path(prob, seg)  # (K, X)
+    if seg.extended is not None and not seg.extended.all():
+        has = has[~seg.extended]  # só as linhas medidas decidem o segmento
     k, x = has.shape
     n = max(1, x // _SUPPORT_W)
     win = has[:, : n * _SUPPORT_W].reshape(k, n, _SUPPORT_W).any(axis=2)
@@ -449,6 +508,44 @@ def _support(prob, seg):
     last = x - 1 - has[:, ::-1].argmax(axis=1)
     span = float(np.median(np.where(anyc, last - first + 1, 0) / x))
     return min(frac, span / _MIN_SPAN * _MIN_SUPPORT)
+
+
+def _drop_unsupported(prob, seg, has=None):
+    """Tira as linhas extrapoladas sem suporte próprio ao longo da folha.
+
+    Mesmo critério do segmento (janelas de _SUPPORT_W px com tinta fina e
+    extensão), mas por linha e só nas colunas em que o caminho está dentro da
+    imagem: uma linha inclinada que entra a meio da vista vale pelo trecho
+    visível. Uma marca local de caneta não passa (suporte e extensão curtos).
+    """
+    if seg.extended is None or not seg.extended.any():
+        return seg
+    h = prob.shape[0]
+    if has is None:
+        has = _ink_on_path(prob, seg)
+    inside = (seg.paths >= 0) & (seg.paths <= h - 1)
+    has = has & inside
+    k, x = has.shape
+    # janelas de _SUPPORT_W px incluindo a última, parcial: uma linha inclinada
+    # que só entra no fim da trilha tem o suporte justamente ali
+    n = -(-x // _SUPPORT_W)
+    pad = ((0, 0), (0, n * _SUPPORT_W - x))
+    win_has = np.pad(has, pad).reshape(k, n, _SUPPORT_W).any(axis=2)
+    cnt_in = np.pad(inside, pad).reshape(k, n, _SUPPORT_W).sum(axis=2)
+    width = np.minimum(_SUPPORT_W, x - np.arange(n) * _SUPPORT_W)  # largura real
+    win_in = cnt_in >= 0.5 * width[None, :]
+    n_in = np.maximum(win_in.sum(axis=1), 1)
+    frac = (win_has & win_in).sum(axis=1) / n_in
+    first = has.argmax(axis=1)
+    last = x - 1 - has[:, ::-1].argmax(axis=1)
+    span = np.where(has.any(axis=1), last - first + 1, 0) / np.maximum(
+        inside.sum(axis=1), 1
+    )
+    ok = np.minimum(frac, span / _MIN_SPAN * _MIN_SUPPORT) >= _MIN_SUPPORT
+    keep = ~seg.extended | ok
+    if keep.all():
+        return seg
+    return dataclasses.replace(seg, paths=seg.paths[keep], extended=seg.extended[keep])
 
 
 def _estimate_h(prob, segments):
@@ -466,6 +563,86 @@ def _estimate_h(prob, segments):
     if not runs:
         return None
     return float(np.median(np.concatenate(runs)))
+
+
+def _gutter_mask(tracks_raw, width):
+    """(W,) colunas da página dentro de uma faixa de sombra.
+
+    A fração de linhas grossas é medida por coluna física e juntada entre as
+    metades: o vinco costuma cair na divisa, e uma faixa de 16 colunas
+    repartida em 8 + 8 não pode sumir. Conta só trecho contínuo (sem preencher
+    a borda). A sombra engrossa quase todas as linhas; um cruzamento de
+    caneta também, mas só por poucas colunas.
+    """
+    frac = np.zeros(width, np.float32)
+    for x0, x1, raw in tracks_raw:
+        frac[x0:x1] = raw.mean(axis=0)
+    hot = np.concatenate([[0], frac >= _GUTTER_FRAC, [0]]).astype(np.int8)
+    edges = np.flatnonzero(np.diff(hot))
+    out = np.zeros(width, bool)
+    for a, b in zip(edges[::2], edges[1::2], strict=False):
+        if b - a >= _GUTTER_MIN_W:
+            out[a:b] = True
+    return out
+
+
+def _joined_through(raw, gutter):
+    """(K, X): trecho da linha dentro da faixa que continua grosso fora dela.
+
+    A sombra engrossa todas as linhas por igual, então por espessura um traço
+    de caneta deitado sobre ela some na sombra. O que o separa é a continuidade:
+    a linha segue grossa (>= pauta + margem) por _PROB_MIN_RUN colunas logo
+    antes E logo depois da faixa. O ombro da sombra, que afina de forma
+    irregular, não dura isso. Na divisa das metades a trilha só vê um lado, e a
+    borda da trilha não conta como ponta a conferir.
+    """
+    k, x = raw.shape
+    out = np.zeros_like(raw)
+    edges = np.flatnonzero(np.diff(np.concatenate([[0], gutter.view(np.uint8), [0]])))
+    for a, b in zip(edges[::2], edges[1::2], strict=False):
+        need = _PROB_MIN_RUN
+        left = right = None
+        if a >= need:
+            left = raw[:, a - need : a].mean(axis=1) >= 0.85
+        if b + need <= x:
+            right = raw[:, b : b + need].mean(axis=1) >= 0.85
+        sides = [s for s in (left, right) if s is not None]
+        if len(sides) == 2 or (len(sides) == 1 and (a == 0 or b == x)):
+            out[:, a:b] = np.logical_and.reduce(sides)[:, None]
+    return out
+
+
+def _long_runs(mask, length, edge_length):
+    """(K, X): trechos contínuos de `mask` com >= length colunas.
+
+    Um trecho que encosta na borda da trilha (a divisa das metades) vale com
+    `edge_length`: o resto dele está na outra trilha, que a daqui não vê.
+    """
+    k, x = mask.shape
+    padded = np.zeros((k, x + 2), np.int8)
+    padded[:, 1:-1] = mask
+    d = np.diff(padded, axis=1)
+    rs, rc = np.nonzero(d == 1)  # início de cada trecho
+    es, ec = np.nonzero(d == -1)  # fim (exclusivo)
+    out = np.zeros_like(mask)
+    n = ec - rc
+    need = np.where((rc == 0) | (ec == x), edge_length, length)
+    for r, a, b in zip(rs[n >= need], rc[n >= need], ec[n >= need], strict=True):
+        out[r, a:b] = True
+    return out
+
+
+def _stroke_on_shade(run, gutter):
+    """(K, X): traço de caneta dentro da sombra, por desvio das linhas vizinhas.
+
+    A sombra engrossa todas as linhas ao mesmo tempo (e a curva do vinco move
+    todas juntas); um traço deixa UMA linha mais grossa que a mediana da coluna
+    por um trecho contínuo. Vale também para marcas curtas inteiras na faixa,
+    sem continuação fora dela.
+    """
+    med = np.median(run, axis=0)
+    above = (run > med[None, :]) & gutter[None, :]
+    return _long_runs(above, _PROB_MIN_RUN, _GUTTER_EDGE_RUN)
 
 
 def _opening_cols(mask, length):
@@ -502,6 +679,7 @@ def erase_tracks(prob, tracks, h_pauta):
     flat_prob = prob.reshape(-1)  # vista: as escritas valem para `prob`
     h, w = prob.shape
     n_total, shift_total = 0, 0
+    passes = []
     for track in tracks:
         pattern, yi = track.window(ink)
         run = run_t[pattern].astype(np.int16)
@@ -513,13 +691,26 @@ def erase_tracks(prob, tracks, h_pauta):
                 shift_total += delta
                 pattern, yi = track.window(ink)
                 run = run_t[pattern].astype(np.int16)
+        passes.append((pattern, yi, run))
+    # Âncora = cruzamento de verdade: run vertical acima da pauta em
+    # >= 2 colunas SEGUIDAS. Um ponto isolado é flutuação de espessura da
+    # própria pauta (medido no e5: 14% dos pontos, runs de 6 a 13 px) e,
+    # tratado como âncora, protegia 5 colunas e deixava a pauta tracejada.
+    thick = [run > h_run + _THIN_MARGIN for _p, _y, run in passes]
+    gutter_full = _gutter_mask(
+        [(t.x0, t.x1, raw) for t, raw in zip(tracks, thick, strict=True)], w
+    )
+    cap = h_run + _THIN_MARGIN + _GUTTER_EXTRA
+    for track, (pattern, yi, run), raw in zip(tracks, passes, thick, strict=True):
         jstar = jstar_t[pattern].astype(np.int64)
         thin = (run >= 1) & (run <= h_run + _THIN_MARGIN)
-        # Âncora = cruzamento de verdade: run vertical acima da pauta em
-        # >= 2 colunas SEGUIDAS. Um ponto isolado é flutuação de espessura da
-        # própria pauta (medido no e5: 14% dos pontos, runs de 6 a 13 px) e,
-        # tratado como âncora, protegia 5 colunas e deixava a pauta tracejada.
-        raw = run > h_run + _THIN_MARGIN
+        gutter = gutter_full[track.x0 : track.x1]
+        if gutter.any():
+            shaded = (run >= 1) & (run <= cap) & gutter[None, :]
+            shaded &= ~_joined_through(raw, gutter)
+            shaded &= ~_stroke_on_shade(run, gutter)
+            thin |= shaded
+            raw = raw & ~(gutter[None, :] & (run <= cap))
         anchor = np.zeros_like(raw)
         both = raw[:, 1:] & raw[:, :-1]
         anchor[:, 1:] |= both
@@ -546,7 +737,7 @@ def erase_tracks(prob, tracks, h_pauta):
         length = run[ks, xs].astype(np.int64) + 2
         top = centers[ks, xs] - up - 1
         flat_cols = xs + track.x0
-        for j in range(h_run + _THIN_MARGIN + 2):
+        for j in range(int(length.max())):
             sel = (j < length) & (top + j >= 0) & (top + j < h)
             if sel.any():
                 flat_prob[(top[sel] + j) * w + flat_cols[sel]] = 0.0

@@ -354,7 +354,8 @@ def test_paths_use_pixel_index_coordinates_and_do_not_grab_a_neighbour_stroke():
     for k in range(12):
         prob[80 + 40 * k : 82 + 40 * k, :] = 0.95
     model = ruling.estimate(prob.copy())
-    first = model.segments[0].paths[0]
+    paths = model.segments[0].paths
+    first = paths[int(np.argmin(np.abs(np.median(paths, axis=1) - 80.5)))]
     assert abs(float(np.median(first)) - 80.5) < 0.3
     # traco de caneta (2 px) colado a pauta, separado por UMA linha em branco
     pen = np.zeros_like(prob)
@@ -406,3 +407,185 @@ def test_filter_holds_up_through_the_live_vote(straight, level):
     for name in bench.SHORT_STROKE_GLYPHS:
         arms |= straight.arms[name]
     assert (confirmed & arms).sum() >= 0.97 * (plain & arms).sum()  # braços ficam
+
+
+# ------------------------------------------------ caderno aberto com vinco (#132)
+
+
+def _shaded_notebook(tilt, house=None):
+    """Duas paginas curvas, pauta com lacunas e vinco sombreado: na faixa
+    central TODAS as linhas engrossam (sombra), com probabilidade menor."""
+    page = bench.make_synthetic_page(seed=0, tilt=tilt)
+    prob = page.prob.copy()
+    h, w = prob.shape
+    mid = w // 2
+    rng = np.random.default_rng(1)
+    band = (slice(None), slice(mid - 40, mid + 40))
+    shade = (
+        np.asarray(
+            __import__("cv2").dilate(
+                page.ruling[band].astype(np.uint8), np.ones((5, 1), np.uint8)
+            )
+        )
+        > 0
+    )
+    sub = prob[band]
+    sub[shade] = np.maximum(sub[shade], rng.uniform(0.6, 0.9, int(shade.sum())))
+    for x in range(30, w, 53):  # lacunas na pauta, longe do vinco
+        if abs(x - mid) > 60:
+            prob[page.ruling_only[:, x : x + 7].any(axis=1), x : x + 7] *= 0.4
+    strokes = np.zeros(prob.shape, bool)
+    if house is not None:
+        import cv2
+
+        x0, y0, size = house
+        mask = np.zeros(prob.shape, np.uint8)
+        pts = [
+            (x0, y0 + size),
+            (x0, y0),
+            (x0 + size, y0),
+            (x0 + size, y0 + size),
+            (x0, y0 + size),
+        ]
+        roof = [(x0, y0), (x0 + size // 2, y0 - size // 2), (x0 + size, y0)]
+        for line in (pts, roof):
+            cv2.polylines(mask, [np.array(line, np.int32)], False, 255, 5)
+        strokes = mask > 0
+        prob[strokes] = 0.97
+    return page, prob, strokes
+
+
+def _leftover_in_fold(page, prob, out):
+    """Pixels que sobram no vinco (rows sem a borda externa), incluindo a franja
+    de sombra que `ruling_only` nao cobre, fora dos glifos do desenho."""
+    cv2 = __import__("cv2")
+    mid = prob.shape[1] // 2
+    zone = np.zeros(prob.shape, bool)
+    zone[40:-40, mid - 50 : mid + 50] = True
+    pen = cv2.dilate(page.strokes.astype(np.uint8), np.ones((9, 9), np.uint8)) > 0
+    ink = (prob > 0.5) & zone & ~pen
+    return int(((out > 0.5) & ink).sum()), int(ink.sum())
+
+
+@pytest.mark.parametrize("tilt", [0.0, 0.35])
+def test_shaded_gutter_does_not_leave_a_staircase_of_ruling(tilt):
+    page, prob, _ = _shaded_notebook(tilt)
+    out = ruling.RulingFilter().apply(prob.copy())
+    left, total = _leftover_in_fold(page, prob, out)
+    assert left < 0.01 * total  # inclui a franja de sombra, nao so a pauta
+
+
+def _house_parts(x0, y0=300, size=150):
+    import cv2
+
+    shapes = {
+        "left": [(x0, y0 + size), (x0, y0)],
+        "top": [(x0, y0), (x0 + size, y0)],
+        "right": [(x0 + size, y0), (x0 + size, y0 + size)],
+        "bottom": [(x0 + size, y0 + size), (x0, y0 + size)],
+        "roof": [(x0, y0), (x0 + size // 2, y0 - size // 2), (x0 + size, y0)],
+    }
+    parts = {}
+    for name, line in shapes.items():
+        mask = np.zeros((850, 1200), np.uint8)
+        cv2.polylines(mask, [np.array(line, np.int32)], False, 255, 5)
+        parts[name] = mask > 0
+    return parts
+
+
+@pytest.mark.parametrize("x0", [150, 520])  # 520: o topo cruza o vinco
+def test_a_house_drawn_over_the_ruling_keeps_each_stroke(x0):
+    page, prob, house = _shaded_notebook(0.35, house=(x0, 300, 150))
+    out = ruling.RulingFilter().apply(prob.copy())
+    for name, part in _house_parts(x0).items():
+        kept = ((out > 0.5) & part).sum() / part.sum()
+        assert kept >= 0.97, name  # cada lado, nao a media do desenho
+
+
+def test_a_short_pen_dash_entirely_inside_the_fold_is_kept():
+    """Traco curto sobre uma linha sombreada, sem continuacao fora do vinco.
+    Aqui a sombra tem ~7 px, entao o traco de marcador tem 9."""
+    page, prob, _ = _shaded_notebook(0.0)
+    mid = prob.shape[1] // 2
+    rows = np.flatnonzero(page.ruling[:, mid])
+    y = int(rows[len(rows) // 2])
+    dash = np.zeros(prob.shape, bool)
+    dash[y - 4 : y + 5, mid - 10 : mid + 4] = True  # 9 px x 14 colunas
+    prob[dash] = 0.97
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert ((out > 0.5) & dash).sum() >= 0.97 * dash.sum()
+
+
+def test_a_7px_dash_on_a_6px_shaded_rule_is_kept_and_the_rest_is_erased():
+    """Caso do review: pauta de 2 px engrossa para 6 no vinco; um traco de 7 px
+    e 14 colunas numa so linha (prob 0,97) fica, a sombra das outras sai."""
+    prob = np.zeros((600, 1200), np.float32)
+    for k in range(12):
+        y = 80 + 40 * k
+        prob[y : y + 2, :] = 0.95
+        prob[y : y + 6, 560:640] = 0.8
+    dash = np.zeros(prob.shape, bool)
+    dash[80 + 40 * 5 - 1 : 80 + 40 * 5 + 6, 590:604] = True
+    prob[dash] = 0.97
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert ((out > 0.5) & dash).sum() >= 0.97 * dash.sum()
+    assert ((out > 0.5) & ~dash)[:, 560:640].sum() == 0
+
+
+def test_pen_mark_on_a_predicted_row_of_an_unruled_section_is_kept():
+    """Pauta so de y=100 para baixo; uma marca de 40 colunas na linha prevista
+    acima dela nao pode validar a propria linha extrapolada."""
+    prob = np.zeros((600, 1200), np.float32)
+    for k in range(12):
+        prob[100 + 40 * k : 102 + 40 * k, :] = 0.95
+    prob[60:62, 300:340] = 0.95  # fora da pauta, no passo dela
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out[60:62, 300:340] > 0.5).all()
+    assert (out[100:580] > 0.5).sum() == 0  # e a pauta de verdade sai
+
+
+def test_ruling_only_in_the_middle_of_the_page_is_still_detected():
+    """Areas em branco acima e abaixo nao podem derrubar o segmento."""
+    prob = np.zeros((600, 1200), np.float32)
+    for k in range(7):
+        prob[160 + 40 * k : 162 + 40 * k, :] = 0.95
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out > 0.5).sum() == 0
+
+
+def test_a_shadow_centered_on_the_page_split_is_erased_on_both_sides():
+    """Faixa de 16 colunas repartida 8 + 8 entre as metades (divisa em 600)."""
+    prob = _ruled_page(thick_cols=range(592, 608), thick=6)
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out[:, 584:616] > 0.5).sum() == 0
+
+
+def test_uneven_shadow_shoulders_do_not_exempt_the_whole_fold():
+    """Algumas linhas ficam grossas 2 colunas alem da faixa (sombra que afina
+    irregular), sem caneta: o interior da faixa sai por inteiro."""
+    prob = np.zeros((600, 1200), np.float32)
+    for k in range(12):
+        y = 80 + 40 * k
+        prob[y : y + 2, :] = 0.95
+        prob[y : y + 6, 560:640] = 0.95  # a faixa
+        if k % 2 == 0:
+            prob[y : y + 6, 558:560] = 0.95  # ombros
+            prob[y : y + 6, 640:642] = 0.95
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out[:, 566:634] > 0.5).sum() == 0
+
+
+def test_an_extrapolated_line_seen_only_in_the_last_partial_window_is_kept():
+    """Linha inclinada que so entra na imagem nas ultimas 35 colunas da trilha
+    e tem tinta nas ultimas 24 (a janela parcial final): o suporte conta essa
+    janela pela largura real (review #139)."""
+    xs = np.arange(600)
+    paths = np.stack([np.full(600, 100.0), 599.0 - (xs - 565.0)]).astype(np.float32)
+    seg = ruling.Segment(0, 600, paths, 40.0, np.array([False, True]))
+    prob = np.zeros((600, 600), np.float32)
+    prob[99:101, :] = 0.95
+    for x in range(576, 600):
+        y = int(round(paths[1, x]))
+        prob[y : y + 2, x] = 0.95
+    out = ruling._drop_unsupported(prob, seg)
+    assert out.paths.shape[0] == 2
