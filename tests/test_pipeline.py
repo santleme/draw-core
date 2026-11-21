@@ -223,6 +223,29 @@ def test_coverage_mask_gates_votes_off_sheet():
     assert gated[-1][:, : int(page_w * 0.30)].all()
 
 
+def test_coverage_fill_uses_the_paper_mean_bgr():
+    """O fora-da-folha recebe a cor média do próprio papel por canal.
+
+    Pinca o contrato do preenchimento (a aresta folha->preto vira a
+    cor do papel, não um branco fixo): cada pixel fora da cobertura
+    sai igual à média BGR dos pixels cobertos do mesmo warp.
+    """
+    frame = np.full((720, 1280, 3), 220, np.uint8)  # mesa clara
+    frame[100:400, 100:350] = (30, 100, 170)  # papel cor própria
+    coverage = _mask_block(100, 400, 100, 350)
+    loop, _det, ink = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", {"coverage_mask": coverage})
+    )
+    _drive(loop, 40, frame=frame)
+    page = ink.pages[-1]
+    assert page.coverage is not None and page.coverage.any()
+    inside = page.image[page.coverage]
+    expected = inside.mean(axis=0).astype(np.uint8)
+    outside = page.image[~page.coverage]
+    assert outside.size, "o teste precisa de região fora da folha"
+    assert (outside == expected).all()
+
+
 def test_coverage_config_off_ignores_the_mask():
     """coverage=False: a máscara publicada não entra no voto."""
     mask = _coverage_mask()

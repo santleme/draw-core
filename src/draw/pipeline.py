@@ -74,6 +74,17 @@ _FROZEN_SHEET_MOVE_PX = 25.0
 _STALE_PASS_MIN_FRAMES = _SHEET_LOST_MIN_FRAMES
 
 
+def _paper_mean_bgr(image, coverage):
+    """Média BGR sobre os pixels cobertos, sem materializar a seleção.
+
+    cv2.mean reduz numa passada sobre a máscara; o caminho
+    `image[coverage].mean(axis=0)` copiava os ~700-800k pixels do
+    papel (~24 ms por submit medidos na VM, issue #98) antes de
+    reduzir — mesmo resultado, ~43x mais barato.
+    """
+    return np.array(cv2.mean(image, coverage.astype(np.uint8))[:3], np.uint8)
+
+
 def _acquisition_record(trace, frame_index, consumed, before, after, tracker_event):
     """Evento por aquisicao: rastro do combinado + rastreador.
 
@@ -234,7 +245,7 @@ class Pipeline:
         """
         if coverage is not None and coverage.any():
             filled = ink_warped.copy()
-            filled[~coverage] = ink_warped[coverage].mean(axis=0).astype(np.uint8)
+            filled[~coverage] = _paper_mean_bgr(ink_warped, coverage)
             return photometry.division_normalize(filled)
         return photometry.division_normalize(ink_warped)
 
@@ -383,9 +394,7 @@ class Pipeline:
             ink_submit = ink_warped
             if coverage.any():
                 ink_submit = ink_warped.copy()
-                ink_submit[~coverage] = (
-                    ink_warped[coverage].mean(axis=0).astype(np.uint8)
-                )
+                ink_submit[~coverage] = _paper_mean_bgr(ink_warped, coverage)
             self.ink_worker.submit(
                 contracts.WarpedPage(
                     ink_submit,
