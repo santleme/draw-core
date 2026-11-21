@@ -461,9 +461,17 @@ class NeuralSheetDetector:
                     "reason": "min_area",
                     "area_ratio": contour_area / mask_area,
                 }
+            elif lines is None:
+                # Contorno substancial devolvido sem quadrilátero
+                # nem retas: a guarda de suporte (fill) vetou —
+                # confirmado no retorno cedo abaixo.
+                self.last_fit_reject = {
+                    "reason": "unsupported",
+                    "area_ratio": contour_area / mask_area,
+                }
             else:
-                # O impl devolveu None por outra via (ex.: dublê de
-                # teste): sem contorno/área para apontar, registra a
+                # O impl devolveu sem cantos por outra via (retas
+                # sem quad só vem de dublê de teste): registra a
                 # falha nua.
                 self.last_fit_reject = {
                     "reason": "fit_failed",
@@ -493,14 +501,10 @@ class NeuralSheetDetector:
             # plausibilidade. Sem isso o caminho "sem cantos" apagava as
             # retas guardadas e gravava a máscara recusada como
             # referência — uma aresta ocluída deixava de ser recuperável.
-            self._note_rejected_fit()
-            # O motivo da recusa sobe no rastro de aquisição como
-            # "unsupported" — é o veto da guarda de fill, calibrado
+            # O motivo "unsupported" já foi registrado no bloco de
+            # rejeição acima — é o veto da guarda de fill, calibrado
             # na mesa oblíqua, que a issue #105 quer ver como dado.
-            self.last_fit_reject = {
-                "reason": "unsupported",
-                "area_ratio": contour_area / mask_area,
-            }
+            self._note_rejected_fit()
             return None
         self._reject_streak = 0
         if lines is not None:
