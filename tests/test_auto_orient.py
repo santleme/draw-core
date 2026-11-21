@@ -718,6 +718,51 @@ def test_notebook_with_narrow_gutter_is_still_a_spread():
     assert _is_two_page_spread(a, b) is True
 
 
+def test_wide_notebook_gutter_requires_explicit_spread_mode():
+    from draw.geometry import _is_two_page_spread
+
+    a = _contour_of(50, 50, 300, 350)
+    b = _contour_of(340, 50, 590, 350)
+    assert _is_two_page_spread(a, b) is False
+    assert _is_two_page_spread(a, b, mode="always") is True
+    assert _is_two_page_spread(a, b, mode="never") is False
+
+
+def test_spread_mode_rejects_unknown_values():
+    from draw.geometry import _is_two_page_spread
+
+    a = _contour_of(50, 50, 300, 350)
+    b = _contour_of(310, 50, 560, 350)
+    with pytest.raises(ValueError, match="spread_mode"):
+        _is_two_page_spread(a, b, mode="sometimes")
+
+
+def test_pipeline_config_exposes_validated_spread_mode():
+    from draw.settings import PipelineConfig
+
+    assert PipelineConfig().spread_mode == "auto"
+    assert PipelineConfig(spread_mode="always").spread_mode == "always"
+    assert PipelineConfig(spread_mode="never").spread_mode == "never"
+    with pytest.raises(ValueError, match="spread_mode"):
+        PipelineConfig(spread_mode="sometimes")
+
+
+def test_neural_detector_honors_spread_mode_never():
+    from draw.perception import NeuralSheetDetector
+
+    mask = np.zeros((400, 800), dtype=np.uint8)
+    mask[50:350, 50:300] = 255
+    mask[50:350, 310:560] = 255
+
+    automatic = NeuralSheetDetector("unused.onnx", verify=None)
+    automatic._fit(mask)
+    never = NeuralSheetDetector("unused.onnx", verify=None, spread_mode="never")
+    never._fit(mask)
+
+    assert automatic._memory_is_spread is True
+    assert never._memory_is_spread is False
+
+
 def test_fit_does_not_swallow_typeerror_from_geometry(monkeypatch):
     from draw import geometry as geometry_module
     from draw.perception import NeuralSheetDetector
@@ -899,6 +944,47 @@ def test_pure_lateral_mask_preserves_pending_inverted_streak():
     det.observe_mask(lateral)  # nao e conflito: preserva a sequencia
     assert det.observe_mask(top_entry)
     assert det.flipped
+
+
+def test_hand_vote_abstains_on_dominant_side_entry_near_top():
+    # Issue #90: entrada lateral dominante perto do topo (com e sem toque exato).
+    mask_exact = np.zeros((720, 1280), dtype=np.uint8)
+    mask_exact[0:180, 0:220] = 255
+    assert hand_mask_orientation_vote(mask_exact) is None
+
+    mask_slack = np.zeros((720, 1280), dtype=np.uint8)
+    mask_slack[2:180, 0:220] = 255
+    assert hand_mask_orientation_vote(mask_slack) is None
+
+
+def test_hand_vote_abstains_on_side_entry_with_narrow_corner_touch():
+    # Review PR #96: toque estreito na linha 0 nao pode liberar limiar 2x para a banda.
+    small = np.zeros((384, 384), dtype=np.uint8)
+    small[0:1, 0:3] = 255
+    small[1:32, 0:66] = 255
+    mask = cv2.resize(small, (1280, 720), interpolation=cv2.INTER_NEAREST)
+    assert hand_mask_orientation_vote(mask) is None
+    assert hand_mask_orientation_vote(mask[::-1].copy()) is None
+
+
+def test_hand_vote_top_entry_near_but_not_touching_side_still_votes():
+    # Review PR #96: braco a 20 px da lateral nao conta como evidencia lateral.
+    mask = np.zeros((720, 1280), dtype=np.uint8)
+    mask[0:180, 20:140] = 255
+    assert hand_mask_orientation_vote(mask) == "inverted"
+
+
+def test_hand_vote_abstains_on_resized_side_entry_with_two_blank_model_cols():
+    # Review PR #96: 2 colunas vazias no modelo 384x384 viram 7 px em 1280x720.
+    small = np.zeros((384, 384), dtype=np.uint8)
+    small[1:96, 2:56] = 255
+    mask = cv2.resize(small, (1280, 720), interpolation=cv2.INTER_NEAREST)
+    assert not mask[:, :6].any() and mask[2:4, 7:].any()
+    assert hand_mask_orientation_vote(mask) is None
+    mirrored = cv2.resize(
+        small[::-1, ::-1].copy(), (1280, 720), interpolation=cv2.INTER_NEAREST
+    )
+    assert hand_mask_orientation_vote(mirrored) is None
 
 
 @pytest.mark.parametrize("h", [480, 720, 1280])

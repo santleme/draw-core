@@ -1196,7 +1196,15 @@ def run(
     stream_record=None,
     auto_rotate=False,
     auto_orientation=False,
+    spread_mode_explicit=False,
 ):
+    spread_mode = "auto" if pipeline_config is None else pipeline_config.spread_mode
+    spread_mode_explicit = spread_mode_explicit or spread_mode != "auto"
+    if markers_mode and spread_mode_explicit:
+        raise ValueError(
+            "spread_mode nao combina com --markers (requer detector neural)"
+        )
+
     _apply_opencv_thread_cap()
     _require_gui_backend()
     _open_window(fullscreen)
@@ -1222,7 +1230,9 @@ def run(
             neural_model = str(_DEFAULT_SHEET_MODEL)
         if neural_model is not None and not markers_mode:
             neural_detector = NeuralSheetDetector(
-                neural_model, verify=manifest_module.verify_model
+                neural_model,
+                verify=manifest_module.verify_model,
+                spread_mode=spread_mode,
             )
             neural_detector.load()
             print(
@@ -1236,6 +1246,11 @@ def run(
                 "enxerga a folha em varias mesas. Baixe os modelos "
                 "oficiais pela Release do repositorio."
             )
+            if spread_mode_explicit:
+                print(
+                    f"Aviso: spread_mode={spread_mode!r} nao aplicado; "
+                    "ele requer o detector neural de folha."
+                )
 
         page_clean = None
         if not markers_mode:
@@ -1970,6 +1985,17 @@ def main():
         ),
     )
     parser.add_argument(
+        "--spread-mode",
+        choices=("auto", "always", "never"),
+        default=None,
+        help=(
+            "união de duas páginas: auto limita a calha a 10%%; always aceita "
+            "calhas maiores quando tamanho e alinhamento combinam; never "
+            "mantém os contornos separados. Requer detector neural de folha; "
+            "não combina com --markers"
+        ),
+    )
+    parser.add_argument(
         "--ink-vote",
         type=float,
         default=None,
@@ -2077,10 +2103,13 @@ def main():
     except ValueError as error:
         parser.error(str(error))
     # Marcadores nao tem detector neural nem tinta: preset legado, sem erro.
+    if args.markers and args.spread_mode is not None:
+        parser.error("--spread-mode nao combina com --markers (requer detector neural)")
     pipeline_config = PipelineConfig(
         ink=ink_config,
         ink_auto_gain=not legacy_ink,
         detect_wake=not legacy_ink,
+        spread_mode="auto" if args.spread_mode is None else args.spread_mode,
     )
     if args.stream_port is not None and not args.stream_token_file:
         parser.error("--stream-port exige --stream-token-file")
@@ -2120,6 +2149,7 @@ def main():
             rotation=rotation,
             auto_rotate=auto_rotate,
             auto_orientation=auto_orientation,
+            spread_mode_explicit=args.spread_mode is not None,
             pipeline_config=pipeline_config,
             stream_port=args.stream_port,
             stream_token_file=args.stream_token_file,

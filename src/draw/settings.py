@@ -76,6 +76,10 @@ class PipelineConfig:
     - detect_wake: cadência adaptativa do detector com sentinela de
       bordas (PR #69), ligada por padrão. Cai para 1 Hz quando a folha
       assenta e acorda no mesmo quadro se ela mexer.
+    - spread_mode: como combinar contornos de duas páginas. `auto`
+      conserva o limite de calha de 10%; `always` aceita calhas maiores
+      quando tamanho e alinhamento combinam; `never` mantém as páginas
+      separadas.
     """
 
     coverage: bool = True
@@ -89,10 +93,15 @@ class PipelineConfig:
     ink: InkConfig = InkConfig.production()
     detect_wake: bool = True
     detect_wake_interval_s: float = 1.0
+    spread_mode: str = "auto"
 
     def __post_init__(self):
         if not 0.0 < self.detect_wake_interval_s <= 5.0:
             raise ValueError(
                 "detect_wake_interval_s fora de (0, 5] s: "
                 f"{self.detect_wake_interval_s!r}"
+            )
+        if self.spread_mode not in ("auto", "always", "never"):
+            raise ValueError(
+                f"spread_mode deve ser um de: auto, always, never: {self.spread_mode!r}"
             )

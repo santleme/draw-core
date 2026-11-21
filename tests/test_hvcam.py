@@ -10,11 +10,16 @@ e _check_hvcam_source.
 
 import errno
 import os
+import subprocess
+import sys
+import threading
+import time
 
 import cv2
 import numpy as np
 import pytest
 
+from draw import _hvcam_mjpeg as mjpeg_module
 from draw import app as app_module
 from draw import camera as camera_module
 from draw import hvcam as hvcam_module
@@ -240,6 +245,56 @@ def test_hvcam_capture_bad_payload_is_failed_read():
     ok, frame = capture.read()
     assert not ok and frame is None
     capture.release()
+
+
+@pytest.mark.parametrize("source", ["hvcam+tcp://127.0.0.1", 0])
+def test_external_hvcam_reports_mjpeg_recovery_once(source, monkeypatch, caplog):
+    corrupt = {**_info(), "format": 4}
+    cam = FakeCamera(
+        [(corrupt, _payload()), (corrupt, _payload())],
+        bgr_result=ValueError("invalid JPEG"),
+    )
+
+    def external_capture(url, **kwargs):
+        expected = "hvcam://" if source == 0 else source
+        assert url == expected
+        return HvcamCapture(url, camera_factory=_factory(cam), **kwargs)
+
+    monkeypatch.setattr(camera_module, "HvcamCapture", external_capture)
+    if source == 0:
+        monkeypatch.setattr(camera_module, "is_wsl", lambda: True)
+        monkeypatch.setattr(camera_module, "_video_nodes", lambda: [])
+        monkeypatch.setattr(camera_module.os.path, "exists", lambda _path: False)
+        _url, capture = camera_module.open_wsl_hvcam_fallback(source)
+    else:
+        capture = camera_module.open_capture(source)
+
+    try:
+        assert capture.read() == (False, None)
+        assert capture.read() == (False, None)
+        assert capture.mjpeg_decode_errors == 2
+        warning = caplog.text
+        assert warning.count("MJPEG corrompido") == 1
+        assert "--format nv12" in warning and "--format yuy2" in warning
+        assert "WSL sem /dev/video*" in warning and "gerenciado" in warning
+    finally:
+        capture.release()
+
+
+def test_managed_hvcam_probe_does_not_report_external_recovery(caplog):
+    cam = FakeCamera(
+        [({**_info(), "format": 4}, _payload())],
+        bgr_result=ValueError("invalid JPEG"),
+    )
+    capture = HvcamCapture(
+        "hvcam+reverse://", camera_factory=_factory(cam), on_listening=lambda: None
+    )
+    try:
+        assert capture.read() == (False, None)
+        assert capture.mjpeg_decode_errors == 1
+        assert caplog.text == ""
+    finally:
+        capture.release()
 
 
 def test_hvcam_capture_unopened_when_connect_fails():
@@ -1408,12 +1463,7 @@ def test_open_managed_reverse_requests_720p_and_falls_back_to_nv12_on_mjpeg_erro
     assert cmds[1][-2:] == ["--device", "0"]
 
 
-def test_premature_mjpeg_scan_with_eoi_rejected_by_real_decoder_and_triggers_nv12(
-    tmp_path,
-):
-    """Scan MJPEG cortado no meio mantendo FF D9 no fim (imagem metade-cinza
-    com aviso do libjpeg) deve ser rejeitado pelo caminho real de `to_bgr` e
-    acionar o fallback NV12 em `open_managed_reverse`."""
+def _half_scan_mjpeg():
     img = np.random.default_rng(42).integers(0, 255, (128, 192, 3), dtype=np.uint8)
     ok, encoded = cv2.imencode(".jpg", img)
     assert ok
@@ -1421,7 +1471,14 @@ def test_premature_mjpeg_scan_with_eoi_rejected_by_real_decoder_and_triggers_nv1
     sos = raw.find(b"\xff\xda")
     assert sos > 0
     half_scan_with_eoi = raw[: sos + (len(raw) - sos) // 2] + b"\xff\xd9"
-    arr = np.frombuffer(half_scan_with_eoi, dtype=np.uint8)
+    return np.frombuffer(half_scan_with_eoi, dtype=np.uint8)
+
+
+def test_premature_mjpeg_scan_with_eoi_rejected_by_real_decoder_and_triggers_nv12(
+    tmp_path,
+):
+    """Scan MJPEG cortado mantendo FF D9 deve ser rejeitado e acionar NV12."""
+    arr = _half_scan_mjpeg()
 
     # 1. Caminho real de Camera.to_bgr rejeita o quadro metade-cinza.
     real_cam = object.__new__(hvcam_module.Camera)
@@ -1704,19 +1761,146 @@ def _open_fd_count():
 
 
 @pytest.mark.skipif(not os.path.isdir("/proc/self/fd"), reason="requer /proc")
-def test_strict_decoder_does_not_leak_fd_when_tempfile_fails(monkeypatch):
+def test_strict_decoder_releases_pipes_on_close():
     img = np.full((16, 16, 3), 90, dtype=np.uint8)
     ok, enc = cv2.imencode(".jpg", img)
     assert ok
 
-    def boom(*_a, **_k):
-        raise OSError("sem espaco")
-
-    monkeypatch.setattr(hvcam_module.tempfile, "TemporaryFile", boom)
     before = _open_fd_count()
-    for _ in range(20):
-        hvcam_module._imdecode_mjpeg_strict(enc)
+    decoder = mjpeg_module._MjpegDecoder()
+    try:
+        decoder.decode(enc)
+        worker = decoder._process
+        decoder.decode(enc)
+        assert decoder._process is worker
+    finally:
+        decoder.close()
+    assert worker.poll() is not None
     assert _open_fd_count() == before
+
+
+def test_strict_decoder_restarts_after_worker_exits():
+    ok, jpeg = cv2.imencode(".jpg", np.zeros((16, 16, 3), np.uint8))
+    assert ok
+    decoder = mjpeg_module._MjpegDecoder()
+    try:
+        decoder.decode(jpeg)
+        worker = decoder._process
+        worker.kill()
+        worker.wait(timeout=5)
+        with pytest.raises(ValueError, match="processo de decode MJPEG indisponivel"):
+            decoder.decode(jpeg)
+        assert decoder.decode(jpeg).shape == (16, 16, 3)
+        assert decoder._process is not worker
+    finally:
+        decoder.close()
+
+
+def test_decoder_works_without_writable_temp_storage(monkeypatch):
+    launch = subprocess.Popen
+    script = """
+import runpy, sys, tempfile
+def deny_tempfile(*args, **kwargs):
+    raise PermissionError("no writable temp storage")
+tempfile.TemporaryFile = deny_tempfile
+runpy.run_path(sys.argv[1], run_name="__main__")
+"""
+
+    def worker(command, **kwargs):
+        return launch([sys.executable, "-c", script, command[1]], **kwargs)
+
+    monkeypatch.setattr(mjpeg_module.subprocess, "Popen", worker)
+    ok, jpeg = cv2.imencode(".jpg", np.zeros((16, 16, 3), np.uint8))
+    assert ok
+    decoder = mjpeg_module._MjpegDecoder()
+    try:
+        assert decoder.decode(jpeg).shape == (16, 16, 3)
+        proc = decoder._process
+        with pytest.raises(ValueError, match="corrompido"):
+            decoder.decode(_half_scan_mjpeg())
+        assert decoder.decode(jpeg).shape == (16, 16, 3)
+        assert decoder._process is proc
+    finally:
+        decoder.close()
+
+
+def test_decoder_has_separate_cold_start_and_frame_deadlines(monkeypatch):
+    launch = subprocess.Popen
+    script = """
+import runpy, sys, time
+time.sleep(0.7)
+runpy.run_path(sys.argv[1], run_name="__main__")
+"""
+
+    def worker(command, **kwargs):
+        return launch([sys.executable, "-c", script, command[1]], **kwargs)
+
+    monkeypatch.setattr(mjpeg_module.subprocess, "Popen", worker)
+    ok, jpeg = cv2.imencode(".jpg", np.zeros((16, 16, 3), np.uint8))
+    assert ok
+    decoder = mjpeg_module._MjpegDecoder(timeout_s=0.5)
+    try:
+        assert decoder.decode(jpeg).shape == (16, 16, 3)
+    finally:
+        decoder.close()
+
+
+def test_decoder_kills_worker_that_never_reports_ready(monkeypatch):
+    launch = subprocess.Popen
+    processes = []
+
+    def worker(_command, **kwargs):
+        proc = launch([sys.executable, "-c", "import time; time.sleep(60)"], **kwargs)
+        processes.append(proc)
+        return proc
+
+    monkeypatch.setattr(mjpeg_module.subprocess, "Popen", worker)
+    decoder = mjpeg_module._MjpegDecoder(startup_timeout_s=0.2)
+    try:
+        with pytest.raises(ValueError, match="tempo limite da inicializacao"):
+            decoder.decode(np.zeros(16, np.uint8))
+        assert processes[0].poll() is not None
+        assert decoder._process is None
+    finally:
+        decoder.close()
+
+
+@pytest.mark.parametrize("input_size", [16, 2 * 1024 * 1024])
+def test_decoder_times_out_during_pipe_read_or_write_and_restarts(
+    input_size, monkeypatch
+):
+    launch = subprocess.Popen
+    processes = []
+
+    def worker(command, **kwargs):
+        if not processes:
+            script = """
+import sys, time
+sys.stdout.buffer.write(b"\x01")
+sys.stdout.buffer.flush()
+time.sleep(60)
+"""
+            command = [sys.executable, "-c", script]
+        proc = launch(command, **kwargs)
+        processes.append(proc)
+        return proc
+
+    monkeypatch.setattr(mjpeg_module.subprocess, "Popen", worker)
+    decoder = mjpeg_module._MjpegDecoder(timeout_s=0.2)
+    try:
+        started = time.monotonic()
+        with pytest.raises(ValueError, match="tempo limite"):
+            decoder.decode(np.zeros(input_size, np.uint8))
+        assert time.monotonic() - started < 5
+        assert processes[0].poll() is not None
+        assert decoder._process is None
+        ok, jpeg = cv2.imencode(".jpg", np.zeros((16, 16, 3), np.uint8))
+        assert ok
+        decoder._timeout_s = 5
+        assert decoder.decode(jpeg).shape == (16, 16, 3)
+        assert len(processes) == 2
+    finally:
+        decoder.close()
 
 
 def _jpeg_with_tail_before_eoi(tail):
@@ -1744,11 +1928,71 @@ def test_strict_decoder_rejects_extraneous_scan_bytes_before_eoi():
 def test_classify_warning_is_per_line():
     pad = np.frombuffer(b"\x01\x02" + b"\x00" * 8 + b"\xff\xd9", dtype=np.uint8)
     ext = "Corrupt JPEG data: 8 extraneous bytes before marker 0xd9"
-    assert hvcam_module._classify_mjpeg_warning(ext, pad) == "padding"
+    assert mjpeg_module._classify_mjpeg_warning(ext, pad) == "padding"
     bad = "Corrupt JPEG data: bad Huffman code"
-    assert hvcam_module._classify_mjpeg_warning(bad, pad) == "corrupt"
+    assert mjpeg_module._classify_mjpeg_warning(bad, pad) == "corrupt"
     wrong_n = "Corrupt JPEG data: 9 extraneous bytes before marker 0xd9"
-    assert hvcam_module._classify_mjpeg_warning(wrong_n, pad) == "corrupt"
+    assert mjpeg_module._classify_mjpeg_warning(wrong_n, pad) == "corrupt"
+
+
+@pytest.mark.parametrize("corrupt", [False, True])
+def test_strict_decoder_preserves_concurrent_stderr(
+    corrupt, monkeypatch, capfdbinary, tmp_path
+):
+    buf = _jpeg_with_tail_before_eoi(bytes(range(1, 41)) if corrupt else b"")
+    inside = tmp_path / "inside-decode"
+    release = tmp_path / "logged"
+    message = b"other thread diagnostics " + b"x" * 8192 + b"\n"
+    codec_message = b"codec diagnostics " + b"x" * (128 * 1024) + b"\n"
+    launch = subprocess.Popen
+    script = """
+import os, runpy, sys, time
+from pathlib import Path
+worker = runpy.run_path(sys.argv[1])
+cv2 = worker["cv2"]
+imdecode = cv2.imdecode
+def gated_imdecode(*args):
+    Path(sys.argv[2]).touch()
+    deadline = time.monotonic() + 5
+    while not Path(sys.argv[3]).exists():
+        if time.monotonic() >= deadline:
+            raise ValueError("writer did not report during decode")
+        time.sleep(0.005)
+    os.write(2, b"codec diagnostics " + b"x" * (128 * 1024) + b"\\n")
+    return imdecode(*args)
+cv2.imdecode = gated_imdecode
+worker["_serve"]()
+"""
+
+    def worker(command, **kwargs):
+        return launch(
+            [sys.executable, "-c", script, command[1], str(inside), str(release)],
+            **kwargs,
+        )
+
+    def write_log():
+        deadline = time.monotonic() + 5
+        while not inside.exists() and time.monotonic() < deadline:
+            time.sleep(0.005)
+        if inside.exists():
+            os.write(2, message)
+            release.touch()
+
+    monkeypatch.setattr(mjpeg_module.subprocess, "Popen", worker)
+    decoder = mjpeg_module._MjpegDecoder(timeout_s=6)
+    writer = threading.Thread(target=write_log)
+    writer.start()
+    try:
+        if corrupt:
+            with pytest.raises(ValueError, match="corrompido"):
+                decoder.decode(buf)
+        else:
+            assert decoder.decode(buf).shape == (96, 96, 3)
+    finally:
+        decoder.close()
+        writer.join(timeout=6)
+    assert release.exists()
+    assert capfdbinary.readouterr().err == message + codec_message
 
 
 def test_native_raw_tries_yuy2_when_nv12_is_too_slow(tmp_path):
@@ -1873,3 +2117,53 @@ def test_no_native_retry_when_requested_mode_never_connects(tmp_path):
     )
     assert cap is None
     assert len(cmds) == 1
+
+
+def test_native_retry_when_requested_host_exits_without_stderr(tmp_path):
+    fake_exe = tmp_path / "hvcam-host.exe"
+    fake_exe.write_bytes(b"MZ")
+    cmds = []
+
+    def fake_popen(cmd, **_kw):
+        cmds.append(list(cmd))
+        proc = _ScriptedProc(cmd)
+        if "--width" in cmd:
+            proc._rc = 1
+        return proc
+
+    class _Capture:
+        def __init__(self, _url, *, on_listening, abort_check, **_kw):
+            self._host_proc = None
+            self.last_capture_ts_ms = 0
+            on_listening()
+            self.opened = "--width" not in cmds[-1]
+            assert self.opened != abort_check()
+
+        def isOpened(self):
+            return self.opened
+
+        def read(self):
+            assert self.opened
+            self.last_capture_ts_ms += 33
+            return True, _frame()
+
+        def release(self):
+            hvcam_module._terminate_host_process(self._host_proc)
+
+    cap, idx, name = hvcam_module.open_managed_reverse(
+        try_all=True,
+        host_exe=fake_exe,
+        devices=[(0, "Native-only camera")],
+        popen=fake_popen,
+        capture_cls=_Capture,
+    )
+    try:
+        assert cap is not None
+        assert (idx, name) == (0, "Native-only camera")
+        assert len(cmds) == 2
+        assert "--width" in cmds[0]
+        assert "--width" not in cmds[1]
+        assert cap.last_capture_ts_ms == 99
+    finally:
+        if cap is not None:
+            cap.release()

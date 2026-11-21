@@ -57,6 +57,7 @@ function StudioEditor({ projectName, drawing }: { projectName: string; drawing: 
   const names = useMemo(() => studioNames(tr), [tr]);
   const paperRef = useRef<HTMLCanvasElement>(null);
   const digitalRef = useRef<HTMLCanvasElement>(null);
+  const [focusPane, setFocusPane] = useState<'paper' | 'digital'>('paper'); // painel grande: começa no papel, para acertar a câmera
   const countRef = useRef<HTMLSpanElement>(null);
   const [initialStrokes] = useState(() => drawing.strokes.map((st) => ({ ink: st.ink, pts: st.pts.map(([x, y]) => [x, y] as Pt) })));
   const strokes = useRef<{ pts: Pt[]; ink: string }[]>(initialStrokes);
@@ -309,7 +310,13 @@ function StudioEditor({ projectName, drawing }: { projectName: string; drawing: 
         dc.strokeStyle = s.ink === INKS[0] ? css('--ink') || s.ink : s.ink;
         dc.lineWidth = 3 * dpr;
         dc.lineCap = dc.lineJoin = 'round';
-        drawSmooth(dc, s.pts, dw, dh);
+        // Keep the paper proportions when the two panes have different aspect ratios.
+        const inkScale = Math.min(dw / pw, dh / ph);
+        dc.save();
+        dc.translate((dw - pw * inkScale) / 2, (dh - ph * inkScale) / 2);
+        dc.scale(inkScale, inkScale);
+        drawSmooth(dc, s.pts, pw, ph);
+        dc.restore();
       }
       const cloud = cloudRef.current;
       if (cloud) {
@@ -379,6 +386,7 @@ function StudioEditor({ projectName, drawing }: { projectName: string; drawing: 
     // os avisos mudam a altura das folhas sem disparar 'resize': mantem o tamanho dos canvases sincronizado
     const sizeWatch = new ResizeObserver(render);
     sizeWatch.observe(paper);
+    sizeWatch.observe(digital);
     const clear = () => {
       strokes.current = [];
       scheduleAutosave(); // a folha vazia tambem e gravada
@@ -430,14 +438,24 @@ function StudioEditor({ projectName, drawing }: { projectName: string; drawing: 
         </div>
       </div>
 
-      <section className="studio-stage">
-        <figure className="studio-pane">
-          <figcaption>{tr('papel', 'paper')}</figcaption>
+      <section className={`studio-stage is-focus-${focusPane}`}>
+        <figure className={`studio-pane${focusPane === 'paper' ? '' : ' is-small'}`}>
+          <figcaption>
+            <span>{tr('papel', 'paper')}</span>
+            <button type="button" className="studio-pane-focus" aria-pressed={focusPane === 'paper'} onClick={() => setFocusPane('paper')}>
+              {tr('Focar papel', 'Focus paper')}
+            </button>
+          </figcaption>
           <video ref={videoRef} className="studio-video" muted playsInline aria-hidden="true" />
           <canvas ref={paperRef} className={`studio-canvas${camId ? ' is-cam' : ''}`} aria-label={tr('Folha de papel: desenhe aqui', 'Paper sheet: draw here')} />
         </figure>
-        <figure className="studio-pane is-digital">
-          <figcaption>{tr('digital', 'digital')} · <span ref={countRef}>00</span> {tr('traços', 'strokes')}</figcaption>
+        <figure className={`studio-pane is-digital${focusPane === 'digital' ? '' : ' is-small'}`}>
+          <figcaption>
+            <span>{tr('digital', 'digital')} · <span ref={countRef}>00</span> {tr('traços', 'strokes')}</span>
+            <button type="button" className="studio-pane-focus" aria-pressed={focusPane === 'digital'} onClick={() => setFocusPane('digital')}>
+              {tr('Focar digital', 'Focus digital')}
+            </button>
+          </figcaption>
           <canvas ref={digitalRef} className="studio-canvas" role="img" aria-label={tr('Versão digital do desenho', 'Digital version of the drawing')} />
         </figure>
       </section>

@@ -22,6 +22,7 @@ from . import paper as paper_module
 _HAND_MIN_AREA_RATIO = 0.005
 _HAND_EDGE_TOL_RATIO = 0.02
 _HAND_EDGE_SLACK_RATIO = 0.005
+_HAND_SIDE_SLACK_RATIO = 0.008
 _HAND_EDGE_MIN_SLACK = 3
 _HAND_EDGE_MIN_PIXELS = 12
 _HAND_BORDER_DOMINANCE = 3.0
@@ -64,9 +65,9 @@ def _hand_orientation_evidence(hand_mask):
     slack = max(_HAND_EDGE_MIN_SLACK, int(round(h * _HAND_EDGE_SLACK_RATIO)))
     # Evidencia lateral: linhas do componente numa faixa curta de cada lateral
     # (nao so a coluna 0), pois a mascara neural redimensionada deixa colunas
-    # vazias na borda. A faixa tem o tamanho da folga de segmentacao, nao da
-    # tolerancia de contato: uma mao a varios pixels da lateral nao conta.
-    side_w = max(_HAND_EDGE_MIN_SLACK, int(round(w * _HAND_EDGE_SLACK_RATIO)))
+    # vazias na borda. A faixa lateral e um pouco mais larga que a folga de
+    # topo/base para cobrir colunas vazias do modelo redimensionado.
+    side_w = max(_HAND_EDGE_MIN_SLACK, int(round(w * _HAND_SIDE_SLACK_RATIO)))
     left_rows = comp[:, :side_w].any(axis=1)
     right_rows = comp[:, w - side_w :].any(axis=1)
     side_rows = left_rows | right_rows
@@ -93,8 +94,15 @@ def _hand_orientation_evidence(hand_mask):
             ):
                 return False
         strength = int(np.count_nonzero(comp[rows, :].any(axis=0)))
-        need = _HAND_SIDE_DOMINANCE_EXACT if exact else _HAND_SIDE_DOMINANCE_SLACK
-        return strength >= need * side_strength
+        if exact:
+            # Toque exato estreito nao libera o limiar: a linha externa
+            # domina por 2x ou a faixa de folga inteira por 5x.
+            outer = int(np.count_nonzero(comp[0 if is_top else h - 1, :]))
+            return (
+                outer >= _HAND_SIDE_DOMINANCE_EXACT * side_strength
+                or strength >= _HAND_SIDE_DOMINANCE_SLACK * side_strength
+            )
+        return strength >= _HAND_SIDE_DOMINANCE_SLACK * side_strength
 
     top_ok = can_vote(True)
     bot_ok = can_vote(False)

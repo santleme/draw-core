@@ -25,6 +25,7 @@ import ctypes
 import errno
 import hashlib
 import io
+import logging
 import os
 import re
 import selectors
@@ -32,9 +33,7 @@ import shutil
 import socket
 import struct
 import subprocess
-import sys
 import tempfile
-import threading
 import time
 import urllib.error
 import urllib.parse
@@ -46,9 +45,12 @@ from urllib.parse import urlparse
 import cv2
 import numpy as np
 
+from ._hvcam_mjpeg import decode_mjpeg as _imdecode_mjpeg_strict
+
 # Porta padrao do servico vsock — a mesma do protocolo hvcam e do
 # ajudante draw (coincidencia util: ambos falam 8765).
 DEFAULT_PORT = 8765
+_LOG = logging.getLogger(__name__)
 
 # Release oficial do hvcam-host.exe (santleme/hvcam) para provisionamento
 # automatico no WSL: o binario roda no lado Windows e transmite a webcam
@@ -974,9 +976,6 @@ _MJPEG_STANDARD_DHT = bytes(
 )
 
 
-_STDERR_REDIRECT_LOCK = threading.Lock()
-
-
 def _sanitize_mjpeg(frame):
     """Valida e saneia um payload MJPEG antes do `cv2.imdecode`.
 
@@ -1042,79 +1041,6 @@ def _sanitize_mjpeg(frame):
     if soi == 0 and eoi + 2 == n and isinstance(frame, np.ndarray):
         return frame
     return np.frombuffer(bytes(view[soi : eoi + 2]), dtype=np.uint8)
-
-
-_EXTRANEOUS_RE = re.compile(r"(\d+) extraneous bytes before marker 0xd9")
-
-
-def _classify_mjpeg_warning(line, buf):
-    """Classifica uma linha de aviso do libjpeg: "corrupt", "padding" ou "other".
-
-    "extraneous bytes before marker 0xd9" so e inofensivo se os N bytes logo
-    antes do EOI forem padding (0x00/0xFF), como em varias webcams UVC. Se forem
-    dados de scan, o decode consumiu menos bytes do que devia (dano real).
-    """
-    lower = line.lower()
-    if "premature end" in lower:
-        return "corrupt"
-    if "corrupt jpeg" not in lower:
-        return "other"
-    m = _EXTRANEOUS_RE.search(lower)
-    if m is None:
-        return "corrupt"
-    n = int(m.group(1))
-    data = np.asarray(buf, dtype=np.uint8).reshape(-1)
-    if n <= 0 or data.size < n + 2 or data[-2] != 0xFF or data[-1] != 0xD9:
-        return "corrupt"
-    tail = data[-2 - n : -2]
-    return "padding" if bool(np.all((tail == 0x00) | (tail == 0xFF))) else "corrupt"
-
-
-def _imdecode_mjpeg_strict(buf):
-    """Decodifica MJPEG e falha se o libjpeg emitir aviso de scan corrompido.
-
-    Quando um scan MJPEG termina prematuramente mas mantem `FF D9` no fim,
-    `cv2.imdecode` devolve uma imagem metade-cinza acompanhada de aviso
-    `Corrupt JPEG data` no stderr C (fd 2). Capturar o fd 2 sob lock transforma
-    esse aviso em `ValueError` para que o fallback NV12/YUY2 seja acionado.
-    """
-    warn = ""
-    try:
-        with _STDERR_REDIRECT_LOCK:
-            try:
-                sys.stderr.flush()
-            except Exception:  # noqa: BLE001
-                pass
-            with tempfile.TemporaryFile() as tmp:
-                saved_fd = os.dup(2)
-                try:
-                    os.dup2(tmp.fileno(), 2)
-                    img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
-                finally:
-                    os.dup2(saved_fd, 2)
-                    os.close(saved_fd)
-                tmp.seek(0)
-                warn = tmp.read(4096).decode("utf-8", errors="replace")
-    except OSError:
-        img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
-    if warn:
-        passthrough = []
-        for line in warn.splitlines():
-            if not line.strip():
-                continue
-            verdict = _classify_mjpeg_warning(line, buf)
-            if verdict == "corrupt":
-                raise ValueError(f"hvcam: payload MJPEG corrompido ({line.strip()})")
-            if verdict == "other":
-                passthrough.append(line)
-        if passthrough:
-            try:
-                sys.stderr.write("\n".join(passthrough) + "\n")
-            except Exception:  # noqa: BLE001
-                pass
-    if img is None or img.size == 0:
-        raise ValueError("hvcam: payload MJPEG falhou no decode")
-    return img
 
 
 class Camera:
@@ -1360,6 +1286,7 @@ class HvcamCapture:
         self._on_listening = on_listening
         self._abort_check = abort_check
         self._host_proc = host_process
+        self._managed_host = on_listening is not None or host_process is not None
         self._cam = None
         self._opened = False
         self.last_frame_id = None
@@ -1422,6 +1349,16 @@ class HvcamCapture:
         except (ValueError, cv2.error):
             if info.get("format") == 4:
                 self.mjpeg_decode_errors += 1
+                if self.mjpeg_decode_errors == 1 and not self._managed_host:
+                    # HVCAM v1 so permite pedir o quadro mais recente.
+                    # O formato de captura pertence ao host externo.
+                    _LOG.warning(
+                        "hvcam: MJPEG corrompido recebido do host externo. "
+                        "Se a falha persistir, reinicie o hvcam-host.exe "
+                        "com --format nv12 ou --format yuy2. Em WSL sem "
+                        "/dev/video*, encerre o host externo e execute ./run.sh "
+                        "sem --source para tentar o host gerenciado."
+                    )
             return False, None
         if frame is None:
             return False, None
@@ -1698,10 +1635,11 @@ def open_managed_reverse(
     if fps is not None:
         base_mode.extend(["--fps", str(int(fps))])
 
-    connected_box = [False]
+    retry_native = False
 
     def _attempt(dev_idx, extra_args):
-        connected_box[0] = False
+        nonlocal retry_native
+        retry_native = False
         proc_box = [None]
         host_error = None
         # A file lets the host keep logging after connect without a pipe reader.
@@ -1739,7 +1677,7 @@ def open_managed_reverse(
                     abort_check=_aborted,
                 )
                 if cap.isOpened():
-                    connected_box[0] = True
+                    retry_native = True
                     needs_probe = try_all or (
                         capture_cls is None and hasattr(cap, "read")
                     )
@@ -1756,6 +1694,7 @@ def open_managed_reverse(
                     cap.release()
                     return None, mjpeg_failed, None, None
                 if _aborted():
+                    retry_native = True
                     size = stderr_log.seek(0, os.SEEK_END)
                     stderr_log.seek(max(0, size - 16_384))
                     err_msg = stderr_log.read(16_384).decode("utf-8", errors="replace")
@@ -1790,7 +1729,7 @@ def open_managed_reverse(
     last_host_error = None
     for dev_idx, dev_name in order:
         cap, mjpeg_failed, measured_fps, err = _attempt(dev_idx, base_mode)
-        requested_connected = connected_box[0]
+        requested_can_retry = retry_native
         if cap is not None:
             # Se 720p reduziu o FPS abaixo de 75% do alvo (ex.: camera so oferece
             # 720p@15fps e 1080p@30fps), testa o modo nativo (rate-first) e fica
@@ -1857,11 +1796,11 @@ def open_managed_reverse(
                 return raw_cap, dev_idx, dev_name
             if raw_err:
                 last_host_error = raw_err
-        if base_mode and (requested_connected or err):
+        if base_mode and requested_can_retry:
             # O modo pedido (720p) nao abriu ou nao deu video utilizavel: tenta o
             # mesmo dispositivo sem sobrescritas, como antes do 720p, antes de
-            # passar para outra camera. Sem conexao nem erro do host (so
-            # timeout) nao repete: evita somar outro timeout por camera.
+            # passar para outra camera. Timeout com host vivo nao repete:
+            # evita somar outro timeout por camera.
             nat_cap, nat_mjpeg, _nf, nat_err = _attempt(dev_idx, [])
             if nat_cap is not None:
                 return nat_cap, dev_idx, dev_name
