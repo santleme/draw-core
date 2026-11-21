@@ -60,10 +60,12 @@ def fill_interior_holes(mask):
 # tela, com overlay queimado; a guarda precisa de reconfirmação em
 # captura crua.
 _FIT_OPPOSITE_RATIO_MAX = 3.0
-# Aresta "na borda do quadro": vértice mais próximo a ~1% do lado menor.
-# A aresta curta interior é a assinatura do colapso por oclusão; na borda
-# do frame ela pode ser o próprio corte do clip, e a razão não decide.
-_FIT_EDGE_BORDER_GAP_FRAC = 0.01
+# Aresta "na borda do quadro": os DOIS vértices a ~2% do lado menor da
+# mesma borda (um corte de frame corre ao longo dela). A aresta curta
+# interior é a assinatura do colapso por oclusão; na borda ela pode ser o
+# próprio corte do clip, e a razão não decide. ~2% cobre a quantização da
+# máscara do detector redimensionada.
+_FIT_EDGE_BORDER_GAP_FRAC = 0.02
 _FIT_EXCURSION_DIAG_FRAC = 0.15
 
 
@@ -93,15 +95,13 @@ def fit_plausible(corners, frame_shape):
             continue
         short = a if edges[a] <= edges[b] else b
         pts = quad[[short, (short + 1) % 4]]
-        if (
-            min(
-                pts[:, 0].min(),
-                pts[:, 1].min(),
-                width - pts[:, 0].max(),
-                height - pts[:, 1].max(),
-            )
-            > border_gap
-        ):
+        on_border = (
+            pts[:, 0].max() <= border_gap
+            or pts[:, 1].max() <= border_gap
+            or width - pts[:, 0].min() <= border_gap
+            or height - pts[:, 1].min() <= border_gap
+        )
+        if not on_border:
             return False
     margin = _FIT_EXCURSION_DIAG_FRAC * float(np.hypot(width, height))
     return not (

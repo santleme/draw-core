@@ -268,14 +268,24 @@ def test_plausibility_guard_still_accepts_a_normal_sheet():
 
 
 def test_plausibility_guard_accepts_clipped_sheet_with_border_short_edge():
-    # Issue #104: folha cortada pelo frame tem a aresta curta na borda —
-    # e o recorte do frame, nao um colapso. A razao entre opostas (aqui
-    # ~28x) nao pode rejeitar.
+    # Issue #104: folha cortada pelo frame tem a aresta curta alinhada a
+    # borda — e o recorte do frame, nao um colapso. A razao entre opostas
+    # (aqui ~90x) nao pode rejeitar.
     quad = np.array(
-        [[0.0, 50.0], [30.0, 60.0], [900.0, 700.0], [0.0, 680.0]],
+        [[0.0, 50.0], [0.0, 60.0], [900.0, 700.0], [0.0, 680.0]],
         dtype=np.float32,
     )
     assert fit_plausible(quad, (720, 1280)) is True
+
+
+def test_plausibility_guard_refuses_short_edge_with_one_vertex_near_border():
+    # Um vertice perto da borda nao basta: o corte de frame cola a aresta
+    # inteira numa borda so. Aresta curta que mergulha no quadro e colapso.
+    quad = np.array(
+        [[600.0, 5.0], [650.0, 250.0], [900.0, 700.0], [140.0, 690.0]],
+        dtype=np.float32,
+    )
+    assert fit_plausible(quad, (720, 1280)) is False
 
 
 def test_plausibility_guard_still_refuses_collapsed_interior_short_edge():
