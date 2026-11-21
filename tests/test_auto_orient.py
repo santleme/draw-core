@@ -789,6 +789,17 @@ def test_hand_vote_top_entry_with_visible_side_gap_still_votes():
     assert hand_mask_orientation_vote(mask[::-1].copy()) == "upright"
 
 
+def test_hand_vote_top_entry_with_brief_side_brush_inside_contact_band_votes():
+    small = np.zeros((384, 384), dtype=np.uint8)
+    small[1:80, 8:95] = 255  # entrada pelo topo com folga de 1 linha
+    small[5:8, 1:9] = 255  # toque lateral breve ligado ao braco
+    mask = cv2.resize(small, (1280, 720), interpolation=cv2.INTER_NEAREST)
+    assert not mask[0, :].any() and mask[:14, :6].any() and not mask[:4, :6].any()
+    assert hand_mask_orientation_vote(mask) == "inverted"
+    assert hand_mask_orientation_vote(mask[::-1].copy()) == "upright"
+    assert hand_mask_orientation_vote(mask[:, ::-1].copy()) == "inverted"
+
+
 @pytest.mark.parametrize("h", [480, 720, 1280])
 def test_wide_lateral_hand_inside_top_slack_band_abstains(h):
     from draw.auto_orient import hand_mask_orientation_vote

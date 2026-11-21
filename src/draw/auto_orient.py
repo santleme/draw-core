@@ -75,11 +75,10 @@ def hand_mask_orientation_vote(hand_mask):
             return True
         rows = slice(0, slack) if is_top else slice(h - slack, h)
         exact = bool(comp[0 if is_top else h - 1, :].any())
-        if not exact and bool(
-            side_rows[slice(0, tol) if is_top else slice(h - tol, h)].any()
-        ):
-            # Folga sem toque exato e o mesmo braco chega a lateral dentro da
-            # faixa de contato: e entrada lateral, nao entrada pelo topo/base.
+        if not exact and bool(side_rows[rows].any()):
+            # Folga sem toque exato e a propria evidencia de topo/base chega a
+            # lateral: e entrada lateral, nao entrada pelo topo/base. Toque
+            # lateral abaixo da folga passa pela checagem de dominancia.
             return False
         strength = int(np.count_nonzero(comp[rows, :].any(axis=0)))
         need = _HAND_SIDE_DOMINANCE_EXACT if exact else _HAND_SIDE_DOMINANCE_SLACK
