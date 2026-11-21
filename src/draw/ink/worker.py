@@ -10,7 +10,7 @@ import numpy as np
 from .. import config as paper_config
 from .. import photometry
 from ..contracts import InkDelta, InkDisplaySnapshot, InkSnapshot
-from . import accumulator, identity, motion, registration, ruling, votes
+from . import accumulator, identity, motion, occlusion, registration, ruling, votes
 from . import anchor as anchor_mod
 from .config import InkConfig
 
@@ -281,6 +281,8 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         # replays com pump() passam o relogio da cena.
         self._clock = clock
         self._hand_masker = hand_masker
+        self._paper_exposure = occlusion.PaperExposureGuard()
+        self._paper_exposure_generation = None
         self._condition = threading.Condition()
         self._thread = threading.Thread(
             target=self._work, name="draw-page-clean", daemon=True
@@ -1124,6 +1126,9 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             if generation != self._generation:
                 self._telemetry_skipped_stale += 1
                 return True
+        if generation != self._paper_exposure_generation:
+            self._paper_exposure.reset()
+            self._paper_exposure_generation = generation
         # Uma excecao do modelo (shape errado, sessao morta, ONNX
         # sem memoria) matava esta thread em silencio: o canvas
         # congelava no ultimo quadro e nada era impresso. O erro
@@ -1174,6 +1179,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 )
             coverage_cam = coverage if corners is not None else None
             coverage_page_static = coverage if corners is None else None
+            photometric_image = warped
             if self._ink_divnorm:
                 # O warp sobe cru; a imagem que o modelo vê é a
                 # mesma que o laço submetia: fora-da-folha
@@ -1205,7 +1211,12 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 else:
                     warped = photometry.division_normalize(warped)
             if visible is None and self._hand_masker is not None:
-                hand_mask = self._hand_masker.mask(warped)
+                hand_mask = self._hand_masker.mask(
+                    warped,
+                    timestamp_ms=(
+                        None if captured_at is None else captured_at * 1000.0
+                    ),
+                )
                 if hand_mask is not None:
                     visible = hand_mask == 0
             ink_prob = getattr(self._page_clean, "ink_prob", None)
@@ -1218,6 +1229,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     self._ruling.reset()
                     self._ruling_generation = generation
                 prob = self._ruling.apply(prob, visible)
+            exposure = self._paper_exposure.observe(photometric_image, visible)
             # Cobertura de folha (cobertura de folha do loop) viaja em
             # canal proprio ate depois do registro: o veto nao e
             # cego nem se confunde com oclusao de mao — ver o
@@ -1865,12 +1877,13 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     )
                     arbitration_abstain = False
                     force_publish = True
-            if (
+            vote_unregistered = (
                 (first_pass or identity_pending)
                 and not identity_deferred
                 and not identity_switch_pending
                 and not keep_page
-            ):
+            )
+            if vote_unregistered:
                 if visible is not None:
                     prob = np.where(visible, prob, 0.0).astype(np.float32)
                 # Voto sem registro (1a passada ou pagina nova na
@@ -1927,9 +1940,58 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 # None para o avaliador nao projetar GT por uma
                 # geometria que nunca chegou ao canvas.
                 self._last_registration = None
+            paper_exposed = None
+            if exposure is not None:
+                photo_visible = exposure.visible
+                paper_exposed = exposure.paper_exposed
+                if (
+                    not vote_unregistered
+                    and anchor is not None
+                    and registration_corners is not None
+                ):
+                    photo_matrix = registration._registration_matrix(
+                        anchor, registration_corners, prob.shape
+                    )
+                    if not registration._registration_is_identity(photo_matrix):
+                        size = (prob.shape[1], prob.shape[0])
+                        photo_visible = (
+                            cv2.warpPerspective(
+                                photo_visible.astype(np.uint8),
+                                photo_matrix,
+                                size,
+                                flags=cv2.INTER_NEAREST,
+                                borderValue=0,
+                            )
+                            > 0
+                        )
+                        paper_exposed = (
+                            cv2.warpPerspective(
+                                paper_exposed.astype(np.uint8),
+                                photo_matrix,
+                                size,
+                                flags=cv2.INTER_NEAREST,
+                                borderValue=0,
+                            )
+                            > 0
+                        )
+                if motion_decision == "correct" and not vote_unregistered:
+                    photo_visible = (
+                        motion_fix.warp_back(
+                            photo_visible.astype(np.uint8), nearest=True
+                        )
+                        > 0
+                    )
+                    paper_exposed = (
+                        motion_fix.warp_back(
+                            paper_exposed.astype(np.uint8), nearest=True
+                        )
+                        > 0
+                    )
+                visible = photo_visible if visible is None else visible & photo_visible
             result = self._accumulator.add(
                 prob,
                 visible,
+                paper_exposed=paper_exposed,
                 removal_allowed=(
                     not identity_owned
                     and not arbitration_abstain

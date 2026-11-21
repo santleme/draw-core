@@ -202,3 +202,37 @@ def test_source_change_resets_motion_signature():
     assert adapter.sample(frame, 1000, source_id=0) == HandSample(True, True)
     assert adapter.sample(frame, 1100, source_id=0) == HandSample(True, False)
     assert adapter.sample(frame, 1200, source_id=1) == HandSample(True, True)
+
+
+@pytest.mark.parametrize("missing", [None, (0.0, 0.0, 0.0)])
+def test_presence_holds_through_three_missed_samples_then_releases(missing):
+    class _FlickeringMasker:
+        def __init__(self):
+            self.results = [(500.0, 50.0, 60.0), missing, missing, missing, missing]
+
+        def presence_signature(self, _frame, timestamp_ms=None):
+            return self.results.pop(0)
+
+    adapter = hand_presence.MediaPipeHandPresence(_FlickeringMasker())
+    frame = np.zeros((10, 10, 3), dtype=np.uint8)
+
+    assert adapter.sample(frame).present is True
+    for _ in range(hand_module._MASK_HOLD_FRAMES):
+        sample = adapter.sample(frame)
+        assert sample.present is True and sample.moved is False
+    expected = None if missing is None else False
+    assert adapter.sample(frame).present is expected
+
+
+def test_source_change_does_not_carry_presence_hysteresis():
+    class _FlickeringMasker:
+        def __init__(self):
+            self.results = [(500.0, 50.0, 60.0), (0.0, 0.0, 0.0)]
+
+        def presence_signature(self, _frame, timestamp_ms=None):
+            return self.results.pop(0)
+
+    adapter = hand_presence.MediaPipeHandPresence(_FlickeringMasker())
+    frame = np.zeros((10, 10, 3), dtype=np.uint8)
+    assert adapter.sample(frame, source_id=0).present is True
+    assert adapter.sample(frame, source_id=1).present is False

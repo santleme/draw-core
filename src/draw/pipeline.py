@@ -458,7 +458,10 @@ class Pipeline:
         # só (M·C = A), e o laço deixa de pagar warps de máscara.
         visible = None
         if self.hand_masker is not None:
-            camera_mask = self.hand_masker.mask(frame)
+            camera_mask = self.hand_masker.mask(
+                frame,
+                timestamp_ms=(None if captured_at is None else captured_at * 1000.0),
+            )
             if camera_mask is not None:
                 visible = camera_mask == 0
         if (

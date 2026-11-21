@@ -612,7 +612,7 @@ def test_ink_auto_gain_excludes_the_hand_from_the_classic_hand_masker():
     frame[100:400, 100:300] = 235  # mão clara sobre metade do quad
 
     class _Masker:
-        def mask(self, image):
+        def mask(self, image, timestamp_ms=None):
             camera = np.zeros(image.shape[:2], np.uint8)
             camera[100:400, 100:300] = 255
             return camera
@@ -1247,8 +1247,12 @@ def test_settled_hand_mask_expires_if_heartbeat_stalls(monkeypatch, late_heartbe
     class _CurrentMasker:
         available = False
 
-        def mask(self, frame):
-            return np.zeros(frame.shape[:2], np.uint8) if self.available else None
+        def mask(self, frame, timestamp_ms=None):
+            if not self.available:
+                return None
+            current = np.zeros(frame.shape[:2], np.uint8)
+            current[300:400, 600:700] = 255
+            return current
 
     masker = _CurrentMasker()
     loop, det, ink = _make_loop(
@@ -1286,7 +1290,7 @@ def test_settled_hand_mask_expires_if_heartbeat_stalls(monkeypatch, late_heartbe
     masker.available = True
     loop.step(FramePacket(frame, captured_at + 1.3, loop.frame_number))
     assert len(ink.submitted) == submits + 1
-    assert ink.submitted[-1][2].all()
+    assert not ink.submitted[-1][2][300:400, 600:700].any()
 
 
 def test_hand_mask_with_sheet_marks_cornerless_results():
@@ -1418,9 +1422,11 @@ def test_expired_hand_mask_without_mediapipe_cannot_confirm_hand_as_ink(monkeypa
     assert ink.stats()["passes_total"] == passes
     assert not loop.clean_mask.any()
 
-    # O classificador voltou a ver uma página livre. Um traço real no
-    # mesmo lugar já pode receber votos sem o auxílio do MediaPipe.
+    # A mão saiu de fato da folha; o classificador volta a ver o papel
+    # e um traço novo pode receber votos sem o auxílio do MediaPipe.
     cleared = True
+    frame[:] = 255
+    frame[190:191, 220:250] = 0
     submit(frame, baseline + 9.8)
     step(baseline + 10.4)
     submit(frame, baseline + 11.3)

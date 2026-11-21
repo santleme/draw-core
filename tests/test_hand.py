@@ -17,12 +17,20 @@ import pytest
 from draw import hand as hand_module
 
 
-def _landmarks_result():
-    hand = [
-        SimpleNamespace(x=0.10 + 0.01 * (i % 5), y=0.10 + 0.01 * (i // 5))
-        for i in range(21)
-    ]
-    return SimpleNamespace(hand_landmarks=[hand])
+def _landmarks_result(hand_count=1):
+    hands = []
+    for hand_index in range(hand_count):
+        offset = 0.50 * hand_index
+        hands.append(
+            [
+                SimpleNamespace(
+                    x=offset + 0.10 + 0.01 * (i % 5),
+                    y=0.10 + 0.01 * (i // 5),
+                )
+                for i in range(21)
+            ]
+        )
+    return SimpleNamespace(hand_landmarks=hands)
 
 
 class _StubLandmarker:
@@ -33,25 +41,37 @@ class _StubLandmarker:
         raise_video_detect=False,
         close_raises=False,
         detect_gate=None,
+        hand_count=1,
+        results=None,
     ):
         self._mode = mode
         self._log = log
         self._raise_video_detect = raise_video_detect
         self._close_raises = close_raises
         self._detect_gate = detect_gate
+        self._hand_count = hand_count
+        self._results = list(results) if results is not None else None
+        self.last_image = None
         self.closed = 0
 
-    def detect(self, _image):
+    def detect(self, image):
+        self.last_image = image
         self._log.append(("image", self._mode))
         self._gate()
-        return _landmarks_result()
+        return self._result()
 
-    def detect_for_video(self, _image, timestamp_ms):
+    def detect_for_video(self, image, timestamp_ms):
+        self.last_image = image
         self._log.append(("video", timestamp_ms))
         if self._raise_video_detect:
             raise RuntimeError("detect_for_video falhou neste stub")
         self._gate()
-        return _landmarks_result()
+        return self._result()
+
+    def _result(self):
+        if self._results:
+            return self._results.pop(0)
+        return _landmarks_result(self._hand_count)
 
     def _gate(self):
         if self._detect_gate is not None:
@@ -72,6 +92,8 @@ def _install_fake_mediapipe(
     close_raises=False,
     detect_gate=None,
     create_gate=None,
+    hand_count=1,
+    results=None,
 ):
     log = []
     created = []
@@ -94,7 +116,10 @@ def _install_fake_mediapipe(
             raise_video_detect=raise_video_detect,
             close_raises=close_raises,
             detect_gate=detect_gate,
+            hand_count=hand_count,
+            results=results,
         )
+        landmarker.options = options
         created.append(landmarker)
         return landmarker
 
@@ -152,6 +177,63 @@ def test_loading_uses_the_explicit_model_and_image_mode(monkeypatch, tmp_path):
     mask = masker.mask(frame)
     assert len(created) == 1
     assert mask is not None and mask.shape == (80, 100)
+
+
+def test_mask_uses_video_tracking_when_capture_timestamp_is_given(
+    monkeypatch, tmp_path
+):
+    log, _created = _install_fake_mediapipe(monkeypatch)
+    masker = hand_module.HandMasker(_model(tmp_path), verify=None)
+    frame = np.zeros((80, 100, 3), dtype=np.uint8)
+
+    mask = masker.mask(frame, timestamp_ms=1234)
+
+    assert mask is not None
+    assert ("video", 1234) in log
+
+
+def test_dark_frame_is_lifted_and_two_hands_are_masked(monkeypatch, tmp_path):
+    _log, created = _install_fake_mediapipe(monkeypatch, hand_count=2)
+    masker = hand_module.HandMasker(_model(tmp_path), verify=None)
+    frame = np.full((80, 100, 3), 24, dtype=np.uint8)
+
+    mask = masker.mask(frame)
+
+    assert created[0].options.num_hands == 2
+    assert created[0].last_image.data.mean() > frame.mean()
+    assert mask is not None
+    assert mask[:, :45].any()
+    assert mask[:, 45:].any()
+
+
+def test_well_lit_frame_is_not_changed_before_mediapipe(monkeypatch, tmp_path):
+    _log, created = _install_fake_mediapipe(monkeypatch)
+    masker = hand_module.HandMasker(_model(tmp_path), verify=None)
+    frame = np.full((80, 100, 3), 180, dtype=np.uint8)
+
+    masker.mask(frame)
+
+    np.testing.assert_array_equal(created[0].last_image.data, frame)
+
+
+def test_mask_holds_last_hand_for_three_detection_misses(monkeypatch, tmp_path):
+    hand = _landmarks_result()
+    absent = SimpleNamespace(hand_landmarks=[])
+    _log, _created = _install_fake_mediapipe(
+        monkeypatch, results=[hand, absent, absent, absent, absent]
+    )
+    masker = hand_module.HandMasker(_model(tmp_path), verify=None)
+    frame = np.zeros((80, 100, 3), dtype=np.uint8)
+
+    detected = masker.mask(frame)
+    assert detected is not None and detected.any()
+    for _ in range(hand_module._MASK_HOLD_FRAMES):
+        held = masker.mask(frame)
+        assert held is not None and held.any()
+        assert np.count_nonzero(held) >= np.count_nonzero(detected)
+
+    released = masker.mask(frame)
+    assert released is not None and not released.any()
 
 
 def test_detected_hand_fills_scaled_hull_and_forearm(monkeypatch, tmp_path):
