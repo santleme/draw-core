@@ -10,7 +10,7 @@ import numpy as np
 from .. import config as paper_config
 from .. import photometry
 from ..contracts import InkDelta, InkDisplaySnapshot, InkSnapshot
-from . import accumulator, identity, motion, registration, ruling, votes
+from . import accumulator, identity, motion, paper_evidence, registration, ruling, votes
 from . import anchor as anchor_mod
 from .config import InkConfig
 
@@ -355,6 +355,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         # Degrau entre quads consecutivos (a entrada de cadencia
         # geometrica do follow e do portao de remocao).
         self._previous_corners = None
+        self._paper_ref = None
         self._accumulator = accumulator.LayeredInkAccumulator(
             threshold=self._config.seen_threshold, config=self._config
         )
@@ -436,6 +437,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             self._identity_defer_count = 0
             self._identity_switch_votes = 0
             self._previous_corners = None
+            self._paper_ref = None
             if preserve_identity:
                 reference = self._accumulator._confirmed
                 self._identity_reference = (
@@ -1213,6 +1215,23 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 prob = ink_prob(warped)
             else:
                 prob = (self._page_clean.ink_mask(warped) > 0).astype(np.float32)
+            paper_ok_page = None
+            if self._config.paper_guard and warped.dtype == np.uint8:
+                # Guarda fotometrica (issue #129): so papel exposto
+                # pode apagar ou votar; mao/sombra/caneta congelam,
+                # com ou sem a deteccao do MediaPipe. So imagem
+                # fotometrica (uint8): mapa float nao e foto.
+                reference = paper_evidence.paper_reference(warped, visible)
+                if reference is None:
+                    reference = self._paper_ref
+                else:
+                    self._paper_ref = reference
+                # Sem NENHUMA referencia de papel (imagem preta desde o
+                # inicio da geracao) nao ha o que comparar: a guarda se
+                # abstem como antes. Com referencia previa, incerteza
+                # congela.
+                if reference is not None:
+                    paper_ok_page = paper_evidence.paper_exposed(warped, reference)
             if self._ruling is not None:
                 if generation != self._ruling_generation:
                     self._ruling.reset()
@@ -1927,9 +1946,29 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 # None para o avaliador nao projetar GT por uma
                 # geometria que nunca chegou ao canvas.
                 self._last_registration = None
+            paper_ok = paper_ok_page
+            registration_used = self._last_registration
+            if (
+                paper_ok is not None
+                and registration_used is not None
+                and registration_used[0] is not None
+                and prob is registered_prob
+            ):
+                # Mesma transformacao da probabilidade; so o que sobrevive
+                # inteiro ao resample (== 1) conta como papel.
+                paper_ok = (
+                    registration._register_ink_probability(
+                        paper_ok.astype(np.float32),
+                        registration_used[0],
+                        registration_used[1],
+                        None,
+                    )[0]
+                    > 0.999
+                )
             result = self._accumulator.add(
                 prob,
                 visible,
+                paper_ok=paper_ok,
                 removal_allowed=(
                     not identity_owned
                     and not arbitration_abstain

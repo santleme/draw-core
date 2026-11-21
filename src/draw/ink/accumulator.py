@@ -47,6 +47,7 @@ class LayeredInkAccumulator:
         self._score_buf = None
         self._hits_buf = None
         self._seen_buf = None
+        self._hold = None
 
     def _window_stats(self):
         """(soma, hits, visto-como-tinta) da janela, sem empilhar.
@@ -82,12 +83,24 @@ class LayeredInkAccumulator:
             np.logical_or(seen, item > self.threshold, out=seen)
         return score, hits, seen
 
-    def add(self, prob, visible=None, *, removal_allowed=True):
+    def add(self, prob, visible=None, *, removal_allowed=True, paper_ok=None):
+        """Uma passada. paper_ok (bool, forma de prob) e a evidencia
+        fotometrica de papel exposto (draw.ink.paper_evidence): onde e
+        False — e por occlusion_hold_passes passadas depois — a regiao
+        congela como oclusao (sem voto, sem remocao, provisoria
+        parada). None mantem o comportamento sem guarda."""
         prob = np.asarray(prob, dtype=np.float32)
         if visible is not None:
             visible = np.asarray(visible, dtype=bool)
             if visible.shape != prob.shape:
                 visible = None
+        # Sem mascara de visibilidade nao ha evidencia negativa
+        # confiavel — a guarda nao a inventa.
+        had_visibility = visible is not None
+        if paper_ok is not None:
+            paper_ok = np.asarray(paper_ok, dtype=bool)
+            if paper_ok.shape != prob.shape:
+                paper_ok = None
         if self._confirmed is None or self._confirmed.shape != prob.shape:
             self._removal_streak = None
             self._confirmed = np.zeros(prob.shape, dtype=np.uint8)
@@ -97,6 +110,13 @@ class LayeredInkAccumulator:
             self._window.clear()
             self._low_overlap_streak = 0
             self._turn_fired = False
+        if paper_ok is not None:
+            if self._hold is None or self._hold.shape != prob.shape:
+                self._hold = np.zeros(prob.shape, dtype=np.uint8)
+            np.subtract(self._hold, 1, out=self._hold, where=self._hold > 0)
+            self._hold[~paper_ok] = self._config.occlusion_hold_passes
+            frozen = ~paper_ok | (self._hold > 0)
+            visible = ~frozen if visible is None else visible & ~frozen
         confirmed_before = self._confirmed > 0
         canvas_before = int(np.count_nonzero(self._confirmed))
         # Oclusao: pixel que a passada nao pode ver (a mao sobre a
@@ -182,7 +202,7 @@ class LayeredInkAccumulator:
                 self._removal_streak = np.zeros(prob.shape, dtype=np.uint8)
             # Sem máscara de visibilidade não há evidência negativa confiável.
             witnessed = False
-            if removal_allowed and visible is not None and canvas_before:
+            if removal_allowed and had_visibility and canvas_before:
                 retained = np.count_nonzero(confirmed_before & visible & mask_now)
                 witnessed = (
                     retained >= registration._REMOVAL_RETAINED_FRACTION * canvas_before

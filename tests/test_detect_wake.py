@@ -726,7 +726,7 @@ def test_cached_hand_mask_on_hand_exit_still_confirms_final_stroke_under_product
     )
     still = _sheet_frame(BASE_CORNERS)
     # Bloco base no canto superior para amadurecer a pagina e o voto.
-    cv2.rectangle(still, (150, 120), (210, 160), (10, 10, 10), -1)
+    cv2.rectangle(still, (150, 120), (210, 160), (10, 10, 10), 4)
     for seq in range(18):
         hand._seq += 1
         hand.moved = seq < 4
@@ -739,7 +739,7 @@ def test_cached_hand_mask_on_hand_exit_still_confirms_final_stroke_under_product
 
     # Mao cobre o centro (hand_blob em cache no detector) e desenha traco novo.
     with_stroke = still.copy()
-    cv2.rectangle(with_stroke, (295, 225), (345, 255), (10, 10, 10), -1)
+    cv2.rectangle(with_stroke, (295, 225), (345, 255), (10, 10, 10), 3)
     # 2 leituras claras do traco novo antes de a mascara de mao cobri-lo
     # (soma 2 * 0,98 = 1,96 < 2,55: ainda nao confirmado).
     for seq in (18, 19):

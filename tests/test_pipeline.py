@@ -1367,6 +1367,7 @@ def test_expired_hand_mask_without_mediapipe_cannot_confirm_hand_as_ink(monkeypa
 
     frame = np.full_like(_frame(), 255)
     frame[150:250, 200:300] = 0
+    frame[160:240, 210:290] = 255  # contorno de traco: preenchido seria sombra
     hand = np.zeros(frame.shape[:2], np.uint8)
     hand[150:250, 200:300] = 255
     cleared = False
