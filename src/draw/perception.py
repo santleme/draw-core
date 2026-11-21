@@ -414,6 +414,19 @@ class NeuralSheetDetector:
         )
         if corners is not None and not _geometry.fit_plausible(corners, ref_shape):
             return None
+        if (
+            corners is None
+            and lines is None
+            and contour is not None
+            and contour_area
+            >= mask.shape[0] * mask.shape[1] * _geometry._MIN_CONTOUR_AREA_RATIO
+        ):
+            # Contorno substancial sem quadrilátero nem retas é rejeição
+            # (guarda de suporte), não ausência de folha: sai cedo como a
+            # plausibilidade. Sem isso o caminho "sem cantos" apagava as
+            # retas guardadas e gravava a máscara recusada como
+            # referência — uma aresta ocluída deixava de ser recuperável.
+            return None
         if lines is not None:
             # Aresta sem medida confiável neste quadro grava ausente:
             # copiar a linha velha faria o próximo quadro tratá-la
