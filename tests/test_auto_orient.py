@@ -813,6 +813,54 @@ def test_hand_vote_abstains_on_diagonal_side_entry_below_top_band():
         assert hand_mask_orientation_vote(m) is None
 
 
+def test_short_side_entry_reaching_top_slack_abstains_through_observe_mask():
+    # Regressao: entrada lateral curta alcanca as linhas de folga do topo
+    # (~12 linhas de contato, ~146 colunas na faixa). O braco colado na
+    # lateral e entrada lateral, nao "topo com toque breve" (rev. PR #97).
+    small = np.zeros((384, 384), dtype=np.uint8)
+    small[1:7, 1:46] = 255
+    mask = cv2.resize(small, (1280, 720), interpolation=cv2.INTER_NEAREST)
+    assert hand_mask_orientation_vote(mask) is None
+
+    det = AutoRotationDetector(confirm_votes=4)
+    for _ in range(4):
+        assert not det.observe_mask(mask)
+    assert not det.flipped
+
+
+def test_hand_vote_top_entry_with_longer_side_brush_below_slack_votes():
+    # Regressao: escova lateral de ~19 linhas dentro da faixa de contato,
+    # separada do braco que entra pelo topo (longe da lateral): nao e
+    # entrada lateral e a dominancia decide (rev. PR #97).
+    mask = np.zeros((720, 1280), dtype=np.uint8)
+    mask[2:90, 300:590] = 255  # topo: 290 colunas com folga de 2 linhas
+    mask[10:29, 0:16] = 255  # escova lateral, linhas 10-28
+    mask[10:15, 16:300] = 255  # ligacao da escova ao braco
+    assert hand_mask_orientation_vote(mask) == "inverted"
+    assert hand_mask_orientation_vote(mask[:, ::-1].copy()) == "inverted"
+
+
+def test_mid_frame_side_brush_two_edge_conflict_resets_streak():
+    # Regressao: escova lateral no meio do quadro nao isenta o conflito
+    # real das duas bordas — a sequencia de votos zera (rev. PR #97).
+    top_entry = np.zeros((720, 1280), dtype=np.uint8)
+    top_entry[0:90, 500:700] = 255
+    conflict = np.zeros((720, 1280), dtype=np.uint8)
+    conflict[0:30, 100:220] = 255  # topo real: 120 colunas
+    conflict[30:720, 100:146] = 255  # base real: 46 colunas
+    conflict[300:365, 0:146] = 255  # escova lateral: 65 linhas no meio
+    assert hand_mask_orientation_vote(conflict) is None
+
+    det = AutoRotationDetector(confirm_votes=4)
+    for _ in range(3):
+        det.observe_mask(top_entry)
+    det.observe_mask(conflict)  # conflito zera a sequencia
+    assert not det.flipped
+    for _ in range(3):
+        assert not det.observe_mask(top_entry)
+    assert det.observe_mask(top_entry) and det.flipped
+
+
 def test_two_edge_ambiguity_resets_pending_inverted_streak_but_empty_frame_does_not():
     top_entry = np.zeros((200, 300), dtype=np.uint8)
     top_entry[0:90, 110:190] = 255

@@ -29,27 +29,6 @@ _HAND_SIDE_DOMINANCE_EXACT = 2.0
 _HAND_SIDE_DOMINANCE_SLACK = 5.0
 
 
-def _side_entry_at_band(side_rows, band):
-    """True se um intervalo contiguo de contato lateral alcanca `band`.
-
-    So um intervalo de linhas contiguas tao alto quanto a propria faixa
-    conta como contato lateral real: um toque breve que entra na faixa
-    nao e entrada pela lateral e segue para a checagem de dominancia.
-    """
-    min_run = band.stop - band.start
-    idx = np.flatnonzero(side_rows)
-    if idx.size == 0:
-        return False
-    for run in np.split(idx, np.flatnonzero(np.diff(idx) > 1) + 1):
-        if (
-            run[-1] - run[0] + 1 >= min_run
-            and run[-1] >= band.start
-            and run[0] < band.stop
-        ):
-            return True
-    return False
-
-
 def hand_mask_orientation_vote(hand_mask):
     """Infere se a mao entra por baixo ('upright') ou por cima ('inverted').
 
@@ -88,11 +67,11 @@ def _hand_orientation_evidence(hand_mask):
     # vazias na borda. A faixa tem o tamanho da folga de segmentacao, nao da
     # tolerancia de contato: uma mao a varios pixels da lateral nao conta.
     side_w = max(_HAND_EDGE_MIN_SLACK, int(round(w * _HAND_EDGE_SLACK_RATIO)))
-    side_strip = np.concatenate([comp[:, :side_w], comp[:, w - side_w :]], axis=1)
-    side_rows = side_strip.any(axis=1)
+    left_rows = comp[:, :side_w].any(axis=1)
+    right_rows = comp[:, w - side_w :].any(axis=1)
+    side_rows = left_rows | right_rows
     side_strength = max(
-        int(np.count_nonzero(comp[:, :side_w].any(axis=1))),
-        int(np.count_nonzero(comp[:, w - side_w :].any(axis=1))),
+        int(np.count_nonzero(left_rows)), int(np.count_nonzero(right_rows))
     )
 
     def can_vote(is_top):
@@ -101,13 +80,18 @@ def _hand_orientation_evidence(hand_mask):
             return True
         rows = slice(0, slack) if is_top else slice(h - slack, h)
         exact = bool(comp[0 if is_top else h - 1, :].any())
-        if not exact and _side_entry_at_band(
-            side_rows, slice(0, tol) if is_top else slice(h - tol, h)
-        ):
-            # Folga sem toque exato e contato lateral continuo alcancando
-            # a faixa da borda: e entrada lateral, nao entrada pelo
-            # topo/base. Toque lateral breve segue para a dominancia.
-            return False
+        if not exact:
+            # Folga sem toque exato e a evidencia de topo/base colada na
+            # lateral tocada: o mesmo braco faz os dois contatos — e
+            # entrada lateral, nao entrada pelo topo/base. Uma escova
+            # lateral separada do braco segue para a dominancia.
+            edge_cols = np.flatnonzero(comp[rows].any(axis=0))
+            margin = side_w + slack
+            if edge_cols.size and (
+                (bool(left_rows.any()) and edge_cols[0] <= margin)
+                or (bool(right_rows.any()) and edge_cols[-1] >= w - 1 - margin)
+            ):
+                return False
         strength = int(np.count_nonzero(comp[rows, :].any(axis=0)))
         need = _HAND_SIDE_DOMINANCE_EXACT if exact else _HAND_SIDE_DOMINANCE_SLACK
         return strength >= need * side_strength
@@ -131,13 +115,15 @@ def _hand_orientation_evidence(hand_mask):
         and bot_contact >= (_HAND_BORDER_DOMINANCE * max(top_contact, 1))
     ):
         return "upright", False
-    # Conflito real: as duas bordas tem contato medido e ao menos uma
-    # sobrevive a elegibilidade. Entrada lateral pura (as duas rejeitadas)
-    # preserva a sequencia como um frame sem componente.
+    # Conflito real: contato medido nas duas bordas — a menos que a mesma
+    # evidencia lateral atravesse as duas faixas de borda (entrada lateral
+    # pura, que preserva a sequencia como um frame sem componente). Uma
+    # escova lateral no meio do quadro nao isenta o conflito.
+    side_at_both_bands = bool(side_rows[:tol].any() and side_rows[h - tol :].any())
     both = (
-        (top_ok or bot_ok)
-        and top_contact >= _HAND_EDGE_MIN_PIXELS
+        top_contact >= _HAND_EDGE_MIN_PIXELS
         and bot_contact >= _HAND_EDGE_MIN_PIXELS
+        and not side_at_both_bands
     )
     return None, both
 
