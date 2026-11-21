@@ -92,7 +92,10 @@ class SessionTelemetry:
         while not self._stopped.wait(self._interval):
             if not self._write(self._take_events() + [self._snapshot()]):
                 return
-        self._write(self._take_events())
+        # Encerramento: o último retrato sai junto com os eventos —
+        # sem ele os campos do intervalo final (ex.: as rejeições
+        # recentes do piso de cobertura) morriam na memória.
+        self._write(self._take_events() + [self._snapshot()])
 
     def _write(self, records):
         if not records:

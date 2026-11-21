@@ -66,6 +66,18 @@ def test_records_carry_snapshot_fields_and_counter_deltas(tmp_path):
 
 
 @pytest.mark.slow
+def test_close_writes_the_final_snapshot(tmp_path):
+    """Sair entre batidas não perde os campos do último intervalo."""
+    path = tmp_path / "telemetry.jsonl"
+    telemetry = SessionTelemetry(path, interval=60.0).start()
+    telemetry.update(loop_fps=11.5, coverage_iou_rejects_total=3)
+    telemetry.close()
+    records = _read_records(path)
+    assert records[-1]["loop_fps"] == 11.5
+    assert records[-1]["coverage_iou_rejects_total"] == 3
+
+
+@pytest.mark.slow
 def test_writer_rotates_past_the_size_cap(tmp_path):
     path = tmp_path / "telemetry.jsonl"
     telemetry = SessionTelemetry(path, interval=0.02, max_bytes=300).start()
