@@ -1232,6 +1232,7 @@ def run(
     telemetry = None
     session_report = None
     ink_stream = None
+    pipeline = None
     try:
         if not markers_mode:
             _provision_official_models(neural_model, page_clean_model, hand_model)
@@ -1475,7 +1476,6 @@ def run(
         def emit_acquisition(record):
             telemetry.event("acquisition", **record)
 
-        pipeline = None
         tracker = None
         if not markers_mode:
             if stream_port is not None or stream_record is not None:
@@ -1880,8 +1880,15 @@ def run(
             # determinístico, nunca pelo __del__ do MediaPipe.
             hand_masker.close()
         if telemetry is not None:
+            # O laço entrega os contadores antes do step de cada
+            # quadro — as rejeições do último frame ainda entram
+            # no retrato final (issue #105).
+            if pipeline is not None:
+                telemetry.update(**pipeline.stats())
             telemetry.close()
         if session_report is not None:
+            if pipeline is not None:
+                session_report.update(**pipeline.stats())
             session_report.close()
         if png_writer is not None:
             png_writer.close()
