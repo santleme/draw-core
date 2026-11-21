@@ -62,7 +62,7 @@ export function runBlast(onCovered: () => void): () => void {
 
   const radiusAt = (index: number, t: number) => ease(Math.min(1, t * speeds[index % SAMPLES])) * maxR;
 
-  const spawn = (t: number, now: number, count: number) => {
+  const spawn = (now: number, count: number, spanMs: number) => {
     for (let i = 0; i < count; i += 1) {
       // mais estilhacos saem das pontas (as direcoes mais rapidas)
       let index = Math.floor(Math.random() * SAMPLES);
@@ -70,18 +70,24 @@ export function runBlast(onCovered: () => void): () => void {
         const other = Math.floor(Math.random() * SAMPLES);
         if (speeds[other] > speeds[index]) index = other;
       }
+      // espalha o nascimento pelo intervalo perdido: quem "saiu" antes
+      // nasce na borda de entao e ja chega em voo, nao amontoado na atual
+      const born = now - spanMs * Math.random();
+      const age = (now - born) / 1000;
       const angle = ((index + Math.random()) / SAMPLES) * Math.PI * 2;
-      const radius = radiusAt(index, t);
+      const radius = radiusAt(index, Math.min(1, born / DURATION));
       if (radius >= maxR) continue;
       const speed = (160 + Math.random() * 620) * (0.7 + 0.3 * speeds[index]);
       const size = [3, 4, 6, 8, 12, 16][Math.floor(Math.random() * 6)];
+      const vx = Math.cos(angle) * speed + (Math.random() - 0.5) * 60;
+      const vy = Math.sin(angle) * speed + (Math.random() - 0.5) * 60;
       shards.push({
-        x: cx + Math.cos(angle) * radius,
-        y: cy + Math.sin(angle) * radius,
-        vx: Math.cos(angle) * speed + (Math.random() - 0.5) * 60,
-        vy: Math.sin(angle) * speed + (Math.random() - 0.5) * 60,
+        x: cx + Math.cos(angle) * radius + vx * age,
+        y: cy + Math.sin(angle) * radius + vy * age,
+        vx,
+        vy,
         size,
-        born: now,
+        born,
         life: 450 + Math.random() * 700,
         color: palette[Math.floor(Math.random() * palette.length)],
       });
@@ -126,7 +132,7 @@ export function runBlast(onCovered: () => void): () => void {
       if (t < 0.85) {
         // quantidade por segundo (nao por quadro), para a densidade ser igual em 60 e 120 Hz
         const want = (18 + 40 * (1 - t)) * 60 * gap;
-        spawn(t, elapsed, Math.floor(want) + (Math.random() < want % 1 ? 1 : 0));
+        spawn(elapsed, Math.floor(want) + (Math.random() < want % 1 ? 1 : 0), gap * 1000);
       }
       for (let i = shards.length - 1; i >= 0; i -= 1) {
         const s = shards[i];
