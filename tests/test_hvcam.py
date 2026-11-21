@@ -1717,16 +1717,65 @@ def test_strict_decoder_does_not_leak_fd_when_tempfile_fails(monkeypatch):
     assert _open_fd_count() == before
 
 
-def test_strict_decoder_ignores_extraneous_bytes_warning(monkeypatch):
-    img = np.full((16, 16, 3), 90, dtype=np.uint8)
-    real = cv2.imdecode
-
-    def noisy(buf, flags):
-        os.write(2, b"Corrupt JPEG data: 2 extraneous bytes before marker 0xd9\n")
-        return real(buf, flags)
-
-    monkeypatch.setattr(hvcam_module.cv2, "imdecode", noisy)
+def _jpeg_with_tail_before_eoi(tail):
+    img = np.random.default_rng(7).integers(0, 255, (96, 96, 3), dtype=np.uint8)
     ok, enc = cv2.imencode(".jpg", img)
     assert ok
-    out = hvcam_module._imdecode_mjpeg_strict(enc)
-    assert out.shape == img.shape
+    raw = enc.tobytes()
+    assert raw.endswith(b"\xff\xd9")
+    return np.frombuffer(raw[:-2] + tail + b"\xff\xd9", dtype=np.uint8)
+
+
+def test_strict_decoder_accepts_real_padding_before_eoi():
+    buf = _jpeg_with_tail_before_eoi(b"\x00" * 40)
+    assert hvcam_module._imdecode_mjpeg_strict(buf).shape == (96, 96, 3)
+
+
+def test_strict_decoder_rejects_extraneous_scan_bytes_before_eoi():
+    # Bytes de dados (nao padding) antes do EOI: libjpeg avisa "extraneous
+    # bytes", mas a estrutura independente mostra que nao e padding.
+    buf = _jpeg_with_tail_before_eoi(bytes(range(1, 41)))
+    with pytest.raises(ValueError):
+        hvcam_module._imdecode_mjpeg_strict(buf)
+
+
+def test_classify_warning_is_per_line():
+    pad = np.frombuffer(b"\x01\x02" + b"\x00" * 8 + b"\xff\xd9", dtype=np.uint8)
+    ext = "Corrupt JPEG data: 8 extraneous bytes before marker 0xd9"
+    assert hvcam_module._classify_mjpeg_warning(ext, pad) == "padding"
+    bad = "Corrupt JPEG data: bad Huffman code"
+    assert hvcam_module._classify_mjpeg_warning(bad, pad) == "corrupt"
+    wrong_n = "Corrupt JPEG data: 9 extraneous bytes before marker 0xd9"
+    assert hvcam_module._classify_mjpeg_warning(wrong_n, pad) == "corrupt"
+
+
+def test_native_raw_tries_yuy2_when_nv12_is_too_slow(tmp_path):
+    def behave(cmd, n):
+        fmt = cmd[cmd.index("--format") + 1] if "--format" in cmd else None
+        if "--width" in cmd and fmt is None:
+            return False, 67  # 720p MJPEG limpo, 15 FPS
+        if "--width" not in cmd and fmt is None:
+            return True, 67  # nativo MJPEG corrompido
+        if "--width" not in cmd:
+            return False, 200 if fmt == "nv12" else 33
+        return False, 67
+
+    cap, _cmds = _scripted_open(tmp_path, behave)
+    assert cap is not None
+    assert "yuy2" in cap._cmd and "--width" not in cap._cmd
+
+
+def test_slow_native_raw_is_last_resort_when_720p_is_gone(tmp_path):
+    def behave(cmd, n):
+        fmt = cmd[cmd.index("--format") + 1] if "--format" in cmd else None
+        if n == 1:
+            return False, 67  # 720p MJPEG limpo, 15 FPS
+        if "--width" in cmd:
+            return True, 67  # 720p reaberto corrompido; sem raw em 720p
+        if fmt is None:
+            return True, 67  # nativo MJPEG corrompido
+        return False, 200  # nativo raw lento, mas funciona
+
+    cap, _cmds = _scripted_open(tmp_path, behave)
+    assert cap is not None
+    assert "--format" in cap._cmd and "--width" not in cap._cmd
