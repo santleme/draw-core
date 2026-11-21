@@ -66,16 +66,17 @@ def fill_interior_holes(mask):
 # aresta-corte e sempre a LONGA — comprimento arbitrario, decidido
 # pela borda da imagem e nao pela pagina —, com os dois vertices a
 # ~2 px da borda; a aresta curta do par e a aresta distante de
-# verdade, interior. Por isso a razao so se aplica a um par em que
-# as duas arestas sao interiores: nenhum dos 4 vertices envolvidos a
-# _FIT_EDGE_BORDER_FRAC * min(H,W) da borda nem fora do quadro (1%
-# de min(H,W) sao ~4 px na mascara 384, folga sobre os ~2 px
-# medidos; vertice fora do quadro tambem conta como contato).
+# verdade, interior. Por isso a razao nao se mede num par oposto que
+# contem aresta-corte: aresta com os DOIS vertices sobre a moldura do
+# quadro — a menos de _FIT_EDGE_BORDER_FRAC * min(H,W) de uma borda
+# ou fora dele (1% de min(H,W) sao ~4 px na mascara 384, folga sobre
+# os ~2 px medidos). Um vertice solto na borda nao isenta: sozinho
+# ele nao e corte de frame.
 # Ressalvas: (i) a folha inteira no quadro a angulo rasante ainda
 # falha por perspectiva pura — razao 4-6,6 em ~17% dos casos reais
 # medidos, indistinguivel do colapso sem contato de borda; (ii) um
-# colapso cuja aresta longa alcance a borda escapa da razao —
-# mitigado pela guarda de suporte de mascara do ajuste.
+# colapso com uma aresta inteira encostada na moldura escapa da
+# razao — mitigado pela guarda de suporte de mascara do ajuste.
 _FIT_OPPOSITE_RATIO_MAX = 3.0
 _FIT_EXCURSION_DIAG_FRAC = 0.15
 _FIT_EDGE_BORDER_FRAC = 0.01
@@ -100,20 +101,21 @@ def fit_plausible(corners, frame_shape):
     if edges.min() <= 0:
         return False
     height, width = frame_shape[:2]
-    # Vertice interior fica estritamente entre `border` e o limite do
-    # quadro menos `border`; quem toca a borda ou cai fora do quadro
-    # e contato de corte. A razao de um par oposto so e medida quando
-    # as duas arestas sao interiores — com um vertice na borda, a
-    # aresta pode ser o recorte do frame, de comprimento arbitrario.
+    # Vertice "sobre a moldura": a menos de `border` de uma das bordas
+    # do quadro ou fora dele. Aresta-corte tem os DOIS vertices assim —
+    # so entao o comprimento dela e decidido pelo recorte. Um vertice
+    # solto na borda nao e corte: a razao do par segue valendo.
     border = _FIT_EDGE_BORDER_FRAC * min(height, width)
-    interior = (
+    on_frame_edge = ~(
         (quad[:, 0] > border)
         & (quad[:, 0] < width - 1.0 - border)
         & (quad[:, 1] > border)
         & (quad[:, 1] < height - 1.0 - border)
     )
     for a, b in ((0, 2), (3, 1)):
-        if not all(interior[v] for v in (a, (a + 1) % 4, b, (b + 1) % 4)):
+        if (on_frame_edge[a] and on_frame_edge[(a + 1) % 4]) or (
+            on_frame_edge[b] and on_frame_edge[(b + 1) % 4]
+        ):
             continue
         ratio = max(edges[a], edges[b]) / min(edges[a], edges[b])
         if ratio > _FIT_OPPOSITE_RATIO_MAX:

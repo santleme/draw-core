@@ -9,9 +9,10 @@ dois vertices a ~2 px da borda; a aresta curta do par e a aresta
 distante de verdade, interior. Ja a familia de colapso que a guarda
 caca (razao 3,8-4,7, mesa de referencia de 2026-10-30) tem todos os
 vertices interiores: o contato com a borda e o sinal que separa os
-dois casos. A razao so se aplica a um par oposto em que as duas
-arestas sao interiores — nenhum dos 4 vertices envolvidos a
-_FIT_EDGE_BORDER_FRAC * min(H,W) da borda nem fora do quadro.
+dois casos. A razao nao se mede num par oposto que contem
+aresta-corte — aresta com os DOIS vertices a
+_FIT_EDGE_BORDER_FRAC * min(H,W) da borda ou fora do quadro. Um
+vertice solto na borda nao isenta: sozinho nao e corte de frame.
 """
 
 import cv2
@@ -91,14 +92,36 @@ def test_ratio_with_long_edge_past_the_frame_is_accepted():
     assert fit_plausible(quad, _REF_SHAPE) is True
 
 
-def test_ratio_with_short_edge_vertex_on_border_is_accepted():
-    """Um unico vertice na borda — mesmo da aresta curta — ja
-    invalida o par: a aresta curta pode ser ela mesma o recorte."""
+def test_ratio_with_short_edge_on_border_is_accepted():
+    """A aresta curta como corte — o caso hipotetizado na issue:
+    os dois vertices dela encostam na borda direita do quadro."""
     quad = np.array(
         [[300.0, 60.0], [1918.5, 400.0], [1917.0, 640.0], [320.0, 1040.0]],
         dtype=np.float32,
     )
     assert fit_plausible(quad, _REF_SHAPE) is True
+
+
+@pytest.mark.parametrize(
+    "quad",
+    [
+        # Familia de colapso com um canto encostado na borda superior:
+        # vertice solto na moldura nao e aresta-corte — nenhuma aresta
+        # tem os dois vertices la, a razao segue valendo.
+        np.array(
+            [[60.0, 5.0], [1150.0, 300.0], [1180.0, 530.0], [800.0, 695.0]],
+            dtype=np.float32,
+        ),
+        # Mesmo colapso com o canto para fora do quadro.
+        np.array(
+            [[60.0, -15.0], [1150.0, 300.0], [1180.0, 530.0], [800.0, 695.0]],
+            dtype=np.float32,
+        ),
+    ],
+    ids=["canto-na-borda", "canto-fora"],
+)
+def test_lone_border_vertex_does_not_exempt_collapsed_ratio(quad):
+    assert fit_plausible(quad, (710, 1289)) is False
 
 
 @pytest.mark.parametrize(
