@@ -398,7 +398,10 @@ class HelperCapture:
 
     Além de `read() -> (ok, frame)`, expõe `last_capture_ts_ms` e
     `last_frame_id` do registro mais recente, para alimentar o
-    acumulador com o relógio real de captura do emissor.
+    acumulador com o relógio real de captura do emissor, e
+    `last_error`, que separa o fim por falha (registro truncado ou
+    payload sem decode) do EOF limpo — os dois chegam como o mesmo
+    (False, None).
     """
 
     def __init__(
@@ -437,6 +440,11 @@ class HelperCapture:
         self._record_timeout_s = record_timeout_s
         self.last_frame_id = None
         self.last_capture_ts_ms = None
+        # Fim por erro (registro truncado/corrompido, payload sem
+        # decode, falha de socket): read() devolve (False, None) do
+        # mesmo jeito que no EOF limpo — este atributo e o que separa
+        # os dois desfechos para quem audita a fonte.
+        self.last_error = None
         # Descarte na fonte: salto de frame_id sobre TODOS os registros
         # recebidos (PROTOCOL.md: ids nunca repetem). Fica aqui e não
         # no LatestFrameCapture porque um JPEG que o decode rejeita
@@ -491,7 +499,10 @@ class HelperCapture:
             return False, None
         try:
             frame_id, capture_ts_us, payload, _raw = next(self._iter)
-        except (StopIteration, ProtocolError, OSError):
+        except StopIteration:
+            return False, None
+        except (ProtocolError, OSError) as error:
+            self.last_error = error
             return False, None
         if self._last_seen_id is not None and frame_id > self._last_seen_id + 1:
             self.source_dropped += frame_id - self._last_seen_id - 1
@@ -509,6 +520,9 @@ class HelperCapture:
                     time.sleep(delay)
         frame = decode_jpeg(payload)
         if frame is None:
+            self.last_error = ProtocolError(
+                f"payload sem decode jpeg (frame_id {frame_id})"
+            )
             return False, None
         self.last_frame_id = int(frame_id)
         self.last_capture_ts_ms = int(capture_ts_us // 1000)

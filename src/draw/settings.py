@@ -48,13 +48,21 @@ class PipelineConfig:
       A máscara é a cobertura (papel+mão+tinta) de propósito: na mesa
       vazia o seg marca 15%–24% do frame como mão fora do quad, e é
       isso que derruba o IoU do fantasma — sem a classe mão o
-      fantasma sobe para 0,23–0,41 e cruza a folha real.
-      LIMITAÇÃO CONHECIDA (não medida): a mesma cobertura conta mão
-      ou antebraço FORA da folha na união do IoU. Folha pequena com um
-      antebraço grande em cena pode cair abaixo do piso e ser vetada
-      (a tinta não sobe até a mão sair). Nenhuma captura real desse
-      caso existe ainda; o pior caso medido com mão (s4, escrita) fica
-      em IoU 0,864. Se aparecer, `coverage_iou_floor=0` desliga o piso.
+      fantasma sobe para 0,23–0,41 e cruza a folha real. A união do
+      IoU (draw.pipeline._coverage_iou) conta os componentes não-mão
+      que tocam o quad dilatado pelo anel de rasterização mais TODA a
+      mão prevista: a mancha de papel falsa disjunta da issue #106
+      sai da conta sem levar a proteção do fantasma junto — salvo
+      quando a mão fecha um anel ao redor do vão e o preenchimento
+      de buracos da máscara de voto o reconecta à folha (resíduo
+      conhecido; o mapa cru não atravessa o contrato de detecção).
+      LIMITAÇÃO CONHECIDA (não medida): a classe mão segue contando
+      inteira na união do IoU — mão ou antebraço FORA da folha incham
+      o denominador. Folha pequena com um antebraço grande em cena
+      pode cair abaixo do piso e ser vetada (a tinta não sobe até a
+      mão sair). Nenhuma captura real desse caso existe ainda; o pior
+      caso medido com mão (s4, escrita) fica em IoU 0,864. Se
+      aparecer, `coverage_iou_floor=0` desliga o piso.
       0 desliga o piso.
     - ink_divnorm: aplica draw.photometry.division_normalize no
       retificado antes do page_clean — o domínio de entrada do

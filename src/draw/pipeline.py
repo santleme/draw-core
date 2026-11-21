@@ -81,6 +81,21 @@ _FROZEN_SHEET_MOVE_PX = 25.0
 _STALE_PASS_MIN_FRAMES = _SHEET_LOST_MIN_FRAMES
 
 
+# Anel de tolerancia do teste de componentes no IoU de cobertura
+# (_coverage_iou). A mascara chega ao espaco da camera por um resize
+# NEAREST do mapa nativo de 384 px do segmentador — um pixel nativo
+# vira ~2-3 px de frame em 720p — e o contorno rasterizado do quad
+# arredonda os cantos ao pixel inteiro, entao a borda da folha real
+# pode ficar a alguns pixels do poligono desenhado; sem o anel, essa
+# lacuna de rasterizacao desconectava o componente da folha e o IoU
+# mediria a folha certa como espuria. 1% do menor lado do frame
+# (~5-7 px em 480p-720p, piso de 4 px) cobre a folga com margem; um
+# blob falso tao perto do quad ja seria indistinguivel da folha sem
+# um modelo melhor.
+_COVERAGE_IOU_RING_MIN_PX = 4
+_COVERAGE_IOU_RING_FRAC = 0.01
+
+
 def _acquisition_record(trace, frame_index, consumed, before, after, tracker_event):
     """Evento por aquisicao: rastro do combinado + rastreador.
 
@@ -104,6 +119,70 @@ def _bgr_to_gray(frame):
 
 def _ignore(*_args, **_kwargs):
     return None
+
+
+def _coverage_iou(corners, coverage_mask, hand_mask=None):
+    """IoU do quad com a cobertura, so com os blobs que tocam o quad.
+
+    corners sao os 4 cantos do quad em pixels na grade da mascara;
+    coverage_mask e a mascara uint8 nao-fundo da ultima deteccao. A
+    uniao conta apenas os componentes conexos nao-fundo que tocam o
+    quad dilatado pelo anel de rasterizacao: a mancha de piso claro
+    que o segmentador rotula como papel fora da mesa de referencia
+    (issue #106) entrava inteira na uniao e o IoU do quad certo caia
+    abaixo do piso — falso negativo que derrubava passadas de tinta
+    validas. O blob colado no quad segue na uniao porque a mascara
+    nao o distingue da folha: o quad dentro de um blob gigante
+    continua medindo |quad|/|blob|, a unica guarda desse modo.
+
+    hand_mask (classe mao da mesma deteccao, mesma grade) entra
+    INTEIRA na uniao, tocando o quad ou nao: o piso 0,2 foi calibrado
+    sobre a uniao total e a mesa fantasma so afunda por causa dos
+    pixels de mao fora do quad (settings.py, coverage_iou_floor) —
+    exclui-la por desconexao devolvia o fantasma a passada de tinta.
+    A componentizacao, por sua vez, roda sobre o nao-fundo SEM a
+    classe mao: uma mancha de falso papel que so alcanca o quad
+    atraves de pixels de mao fica fora — a mao nao pode virar ponte
+    para um blob espurio. Sem mascara de mao (contrato de dois
+    canais), o nao-fundo inteiro e o melhor proxy da folha.
+
+    LIMITACAO: a cobertura que chega aqui e a mascara de VOTO, com
+    os buracos internos ja preenchidos (perception.last_coverage_mask
+    — o mapa cru fica em last_coverage_raw e nao atravessa o contrato
+    DetectionResult). Se os dedos fecham um anel ao redor do va
+    entre a folha e a mancha, o preenchimento marca o va como
+    nao-fundo e a mancha volta a contar contra a folha mesmo depois
+    da classe mao removida.
+    """
+    quad = np.zeros(coverage_mask.shape, np.uint8)
+    cv2.fillConvexPoly(quad, np.round(corners).astype(np.int32), 1)
+    ring = max(
+        _COVERAGE_IOU_RING_MIN_PX,
+        round(_COVERAGE_IOU_RING_FRAC * min(coverage_mask.shape)),
+    )
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * ring + 1, 2 * ring + 1))
+    quad_reach = cv2.dilate(quad, kernel) > 0
+    has_hand = hand_mask is not None and hand_mask.shape == coverage_mask.shape
+    non_hand = coverage_mask > 0
+    if has_hand:
+        non_hand &= ~(np.asarray(hand_mask) > 0)
+    n_labels, labels = cv2.connectedComponents(non_hand.astype(np.uint8))
+    keep = np.zeros(n_labels, bool)
+    keep[np.unique(labels[quad_reach])] = True
+    keep[0] = False  # o rotulo 0 e o fundo
+    touching = keep[labels]
+    union_mask = (quad > 0) | touching
+    if has_hand:
+        union_mask |= np.asarray(hand_mask) > 0
+    union = np.count_nonzero(union_mask)
+    if not union:
+        return 0.0
+    # A intersecao usa a mascara inteira: todo pixel nao-fundo dentro
+    # do quad pertence a um componente que toca o quad (o proprio
+    # pixel esta dentro do anel), entao cruzar com `touching` seria
+    # redundante.
+    inter = np.count_nonzero((quad > 0) & (coverage_mask > 0))
+    return float(inter / union)
 
 
 class Pipeline:
@@ -293,16 +372,19 @@ class Pipeline:
         warp confere com a folha segmentada: o quad fantasma sobre
         mesa vazia cobre quase tudo de fora da mascara; a folha
         real, mesmo com o quad estourado, domina a intersecao.
+        A uniao conta so os componentes nao-fundo que tocam o quad
+        (_coverage_iou): a mancha falsa disjunta — o piso claro lido
+        como papel da issue #106 — nao infla mais a medida, enquanto
+        o blob colado no candidato a folha continua contando por ser
+        indistinguivel dela sem um modelo melhor. A mao prevista pela
+        mesma deteccao (_hand_mask_det) entra inteira na uniao: e o
+        termo que o piso 0,2 usa para afundar o quad fantasma da mesa
+        vazia. O custo e um connectedComponents por passada de tinta
+        — cadencia de passada, nao de quadro.
         """
         if self._coverage_mask is None:
             return None
-        quad = np.zeros(self._coverage_mask.shape, np.uint8)
-        cv2.fillConvexPoly(quad, np.round(warp_corners).astype(np.int32), 1)
-        mask = self._coverage_mask > 0
-        union = (quad.astype(bool) | mask).sum()
-        if not union:
-            return 0.0
-        return float((quad.astype(bool) & mask).sum() / union)
+        return _coverage_iou(warp_corners, self._coverage_mask, self._hand_mask_det)
 
     def _warp_and_submit_ink(self, frame, warp_corners, captured_at=None):
         """Warp + visibilidade + submissao a trabalhadora de tinta.
