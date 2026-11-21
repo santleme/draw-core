@@ -58,6 +58,18 @@ _PRESENCE_MAX_WIDTH = 640
 # passado o teto, _closed sinaliza e quem estava em voo fecha ao
 # retornar.
 _CLOSE_LOCK_TIMEOUT_S = 2.0
+# Baixa luz (issue #129): o MediaPipe perde a mao em frame escuro. Abaixo
+# desta luminancia media (amostra com stride) o frame ganha uma correcao
+# gama leve rumo a _DARK_TARGET_MEAN antes da deteccao; frame normal nao
+# paga nada alem da amostra. _DARK_MIN_GAMMA limita o realce (ruido).
+_DARK_MEAN = 70.0
+_DARK_TARGET_MEAN = 110.0
+_DARK_MIN_GAMMA = 0.45
+_DARK_SAMPLE_STRIDE = 8
+# Retencao curta: ate _HOLD_FRAMES deteccoes seguidas sem mao reaproveitam
+# a ultima mao vista (queda curta do detector nao libera a folha). So vale
+# para o mesmo tamanho de frame; "indisponivel" nunca e retido.
+_HOLD_FRAMES = 3
 
 
 def _resolve_model_path(model_path):
@@ -68,6 +80,18 @@ def _resolve_model_path(model_path):
         if Path(candidate).exists():
             return str(candidate)
     return None
+
+
+def _lift_dark(frame):
+    """Gama leve so em frame escuro; frame normal volta intacto."""
+    sample = frame[::_DARK_SAMPLE_STRIDE, ::_DARK_SAMPLE_STRIDE]
+    mean = float(sample.mean())
+    if mean >= _DARK_MEAN or mean < 1.0:
+        return frame
+    gamma = np.log(_DARK_TARGET_MEAN / 255.0) / np.log(mean / 255.0)
+    gamma = float(np.clip(gamma, _DARK_MIN_GAMMA, 1.0))
+    table = (255.0 * (np.arange(256) / 255.0) ** gamma).astype(np.uint8)
+    return cv2.LUT(frame, table)
 
 
 def hand_model_available(model_path=None):
@@ -142,6 +166,9 @@ class HandMasker:
         self._unavailable = False
         self._video_unavailable = False
         self._last_video_ts = -1
+        self._held_hands = None
+        self._held_shape = None
+        self._held_misses = 0
         self._warned = False
         self._closed = False
         self._lock = threading.RLock()
@@ -314,13 +341,33 @@ class HandMasker:
         """
         with self._lock:
             try:
-                return self._landmarks_locked(frame, max_width, timestamp_ms)
+                return self._retain(
+                    self._landmarks_locked(frame, max_width, timestamp_ms), frame
+                )
             finally:
                 # Se o close() passou sem o lock durante esta
                 # chamada, o fechamento acontece aqui, na saida
                 # de quem estava em voo.
                 if self._closed:
                     self._close_landmarkers()
+
+    def _retain(self, hands, frame):
+        """Histerese de presenca: sem mao por ate _HOLD_FRAMES deteccoes
+        seguidas, devolve a ultima mao vista (mesmo tamanho de frame)."""
+        if hands is None:
+            return None
+        shape = frame.shape[:2]
+        if hands:
+            self._held_hands = hands
+            self._held_shape = shape
+            self._held_misses = 0
+            return hands
+        if self._held_hands is not None and self._held_shape == shape:
+            self._held_misses += 1
+            if self._held_misses <= _HOLD_FRAMES:
+                return self._held_hands
+        self._held_hands = None
+        return hands
 
     def _landmarks_locked(self, frame, max_width, timestamp_ms):
         """O corpo de _landmarks, rodando sob o lock do masker."""
@@ -337,7 +384,7 @@ class HandMasker:
                 (max_width, int(round(frame.shape[0] * scale))),
                 interpolation=cv2.INTER_AREA,
             )
-        rgb = cv2.cvtColor(work, cv2.COLOR_BGR2RGB)
+        rgb = cv2.cvtColor(_lift_dark(work), cv2.COLOR_BGR2RGB)
         image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
         result = None
         if use_video:

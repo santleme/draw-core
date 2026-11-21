@@ -318,3 +318,65 @@ def test_missing_model_never_imports_mediapipe(tmp_path, monkeypatch):
     assert masker.mask(frame) is None
     assert masker.presence_signature(frame, timestamp_ms=1000) is None
     assert attempted == []
+
+
+def _bare_masker():
+    masker = hand_module.HandMasker.__new__(hand_module.HandMasker)
+    masker._held_hands = None
+    masker._held_shape = None
+    masker._held_misses = 0
+    return masker
+
+
+def test_dark_frame_is_lifted_and_normal_frame_is_untouched():
+    dark = np.full((120, 160, 3), 25, np.uint8)
+    lifted = hand_module._lift_dark(dark)
+    assert lifted.mean() > 2 * dark.mean()
+    assert lifted.dtype == np.uint8 and lifted.shape == dark.shape
+    normal = np.full((120, 160, 3), 140, np.uint8)
+    assert hand_module._lift_dark(normal) is normal
+    black = np.zeros((120, 160, 3), np.uint8)
+    assert hand_module._lift_dark(black) is black
+
+
+def test_lift_dark_cost_stays_small():
+    import time
+
+    frame = np.full((720, 1280, 3), 30, np.uint8)
+    hand_module._lift_dark(frame)
+    start = time.perf_counter()
+    for _ in range(10):
+        hand_module._lift_dark(frame)
+    assert (time.perf_counter() - start) / 10 < 0.02
+
+
+def test_short_detection_gaps_keep_the_last_hand_then_release():
+    masker = _bare_masker()
+    frame = np.zeros((120, 160, 3), np.uint8)
+    hands = [np.zeros((21, 2), np.float32)]
+    assert masker._retain(hands, frame) is hands
+    for _ in range(hand_module._HOLD_FRAMES):
+        assert masker._retain([], frame) is hands
+    assert masker._retain([], frame) == []
+    assert masker._retain([], frame) == []
+
+
+def test_retention_never_crosses_frame_sizes_or_hides_unavailable():
+    masker = _bare_masker()
+    hands = [np.zeros((21, 2), np.float32)]
+    masker._retain(hands, np.zeros((120, 160, 3), np.uint8))
+    assert masker._retain([], np.zeros((240, 320, 3), np.uint8)) == []
+    masker._retain(hands, np.zeros((120, 160, 3), np.uint8))
+    assert masker._retain(None, np.zeros((120, 160, 3), np.uint8)) is None
+
+
+def test_a_returning_hand_resets_the_hold_budget():
+    masker = _bare_masker()
+    frame = np.zeros((120, 160, 3), np.uint8)
+    hands = [np.zeros((21, 2), np.float32)]
+    masker._retain(hands, frame)
+    masker._retain([], frame)
+    masker._retain([], frame)
+    masker._retain(hands, frame)
+    for _ in range(hand_module._HOLD_FRAMES):
+        assert masker._retain([], frame) is hands
