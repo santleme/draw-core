@@ -83,7 +83,11 @@ def _terminate_host_process(proc):
     except OSError:
         pass
     finally:
-        for stream in (proc.stdout, proc.stderr, proc.stdin):
+        for stream in (
+            getattr(proc, "stdout", None),
+            getattr(proc, "stderr", None),
+            getattr(proc, "stdin", None),
+        ):
             if stream is not None:
                 try:
                     stream.close()
@@ -1057,8 +1061,10 @@ def open_managed_reverse(
     run_cwd = "/mnt/c" if os.path.isdir("/mnt/c") else str(exe.parent)
     cls = HvcamCapture if capture_cls is None else capture_cls
 
+    last_host_error = None
     for dev_idx, dev_name in order:
         proc_box = [None]
+        stderr_box = [""]
 
         def _spawn(idx=dev_idx, box=proc_box):
             proc = popen(
@@ -1072,14 +1078,29 @@ def open_managed_reverse(
                 ],
                 cwd=run_cwd,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
             )
             _MANAGED_HOST_PROCS.add(proc)
             box[0] = proc
 
-        def _aborted(box=proc_box):
+        def _aborted(box=proc_box, sbox=stderr_box):
             proc = box[0]
-            return proc is not None and proc.poll() is not None
+            if proc is not None and proc.poll() is not None:
+                if (
+                    proc.stderr is not None
+                    and hasattr(proc.stderr, "read")
+                    and not sbox[0]
+                ):
+                    try:
+                        raw = proc.stderr.read()
+                        if isinstance(raw, bytes):
+                            sbox[0] = raw.decode("utf-8", errors="replace")
+                        elif isinstance(raw, str):
+                            sbox[0] = raw
+                    except Exception:
+                        pass
+                return True
+            return False
 
         cap = cls(
             url,
@@ -1094,8 +1115,17 @@ def open_managed_reverse(
                 return cap, dev_idx, dev_name
             cap.release()
             continue
+        err_msg = stderr_box[0].strip()
+        if err_msg:
+            last_host_error = err_msg
+            if hasattr(cap, "open_error"):
+                cap.open_error = OSError(
+                    f"{cap.open_error or 'hvcam-host encerrou'}: {err_msg}"
+                )
         cap.release()
         _terminate_host_process(proc_box[0])
+    if last_host_error:
+        raise RuntimeError(last_host_error)
     return None, None, None
 
 

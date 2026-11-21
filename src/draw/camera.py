@@ -603,7 +603,7 @@ def _confirm_stream_alive(
     no aquecimento, mantendo teto baixo para cameras realmente travadas.
     """
     deadline = now() + window_s
-    while True:
+    while now() < deadline:
         ok, frame = capture.read()
         if ok and frame is not None:
             return True
@@ -611,6 +611,7 @@ def _confirm_stream_alive(
         if remaining <= 0:
             return False
         sleep(min(retry_s, remaining))
+    return False
 
 
 def _try_other_local_cameras(source, capture_factory):

@@ -1043,6 +1043,93 @@ def test_confirm_stream_alive_recovers_after_short_gap_and_fails_on_stall():
     assert now[0] >= 0.05
 
 
+def test_confirm_stream_alive_bounds_blocking_backend():
+    now = [0.0]
+    reads = []
+
+    def fake_clock():
+        return now[0]
+
+    def fake_sleep(dt):
+        now[0] += dt
+
+    class _BlockingCap:
+        def read(self):
+            reads.append(now[0])
+            now[0] += 0.03
+            return False, None
+
+    # Janela 50 ms, retry 10 ms: primeira leitura em 0.0 termina em 0.03.
+    # Sleep de 10 ms leva a 0.04 (< 0.05). Segunda leitura inicia em 0.04
+    # e termina em 0.07 (ultrapassa a janela). O loop nao deve disparar
+    # uma terceira leitura no/apos o prazo de 50 ms.
+    alive = camera_module._confirm_stream_alive(
+        _BlockingCap(),
+        window_s=0.05,
+        retry_s=0.01,
+        now=fake_clock,
+        sleep=fake_sleep,
+    )
+    assert alive is False
+    assert len(reads) == 2
+    assert all(t < 0.05 for t in reads)
+
+
+def test_open_managed_reverse_surfaces_host_stderr_on_abort(tmp_path):
+    import io
+
+    fake_exe = tmp_path / "hvcam-host.exe"
+    fake_exe.write_bytes(b"MZ")
+
+    class _FailingProc:
+        def __init__(self, cmd):
+            self.cmd = cmd
+            self._rc = 1
+            self.stdout = None
+            self.stdin = None
+            self.stderr = io.StringIO("Failed to open camera: 0x80070490\n")
+
+        def poll(self):
+            return self._rc
+
+        def terminate(self):
+            pass
+
+        def wait(self, timeout=None):
+            return 1
+
+        def kill(self):
+            pass
+
+    def fake_popen(cmd, **_kw):
+        return _FailingProc(cmd)
+
+    class _AbortedCap:
+        def __init__(self, url, **kw):
+            self.url = url
+            self._host_proc = None
+            kw["on_listening"]()
+            assert kw["abort_check"]() is True
+            self._opened = False
+            self.open_error = OSError("aborted")
+
+        def isOpened(self):
+            return False
+
+        def release(self):
+            pass
+
+    with pytest.raises(RuntimeError) as exc_info:
+        hvcam_module.open_managed_reverse(
+            device=0,
+            try_all=False,
+            host_exe=fake_exe,
+            popen=fake_popen,
+            capture_cls=_AbortedCap,
+        )
+    assert "0x80070490" in str(exc_info.value)
+
+
 def test_try_other_local_cameras_skips_camera_that_stalls_permanently(monkeypatch):
     class _StalledAfterOneCap:
         def __init__(self):

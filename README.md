@@ -18,8 +18,10 @@ picks an available webcam, and opens Draw:
 ```
 
 Any CLI flags pass straight through (`./run.sh --check`, `./run.sh --fullscreen`,
-`./run.sh --source 1`). Once the virtualenv is created, you can also invoke
-`uv run --no-sync draw` directly.
+`./run.sh --source 1`). `./run.sh` is the portable entry point that selects
+the correct environment across Linux, WSL, and Windows. In shared checkouts
+with isolated environments (e.g. `.venv-linux` under WSL alongside Windows
+`.venv`), set `UV_PROJECT_ENVIRONMENT=.venv-linux` if invoking `uv run --no-sync draw` directly.
 
 No flags selects the production preset (`InkConfig.production()` plus
 `PipelineConfig()` defaults): digital gain, strict vote `0.85`, ruling
