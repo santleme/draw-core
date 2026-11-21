@@ -68,6 +68,42 @@ _FIT_OPPOSITE_RATIO_MAX = 3.0
 _FIT_EDGE_BORDER_GAP_FRAC = 0.02
 _FIT_EXCURSION_DIAG_FRAC = 0.15
 
+# Guarda de suporte do ajuste na máscara (medida em 2026-11-21 nas
+# capturas draw-data/captures s1-s4): o ajuste precisa ficar sobre a
+# região não-fundo que o modelo marcou. Num cenário fora da mesa de
+# referência (s3_geometria, câmera oblíqua 640x480 com piso claro à
+# vista), o modelo rotula região de não-papel como folha e o ajuste
+# explode para um quadrilátero que cobre braço, chão e o frame inteiro
+# — razão de arestas ~1 e excursão dentro da margem, então a guarda de
+# plausibilidade deixava passar. Nessas capturas, ajustes sãos cobrem a
+# máscara em >= 0,84 (p5 0,91 na sessão de escrita da mesa de
+# referência), os quads explodidos ficam entre 0,56 e 0,80 e os
+# fantasmas de mesa vazia (s1) chegam a 0,43. A região de suporte é a
+# cobertura (tudo que não é fundo) quando o detector a fornece — mão
+# sobre a folha não pode secar a métrica — e a própria máscara fora
+# dele. Ressalva igual à guarda de plausibilidade: limiar calibrado nas
+# capturas da mesa de referência e de um cenário oblíquo; reconfirmar
+# em capturas de outras mesas.
+_FIT_MIN_MASK_FILL = 0.82
+
+
+def _quad_supported(quad, support_mask):
+    """True se a região não-fundo cobre a maior parte do quadrilátero.
+
+    O quadrilátero é desenhado na grade de `support_mask`; a fração
+    coberta por pixels não-fundo precisa chegar a _FIT_MIN_MASK_FILL.
+    É a medida que separa o ajuste apoiado na folha do que escorregou
+    para cima de fundo mal classificado — o piso claro rotulado como
+    papel que produzia quad do tamanho do frame inteiro.
+    """
+    filled = np.zeros(support_mask.shape, np.uint8)
+    cv2.fillConvexPoly(filled, np.round(quad).astype(np.int32), 255)
+    area = int(np.count_nonzero(filled))
+    if area == 0:
+        return False
+    inside = int(np.count_nonzero((filled != 0) & (support_mask != 0)))
+    return inside / area >= _FIT_MIN_MASK_FILL
+
 
 def _edge_border_sides(p, q, border_gap, width, height):
     """Bordas do quadro ao longo das quais a aresta p→q pode correr."""
@@ -774,14 +810,26 @@ def _refine_inside(frame, corners):
 
 
 def _fit_quad_impl(
-    mask_bin, frame, fallback_lines, scale_x=1.0, scale_y=1.0, *, contour=None
+    mask_bin,
+    frame,
+    fallback_lines,
+    scale_x=1.0,
+    scale_y=1.0,
+    *,
+    contour=None,
+    support_mask=None,
 ):
     """O ajuste completo sobre a máscara, com herança opcional.
 
     Retorna (quadrilatero ou None, retas usadas ou None, confiavel
     por aresta ou None). fallback_lines são as retas confiáveis da
     chamada anterior, oferecidas às arestas sem cobertura.
+    support_mask é a região não-fundo que precisa cobrir o quad
+    ajustado (cobertura do detector quando existe; a própria máscara
+    caso contrário): ajuste que escapa para cima de fundo não sai.
     """
+    if support_mask is None or support_mask.shape != mask_bin.shape:
+        support_mask = mask_bin
     if contour is None:
         contour = _sheet_contour(mask_bin)
     if contour is None:
@@ -792,10 +840,21 @@ def _fit_quad_impl(
     scale = np.array([scale_x, scale_y], dtype=np.float32)
     quad = _approx_quad(contour)
     if quad is None:
-        return _min_area_quad(contour) * scale, None, None
+        # Reserva de área mínima: sai sem reajuste nem refino, mas não
+        # sai sem apoio — todas as explosões medidas nas capturas
+        # oblíquas entraram por aqui, com o retângulo mínimo cobrindo
+        # braço e chão além da máscara.
+        quad = _min_area_quad(contour)
+        if not _quad_supported(quad, support_mask):
+            return None, None, None
+        return quad * scale, None, None
     quad, lines, trusted = _refit_corners(
         contour, quad, mask_bin.shape[:2], fallback_lines, scale
     )
+    if lines is None and not _quad_supported(quad, support_mask):
+        # Refit abandonado por falta de pontos: o approx que sobrou
+        # também não teve guarda de aresta; a mesma regra vale.
+        return None, None, None
     quad = quad * scale
     if frame is not None:
         quad = _refine_inside(frame, quad)
