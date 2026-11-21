@@ -267,16 +267,19 @@ def _line_normal_shift_at(point, line_ref):
     return abs(float((point - pt_ref) @ normal))
 
 
+_RECTIFIED_EDGE_UNCERTAINTY_PX = 2.5
+
+
 def _rectified_translation_consistent(
-    fallback_lines, out_i, out_mid, out_norm, in_i, in_mid, in_norm, pixel_scale=1.0
+    fallback_lines, out_i, out_mid, out_norm, in_i, in_mid, in_norm
 ):
     """Confere se dois saltos em arestas opostas sao iguais e opostos no plano
     retificado da pagina anterior (invariante a perspectiva de camera inclinada).
 
-    A tolerancia absoluta e derivada do erro de ajuste de borda em pixels de
-    mascara projetado pela homografia nos pontos medidos (nao uma fracao fixa
-    da pagina). Retorna True/False quando o quadrilatero anterior e valido, ou
-    None quando faltam retas de fallback para montar a homografia.
+    A tolerancia absoluta projeta a incerteza por aresta em pixels nativos da
+    mascara (_RECTIFIED_EDGE_UNCERTAINTY_PX) atraves da homografia nos pontos
+    medidos, sem encolher com a resolucao da camera. Retorna True/False quando
+    o quadrilatero anterior e valido, ou None quando faltam retas de fallback.
     """
     if any(line is None for line in fallback_lines):
         return None
@@ -311,7 +314,7 @@ def _rectified_translation_consistent(
         return None
     if out_off <= 0.0 or in_off >= 0.0:
         return False
-    err_px = max(1.5, 4.0 * pixel_scale)
+    err_px = _RECTIFIED_EDGE_UNCERTAINTY_PX
     out_pert = _outward_offset(out_i, out_mid + err_px * out_norm)
     in_pert = _outward_offset(in_i, in_mid + err_px * in_norm)
     if out_pert is None or in_pert is None:
@@ -319,6 +322,38 @@ def _rectified_translation_consistent(
     abs_tol = abs(out_pert - out_off) + abs(in_pert - in_off)
     mag = max(abs(out_off), abs(in_off))
     return abs(out_off + in_off) <= max(abs_tol, 0.35 * mag)
+
+
+def _is_interior_pivot(edge_idx, new_line, new_start, new_end, fallback_lines):
+    """Retorna True se a reta nova cruza a reta anterior no INTERIOR do trecho
+    compartilhado entre a aresta velha e a nova (pivo real sob oclusao).
+
+    Quando a intersecao ocorre na extremidade do trecho compartilhado (ex.: uma
+    aresta previamente cortada em diagonal desentorta ao ser revelada), retorna
+    False para nao travar a borda revelada. Retorna None se faltam vizinhos.
+    """
+    prev_line = fallback_lines[edge_idx]
+    prev_left = fallback_lines[(edge_idx - 1) % 4]
+    prev_right = fallback_lines[(edge_idx + 1) % 4]
+    if prev_line is None or prev_left is None or prev_right is None:
+        return None
+    old_start = _intersect(prev_left, prev_line)
+    old_end = _intersect(prev_line, prev_right)
+    pivot = _intersect(new_line, prev_line)
+    if old_start is None or old_end is None or pivot is None:
+        return False
+    dir_prev = prev_line[0] / max(float(np.linalg.norm(prev_line[0])), 1e-9)
+    old_a = float(old_start @ dir_prev)
+    old_b = float(old_end @ dir_prev)
+    new_a = float(np.asarray(new_start, dtype=np.float64) @ dir_prev)
+    new_b = float(np.asarray(new_end, dtype=np.float64) @ dir_prev)
+    lo = max(min(old_a, old_b), min(new_a, new_b))
+    hi = min(max(old_a, old_b), max(new_a, new_b))
+    span = hi - lo
+    if span <= 1e-6:
+        return False
+    t = (float(pivot @ dir_prev) - lo) / span
+    return 0.15 < t < 0.85
 
 
 def _best_inlier_seed_line(side, along, pixel_scale=1.0):
@@ -526,15 +561,26 @@ def _refit_corners(contour, quad, frame_shape, fallback_lines=None, scale=(1.0, 
                 trusted[bad] = False
         elif len(steady) >= 2 and len(jumped) == 2:
             # Classifica deslocamento para fora, para dentro e pivo puramente
-            # angular (deslocamento normal desprezivel com giro > limiar).
+            # angular no interior do trecho compartilhado (nao na extremidade,
+            # onde uma borda revelada pode desentortar passando pelo canto velho).
             outward_edges = [entry for entry in jumped if entry[1] > 2.0 * pixel_scale]
             inward_edges = [entry for entry in jumped if entry[1] < -2.0 * pixel_scale]
-            pivot_edges = [
-                entry
-                for entry in jumped
-                if abs(entry[1]) <= 2.0 * pixel_scale
-                and entry[2] > _MEMORY_SINGLE_OUTLIER_ANGLE_DEG
-            ]
+            pivot_edges = []
+            for entry in jumped:
+                e_i, e_shift, e_ang, _e_mid, _e_norm = entry
+                if (
+                    abs(e_shift) <= 2.0 * pixel_scale
+                    and e_ang > _MEMORY_SINGLE_OUTLIER_ANGLE_DEG
+                ):
+                    interior = _is_interior_pivot(
+                        e_i,
+                        lines[e_i],
+                        quad[e_i],
+                        quad[(e_i + 1) % 4],
+                        fallback_lines,
+                    )
+                    if interior is not False:
+                        pivot_edges.append(entry)
             if len(outward_edges) == 1 and len(pivot_edges) == 1:
                 piv_i = pivot_edges[0][0]
                 lines[piv_i] = fallback_lines[piv_i]
@@ -558,7 +604,6 @@ def _refit_corners(contour, quad, frame_shape, fallback_lines=None, scale=(1.0, 
                         in_i,
                         in_mid,
                         in_norm,
-                        pixel_scale,
                     )
                     if rect_ok is not None:
                         consistent_translation = rect_ok

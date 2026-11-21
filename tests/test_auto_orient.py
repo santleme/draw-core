@@ -589,3 +589,60 @@ def test_neural_detector_unequal_opposite_edge_shifts_not_mistaken_for_slide():
         assert q2 is not None
         assert abs(q2[:, 0].min() - 80.0 * scale_x) <= 10.0
         assert abs(q2[:, 0].max() - 337.0 * scale_x) <= 10.0
+
+
+def test_neural_detector_boundary_pivot_reveal_does_not_keep_skewed_edge():
+    """Quando duas bordas reaparecem e o novo ponto medio da borda superior
+    cai sobre o antigo canto superior direito (extremidade do trecho
+    compartilhado, nao pivo interior), a borda superior reta deve ser aceita."""
+    from draw.perception import NeuralSheetDetector
+
+    det = NeuralSheetDetector("unused.onnx", verify=None)
+
+    # Quadro 1 (384x384): topo cortado em diagonal (88,96)->(190,80).
+    poly1 = np.array([[88, 96], [190, 80], [330, 310], [60, 310]], dtype=np.int32)
+    m1 = np.zeros((384, 384), dtype=np.uint8)
+    cv2.fillPoly(m1, [poly1], 255)
+    assert det._fit(m1) is not None
+
+    # Quadro 2+: obstrucao removida -> topo reto (90,80)..(290,80), ponto medio
+    # (190,80) coincide com o canto antigo na fronteira do trecho compartilhado.
+    poly2 = np.array([[90, 80], [290, 80], [330, 310], [60, 310]], dtype=np.int32)
+    m2 = np.zeros((384, 384), dtype=np.uint8)
+    cv2.fillPoly(m2, [poly2], 255)
+    for _ in range(3):
+        q2 = det._fit(m2)
+        assert q2 is not None
+        assert abs(q2[0, 1] - 80.0) <= 5.0
+        assert abs(q2[1, 1] - 80.0) <= 5.0
+        assert abs(q2[1, 0] - 290.0) <= 6.0
+
+
+def test_neural_detector_noisy_native_scale_slide_does_not_lock_trailing_edge():
+    """Em mascara nativa 384x384 para frame 1280x720, um deslize rigido de ~9 px
+    com ruido de discretizacao (+7 px na lider, +11 px na traseira, diferenca
+    de 4 px) deve ser aceito como deslize sem travar a borda traseira."""
+    from draw.perception import NeuralSheetDetector
+
+    det = NeuralSheetDetector("unused.onnx", verify=None)
+    scale_x, scale_y = 1280.0 / 384.0, 720.0 / 384.0
+
+    m1 = np.zeros((384, 384), dtype=np.uint8)
+    m1[80:310, 80:330] = 255
+    assert det._fit(m1, scale_x=scale_x, scale_y=scale_y) is not None
+
+    # Quadro 2 (ruidoso): lider +7 px (337), traseira +11 px (91).
+    m2 = np.zeros((384, 384), dtype=np.uint8)
+    m2[80:310, 91:337] = 255
+    q2 = det._fit(m2, scale_x=scale_x, scale_y=scale_y)
+    assert q2 is not None
+    assert abs(q2[:, 0].min() - 91.0 * scale_x) <= 10.0
+
+    # Quadros 3+ (estabilizados em +9 px: 89..339): traseira acompanha normalmente.
+    m3 = np.zeros((384, 384), dtype=np.uint8)
+    m3[80:310, 89:339] = 255
+    for _ in range(2):
+        q3 = det._fit(m3, scale_x=scale_x, scale_y=scale_y)
+        assert q3 is not None
+        assert abs(q3[:, 0].min() - 89.0 * scale_x) <= 10.0
+        assert abs(q3[:, 0].max() - 339.0 * scale_x) <= 10.0
