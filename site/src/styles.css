@@ -122,8 +122,7 @@ body.is-sketching .brand-lockup {
 @media (prefers-reduced-motion: reduce) {
   .location-main, .location-more { transition: none; }
 }
-.theme-toggle { background: color-mix(in srgb, var(--paper) 24%, transparent); }
-.theme-toggle:hover { border-color: color-mix(in srgb, var(--ink) 38%, transparent); }
+.theme-toggle { background: none; border: 0; border-radius: 0; }
 a:focus-visible, button:focus-visible { outline: 2px solid #a7a071; outline-offset: 4px; }
 
 .home-scroll { min-height: 190svh; }
@@ -735,23 +734,8 @@ body:not(.dark) .construction-art::before {
 ::view-transition-new(root) { z-index: 2; }
 .theme-tearing, .theme-tearing *, .theme-tearing *::before, .theme-tearing *::after { transition: none !important; }
 
-/* Queda: o site vem em sua direcao, cresce e voce o atravessa; termina em branco, que e onde o flash comeca. So transform/opacity (compositor), sem blur: fluido ate o fim. */
+/* Entrada: explosao com buraco no meio (lib/blast.ts); o #root e mascarado e estilhacos pixelados voam para os lados. */
 body.is-falling { overflow: hidden; }
-body.is-falling #root { transform-origin: 50% 40%; animation: fall-away 1.6s cubic-bezier(.55, 0, .9, .35) forwards; will-change: transform, opacity; }
-body.is-falling::before {
-  position: fixed; inset: 0; z-index: 90; pointer-events: none; content: '';
-  background: #fff; opacity: 0;
-  animation: fall-white 1.6s cubic-bezier(.4, 0, .9, .6) forwards;
-}
-@keyframes fall-away {
-  0% { transform: scale(1) rotate(0deg); opacity: 1; }
-  75% { opacity: 1; }
-  100% { transform: scale(14) rotate(-4deg) translateY(-3vh); opacity: 0; }
-}
-@keyframes fall-white {
-  0%, 62% { opacity: 0; }
-  100% { opacity: 1; }
-}
 
 /* Interface propria do Draw (rota /app). */
 .studio { position: fixed; inset: 0; z-index: 5; overflow-y: auto; display: flex; flex-direction: column; gap: 14px; padding: 14px; background: var(--paper); color: var(--ink);
@@ -788,7 +772,7 @@ body.is-falling::before {
 .studio-pane, .studio-bar, .studio-dock { animation: studio-come-to 1.3s cubic-bezier(.12, .7, .2, 1) backwards; }
 @keyframes studio-come-to { 0% { filter: brightness(2.2) blur(6px); transform: scale(1.05); } 100% { filter: none; transform: none; } }
 @media (prefers-reduced-motion: reduce) {
-  body.is-falling #root, body.is-falling::before, .studio-flash, .studio-pane, .studio-bar, .studio-dock { animation: none; }
+  body.is-falling #root, .studio-flash, .studio-pane, .studio-bar, .studio-dock { animation: none; }
   .studio-flash { display: none; }
 }
 
@@ -984,8 +968,10 @@ body.dark .studio-save-error { color: #f0a498; }
 .papers-more { position: relative; z-index: 1; }
 .papers { position: relative; display: grid; min-height: 100svh; place-items: center; padding: 96px 16px 56px; overflow: hidden; }
 .papers-orbit { position: absolute; inset: 84px 12px 28px; }
-.papers-card { position: absolute; left: 50%; top: 50%; display: grid; gap: 6px; width: clamp(104px, 15vw, 168px); padding: 12px 14px; border: 1px solid color-mix(in srgb, var(--ink) 14%, transparent); border-radius: 18px; background: color-mix(in srgb, var(--paper) 92%, transparent); box-shadow: 0 10px 30px rgba(34, 35, 31, .08); color: var(--ink); text-align: left; cursor: pointer; will-change: transform, opacity; backface-visibility: hidden; transition: border-color .2s, background-color .2s; }
-.papers-card:hover, .papers-card:focus-visible, .papers-card.is-open { border-color: color-mix(in srgb, var(--ink) 38%, transparent); background: color-mix(in srgb, var(--accent) 38%, var(--paper)); outline: 0; }
+.papers-card { position: absolute; left: 50%; top: 50%; display: grid; gap: 6px; width: clamp(104px, 15vw, 168px); padding: 12px 14px; border: 1px solid color-mix(in srgb, var(--ink) 14%, transparent); border-radius: 18px; background: color-mix(in srgb, var(--paper) 92%, transparent); box-shadow: 0 14px 32px rgba(34, 35, 31, .24), 0 3px 8px rgba(34, 35, 31, .14); color: var(--ink); text-align: left; cursor: pointer; will-change: transform, opacity; backface-visibility: hidden; transition: border-color .2s, background-color .2s, box-shadow .26s ease; }
+.dark .papers-card { box-shadow: 0 12px 30px rgba(255, 255, 255, .1), 0 2px 6px rgba(255, 255, 255, .06); }
+.papers-card:hover, .papers-card:focus-visible, .papers-card.is-open { border-color: color-mix(in srgb, var(--ink) 38%, transparent); background: color-mix(in srgb, var(--accent) 38%, var(--paper)); outline: 0; box-shadow: 0 20px 28px -10px rgba(34, 35, 31, .5), 0 18px 42px rgba(34, 35, 31, .34); }
+.dark .papers-card:hover, .dark .papers-card:focus-visible, .dark .papers-card.is-open { box-shadow: 0 18px 26px -10px rgba(255, 255, 255, .22), 0 16px 38px rgba(255, 255, 255, .16); }
 .papers-card-n { font: 400 11px 'DM Mono', monospace; letter-spacing: .08em; color: var(--muted); }
 .papers-card-name { font: 500 clamp(13px, 1.5vw, 16px)/1.15 Manrope, system-ui, sans-serif; letter-spacing: -.02em; }
 .papers.has-open .papers-card { z-index: 5 !important; } /* com um artigo aberto, o painel fica por cima de todos os cartoes */

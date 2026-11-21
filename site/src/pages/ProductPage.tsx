@@ -2,13 +2,14 @@ import { useEffect, useRef, type CSSProperties, type MouseEvent } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import ProductAsciiArt from '../components/ProductAsciiArt';
 import { useLang } from '../i18n';
+import { runBlast } from '../lib/blast';
 
 export default function ProductPage() {
   const { tr } = useLang();
   const navigate = useNavigate();
-  const timer = useRef<number>(0);
+  const stopBlast = useRef<() => void>(() => undefined);
   useEffect(() => () => {
-    window.clearTimeout(timer.current);
+    stopBlast.current();
     document.body.classList.remove('is-falling');
   }, []);
 
@@ -21,11 +22,14 @@ export default function ProductPage() {
       return;
     }
     document.body.classList.add('is-falling');
-    timer.current = window.setTimeout(() => {
+    stopBlast.current = runBlast(() => {
       navigate('/app');
-      // O estudio ja nasce coberto pelo flash branco; so entao soltamos a queda.
-      requestAnimationFrame(() => requestAnimationFrame(() => document.body.classList.remove('is-falling')));
-    }, 1600);
+      // O estudio ja nasce coberto pelo flash branco; so entao soltamos a explosao.
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        stopBlast.current();
+        document.body.classList.remove('is-falling');
+      }));
+    });
   };
 
   return (

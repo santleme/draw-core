@@ -353,7 +353,7 @@ export default function SiteHeader({ onRepeatProduct }: SiteHeaderProps) {
             </span>
             <span className="lang-anchor">
             <motion.button
-              className="theme-toggle min-h-[34px] min-w-[56px] rounded-full border border-ink/15 bg-paper/20 px-3 font-mono text-[10px] text-ink transition duration-300 hover:-translate-y-px hover:border-ink/40 hover:bg-ink/5 active:translate-y-0 active:scale-[.97] sm:min-h-[42px] sm:min-w-[78px] sm:px-4 sm:text-[13px]"
+              className="theme-toggle min-h-[34px] min-w-[56px] px-3 font-mono text-[10px] text-ink transition duration-300 hover:opacity-70 active:translate-y-0 active:scale-[.97] sm:min-h-[42px] sm:min-w-[78px] sm:px-4 sm:text-[13px]"
               style={{ scaleY: themeButtonScale, transformOrigin: 'center' }}
               type="button"
               aria-label={dark ? tr('Ativar tema claro', 'Switch to light theme') : tr('Ativar tema escuro', 'Switch to dark theme')}
