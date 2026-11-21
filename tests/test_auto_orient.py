@@ -733,12 +733,22 @@ def test_fit_does_not_swallow_typeerror_from_geometry(monkeypatch):
         det._fit(m)
 
 
-def test_hand_vote_tolerates_narrow_segmentation_gap_at_top_edge():
+@pytest.mark.parametrize("h", [480, 720, 1280])
+def test_hand_vote_tolerates_narrow_segmentation_gap_at_top_edge(h):
     from draw.auto_orient import hand_mask_orientation_vote
 
-    mask = np.zeros((1280, 720), dtype=np.uint8)
-    mask[2:300, 300:420] = 255  # segmentacao deixou 2 linhas vazias no topo
+    mask = np.zeros((h, 720), dtype=np.uint8)
+    mask[2 : h // 4, 300:420] = 255  # segmentacao deixou 2 linhas vazias no topo
     assert hand_mask_orientation_vote(mask) == "inverted"
+
+
+@pytest.mark.parametrize("h", [480, 720, 1280])
+def test_wide_lateral_hand_inside_top_slack_band_abstains(h):
+    from draw.auto_orient import hand_mask_orientation_vote
+
+    mask = np.zeros((h, 720), dtype=np.uint8)
+    mask[2:72, 0:240] = 255  # toca so a esquerda; sobrepoe a faixa de folga do topo
+    assert hand_mask_orientation_vote(mask) is None
 
 
 @pytest.mark.skipif(os.name != "posix", reason="modos POSIX")
