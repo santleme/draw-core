@@ -140,6 +140,17 @@ def test_auto_page_orientation_hysteresis_and_oblique_portrait_guard():
         assert orient_near_sq.observe(near_square_tilted, frame_shape) is None
     assert orient_near_sq.current == "retrato"
 
+    # A4 paisagem sob pitch de 18° e f = largura do frame (1280 px):
+    # deve confirmar a troca para paisagem.
+    a4_tilted_18deg = np.array(
+        [[233.5, 86.6], [1046.5, 86.6], [997.0, 600.1], [283.0, 600.1]],
+        dtype=np.float32,
+    )
+    orient_a4 = AutoPageOrientation(initial="retrato", confirm_frames=3)
+    assert orient_a4.observe(a4_tilted_18deg, frame_shape) is None
+    assert orient_a4.observe(a4_tilted_18deg, frame_shape) is None
+    assert orient_a4.observe(a4_tilted_18deg, frame_shape) == "paisagem"
+
     assert quad_aspect_ratio(wide, frame_shape) > 1.5
     assert orient.observe(square, frame_shape) is None
     assert orient.observe(wide, frame_shape) is None
@@ -270,3 +281,36 @@ def test_neural_detector_keeps_spread_edge_under_hand_occlusion():
         q_occ = det._fit(occluded)
         assert q_occ is not None
         assert q_occ[:, 0].max() >= 510.0
+
+
+def test_neural_detector_uncovers_final_strip_of_spread_under_5_percent_area():
+    """Quando o ultimo pedaco de uma pagina aparece (ex.: 10 colunas em mascara
+    384x384 sob escala 1280x720 -> 33 px de deslocamento, > 18 px de limite da
+    guarda, mas < 5% de area do caderno), a aresta desobstruida NAO pode ficar
+    cortada na memoria."""
+    from draw.perception import NeuralSheetDetector
+
+    det = NeuralSheetDetector("unused.onnx", verify=None)
+    scale_x, scale_y = 1280.0 / 384.0, 720.0 / 384.0
+
+    # Caderno aberto: duas paginas de 134 px de largura com lombada de 8 px (x=184..192).
+    # Pagina direita inicialmente exposta com 124 px (x=192..316), faltando 10 colunas.
+    mask_initial = np.zeros((384, 384), dtype=np.uint8)
+    mask_initial[60:320, 50:184] = 255
+    mask_initial[60:320, 192:316] = 255
+
+    q1 = det._fit(mask_initial, scale_x=scale_x, scale_y=scale_y)
+    assert q1 is not None
+    # Borda direita inicial em torno de 316 * scale_x (~1053 px)
+    assert q1[:, 0].max() <= 318.0 * scale_x
+
+    # Desobstrui as ultimas 10 colunas (x=316..326): +33 px em coordenadas de frame,
+    # que excede os 18 px da guarda de deslocamento, mas acrescenta apenas ~3,8% de area.
+    mask_full = mask_initial.copy()
+    mask_full[60:320, 316:326] = 255
+
+    for _ in range(3):
+        q2 = det._fit(mask_full, scale_x=scale_x, scale_y=scale_y)
+        assert q2 is not None
+        # A borda direita deve expandir para o novo limite (~326 * scale_x = ~1086 px)
+        assert q2[:, 0].max() >= 324.0 * scale_x - 5.0

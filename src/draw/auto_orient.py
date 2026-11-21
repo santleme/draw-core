@@ -122,19 +122,19 @@ def _ratio_for_focal(centered_quad, focal):
 
 
 def _single_vp_ratio_bounds(quad, frame_shape):
-    """Faixa [r_min, r_max] de razao fisica para f em [0.7*W, 2.5*W].
+    """Faixa [r_min, r_max] de razao fisica para f em [0.75*W, 1.8*W].
 
     Quando a camera inclina em torno de um unico eixo (ex.: pitch puro sobre
     a mesa), um par de arestas segue paralelo (ponto de fuga no infinito) e
     `paper.estimate_format` se abstem. Como a razao fisica w/h e monotonica
     em f^2, avaliar nos extremos da faixa tipica de distancia focal de
-    webcams (~22° a ~71° HFOV) permite decidir com seguranca apenas quando
+    webcams de mesa (~31° a ~67° HFOV) permite decidir com seguranca apenas quando
     o intervalo inteiro ultrapassa o limiar de orientacao.
     """
     height, width = frame_shape[:2]
     centered = quad - np.array([width / 2.0, height / 2.0], dtype=np.float64)
-    r_low_f = _ratio_for_focal(centered, 0.7 * width)
-    r_high_f = _ratio_for_focal(centered, 2.5 * width)
+    r_low_f = _ratio_for_focal(centered, 0.75 * width)
+    r_high_f = _ratio_for_focal(centered, 1.8 * width)
     if r_low_f is None or r_high_f is None:
         return None
     return min(r_low_f, r_high_f), max(r_low_f, r_high_f)
