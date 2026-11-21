@@ -1887,8 +1887,6 @@ def run(
                 telemetry.update(**pipeline.stats())
             telemetry.close()
         if session_report is not None:
-            if pipeline is not None:
-                session_report.update(**pipeline.stats())
             session_report.close()
         if png_writer is not None:
             png_writer.close()
