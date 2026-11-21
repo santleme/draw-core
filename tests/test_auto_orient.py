@@ -800,6 +800,27 @@ def test_hand_vote_top_entry_with_brief_side_brush_inside_contact_band_votes():
     assert hand_mask_orientation_vote(mask[:, ::-1].copy()) == "inverted"
 
 
+def test_two_edge_ambiguity_resets_pending_inverted_streak_but_empty_frame_does_not():
+    top_entry = np.zeros((200, 300), dtype=np.uint8)
+    top_entry[0:90, 110:190] = 255
+    two_edge = np.zeros((720, 1280), dtype=np.uint8)
+    two_edge[0:30, 100:220] = 255
+    two_edge[30:720, 100:146] = 255
+    assert hand_mask_orientation_vote(two_edge) is None
+    empty = np.zeros((200, 300), dtype=np.uint8)
+
+    det = AutoRotationDetector(confirm_votes=4)
+    for _ in range(3):
+        assert not det.observe_mask(top_entry)
+    assert not det.observe_mask(empty)  # mao ausente: sequencia preservada
+    assert not det.observe_mask(two_edge)  # conflito: sequencia zerada
+    assert not det.observe_mask(top_entry)
+    assert not det.flipped
+    for _ in range(2):
+        det.observe_mask(top_entry)
+    assert det.observe_mask(top_entry) and det.flipped
+
+
 @pytest.mark.parametrize("h", [480, 720, 1280])
 def test_wide_lateral_hand_inside_top_slack_band_abstains(h):
     from draw.auto_orient import hand_mask_orientation_vote

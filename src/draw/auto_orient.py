@@ -37,20 +37,25 @@ def hand_mask_orientation_vote(hand_mask):
     altura para recortes de segmentacao). Entradas apenas pelas laterais
     (esquerda/direita) devolvem None para nao virar cameras corretas.
     """
+    return _hand_orientation_evidence(hand_mask)[0]
+
+
+def _hand_orientation_evidence(hand_mask):
+    """Devolve (voto, ambiguo): ambiguo = contato real nas duas bordas sem vencedor."""
     if hand_mask is None or hand_mask.ndim < 2 or hand_mask.size == 0:
-        return None
+        return None, False
     h, w = hand_mask.shape[:2]
     binary = (hand_mask > 0).astype(np.uint8)
     min_area = max(40, int(h * w * _HAND_MIN_AREA_RATIO))
     if int(np.count_nonzero(binary)) < min_area:
-        return None
+        return None, False
 
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary)
     if num_labels <= 1:
-        return None
+        return None, False
     largest_label = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
     if int(stats[largest_label, cv2.CC_STAT_AREA]) < min_area:
-        return None
+        return None, False
 
     comp = labels == largest_label
     tol = max(3, int(round(h * _HAND_EDGE_TOL_RATIO)))
@@ -96,14 +101,15 @@ def hand_mask_orientation_vote(hand_mask):
         and top_contact >= _HAND_EDGE_MIN_PIXELS
         and top_contact >= (_HAND_BORDER_DOMINANCE * max(bot_contact, 1))
     ):
-        return "inverted"
+        return "inverted", False
     if (
         bot_ok
         and bot_contact >= _HAND_EDGE_MIN_PIXELS
         and bot_contact >= (_HAND_BORDER_DOMINANCE * max(top_contact, 1))
     ):
-        return "upright"
-    return None
+        return "upright", False
+    both = top_contact >= _HAND_EDGE_MIN_PIXELS and bot_contact >= _HAND_EDGE_MIN_PIXELS
+    return None, both
 
 
 class AutoRotationDetector:
@@ -145,7 +151,12 @@ class AutoRotationDetector:
         return False
 
     def observe_mask(self, hand_mask):
-        return self.observe_vote(hand_mask_orientation_vote(hand_mask))
+        vote, ambiguous = _hand_orientation_evidence(hand_mask)
+        if ambiguous and not self._flipped:
+            # Contato real nas duas bordas sem vencedor: evidencia conflitante
+            # interrompe a sequencia (diferente de mao ausente, que so abstem).
+            self._inverted_streak = 0
+        return self.observe_vote(vote)
 
 
 def _ratio_for_focal(centered_quad, focal):
