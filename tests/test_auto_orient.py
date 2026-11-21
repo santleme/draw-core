@@ -790,6 +790,16 @@ def test_hand_vote_top_entry_near_but_not_touching_side_still_votes():
     assert hand_mask_orientation_vote(mask) == "inverted"
 
 
+def test_hand_vote_abstains_on_resized_side_entry_with_two_blank_model_cols():
+    # Review PR #96: 2 colunas vazias no modelo 384x384 viram 7 px em 1280x720.
+    small = np.zeros((384, 384), dtype=np.uint8)
+    small[1:96, 2:56] = 255
+    mask = cv2.resize(small, (1280, 720), interpolation=cv2.INTER_NEAREST)
+    assert not mask[:, :6].any() and mask[2:4, 7:].any()
+    assert hand_mask_orientation_vote(mask) is None
+    assert hand_mask_orientation_vote(mask[::-1, ::-1].copy()) is None
+
+
 @pytest.mark.parametrize("h", [480, 720, 1280])
 def test_wide_lateral_hand_inside_top_slack_band_abstains(h):
     from draw.auto_orient import hand_mask_orientation_vote

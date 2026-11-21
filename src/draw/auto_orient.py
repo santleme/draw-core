@@ -22,6 +22,7 @@ from . import paper as paper_module
 _HAND_MIN_AREA_RATIO = 0.005
 _HAND_EDGE_TOL_RATIO = 0.02
 _HAND_EDGE_SLACK_RATIO = 0.005
+_HAND_SIDE_SLACK_RATIO = 0.008
 _HAND_EDGE_MIN_SLACK = 3
 _HAND_EDGE_MIN_PIXELS = 12
 _HAND_BORDER_DOMINANCE = 3.0
@@ -60,7 +61,7 @@ def hand_mask_orientation_vote(hand_mask):
     # (nao so a coluna 0), pois a mascara neural redimensionada deixa colunas
     # vazias na borda. Forca de contato em pixels ocupados.
     slack = max(_HAND_EDGE_MIN_SLACK, int(round(h * _HAND_EDGE_SLACK_RATIO)))
-    side_w = max(_HAND_EDGE_MIN_SLACK, int(round(w * _HAND_EDGE_SLACK_RATIO)))
+    side_w = max(_HAND_EDGE_MIN_SLACK, int(round(w * _HAND_SIDE_SLACK_RATIO)))
     side_strength = max(
         int(np.count_nonzero(comp[:, :side_w].any(axis=1))),
         int(np.count_nonzero(comp[:, w - side_w :].any(axis=1))),
