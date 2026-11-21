@@ -325,3 +325,15 @@ def test_paper_mm_valida_como_paper_grid():
     with pytest.raises(ValueError, match="formato"):
         config.paper_mm("a9")
     assert config.paper_mm("carta", "paisagem") == (279.0, 216.0)
+
+
+def test_config_importa_e_erro_claro_sem_cv2_aruco(monkeypatch):
+    """Sem cv2.aruco (ex.: opencv-python sem contrib), o import de config
+    não cai e get_dictionary() explica como instalar o pacote contrib."""
+    import importlib
+
+    monkeypatch.delattr(cv2, "aruco", raising=False)
+    reloaded = importlib.reload(config)
+    assert reloaded.ARUCO_DICTIONARY == 0
+    with pytest.raises(RuntimeError, match="opencv-contrib-python"):
+        reloaded.get_dictionary()

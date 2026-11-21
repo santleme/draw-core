@@ -17,7 +17,7 @@ virtualenv before opening the live window:
 
 ```sh
 uv sync --extra gui --extra hand
-uv pip uninstall opencv-contrib-python-headless && uv pip install --reinstall "opencv-contrib-python>=4.8,<5.1"
+uv pip uninstall opencv-python opencv-python-headless opencv-contrib-python opencv-contrib-python-headless && uv pip install --reinstall --no-cache "opencv-contrib-python>=4.8,<5.1"
 uv run --no-sync draw --check
 uv run --no-sync draw
 ```

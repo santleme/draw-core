@@ -37,7 +37,16 @@ MARKER_CENTERS = {
     3: (90, PAPER_H - 90),
 }
 
-ARUCO_DICTIONARY = cv2.aruco.DICT_4X4_50
+# Dicionario ArUco DICT_4X4_50 (constante 0 do OpenCV). Resolvido sem
+# exigir `cv2.aruco` na importacao: um ambiente em que `opencv-python`
+# comum (ou mistura de wheels) substituiu o pacote `-contrib` ainda
+# sobe o caminho padrao (sem --markers) sem quebrar no import.
+_DICT_4X4_50_FALLBACK = 0
+ARUCO_DICTIONARY = (
+    cv2.aruco.DICT_4X4_50
+    if hasattr(cv2, "aruco") and hasattr(cv2.aruco, "DICT_4X4_50")
+    else _DICT_4X4_50_FALLBACK
+)
 
 
 def paper_grid(name, orientation="retrato"):
@@ -99,4 +108,11 @@ def apply_format(name, orientation="retrato"):
 
 
 def get_dictionary():
-    return cv2.aruco.getPredefinedDictionary(ARUCO_DICTIONARY)
+    aruco = getattr(cv2, "aruco", None)
+    if aruco is None or not hasattr(aruco, "getPredefinedDictionary"):
+        raise RuntimeError(
+            "O OpenCV instalado nao tem o modulo cv2.aruco (necessario para "
+            "--markers). Instale a roda contrib: pip install "
+            "'opencv-contrib-python>=4.8,<5.1'."
+        )
+    return aruco.getPredefinedDictionary(ARUCO_DICTIONARY)
