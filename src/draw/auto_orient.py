@@ -25,6 +25,8 @@ _HAND_EDGE_SLACK_RATIO = 0.005
 _HAND_EDGE_MIN_SLACK = 3
 _HAND_EDGE_MIN_PIXELS = 12
 _HAND_BORDER_DOMINANCE = 3.0
+_HAND_SIDE_DOMINANCE_EXACT = 2.0
+_HAND_SIDE_DOMINANCE_SLACK = 5.0
 
 
 def hand_mask_orientation_vote(hand_mask):
@@ -54,29 +56,34 @@ def hand_mask_orientation_vote(hand_mask):
     tol = max(3, int(round(h * _HAND_EDGE_TOL_RATIO)))
     top_contact = int(np.count_nonzero(comp[:tol, :]))
     bot_contact = int(np.count_nonzero(comp[h - tol :, :]))
-    # Contato EXATO com as bordas (primeira/ultima linha ou coluna) e a evidencia
-    # forte; a folga curta serve so para a segmentacao que deixa 1-3 px vazios.
-    top_exact = int(np.count_nonzero(comp[0, :]))
-    bot_exact = int(np.count_nonzero(comp[h - 1, :]))
-    side_exact = max(
-        int(np.count_nonzero(comp[:, 0])), int(np.count_nonzero(comp[:, w - 1]))
+    # Evidencia lateral: linhas do componente numa faixa curta de cada lateral
+    # (nao so a coluna 0), pois a mascara neural redimensionada deixa colunas
+    # vazias na borda. Forca de contato em pixels ocupados.
+    slack = max(_HAND_EDGE_MIN_SLACK, int(round(h * _HAND_EDGE_SLACK_RATIO)))
+    side_w = max(_HAND_EDGE_MIN_SLACK, int(round(w * _HAND_EDGE_TOL_RATIO)))
+    side_strength = max(
+        int(np.count_nonzero(comp[:, :side_w].any(axis=1))),
+        int(np.count_nonzero(comp[:, w - side_w :].any(axis=1))),
     )
-    if side_exact > 0:
-        # A mao toca uma lateral de verdade: so vota se o contato exato com
-        # topo/base for ao menos tao forte quanto o lateral; entrada lateral
-        # que apenas sobrepoe a faixa de folga abstem-se.
-        if side_exact >= max(top_exact, bot_exact):
-            return None
-        if top_exact == 0:
-            top_contact = 0
-        if bot_exact == 0:
-            bot_contact = 0
-    else:
-        slack = max(_HAND_EDGE_MIN_SLACK, int(round(h * _HAND_EDGE_SLACK_RATIO)))
-        if not bool(comp[:slack, :].any()):
-            top_contact = 0
-        if not bool(comp[h - slack :, :].any()):
-            bot_contact = 0
+    if side_strength > 0:
+        # Mao tambem perto de uma lateral: o contato com topo/base so vale se
+        # dominar a evidencia lateral (mais exigente quando ha folga, sem toque
+        # exato na borda). Evita falso giro por entrada lateral e perda do voto
+        # por toque lateral breve.
+        for is_top in (True, False):
+            band = comp[:slack, :] if is_top else comp[h - slack :, :]
+            exact = bool(comp[0, :].any() if is_top else comp[h - 1, :].any())
+            strength = int(np.count_nonzero(band.any(axis=0)))
+            need = _HAND_SIDE_DOMINANCE_EXACT if exact else _HAND_SIDE_DOMINANCE_SLACK
+            if strength < need * side_strength:
+                if is_top:
+                    top_contact = 0
+                else:
+                    bot_contact = 0
+    if not bool(comp[:slack, :].any()):
+        top_contact = 0
+    if not bool(comp[h - slack :, :].any()):
+        bot_contact = 0
 
     if top_contact >= _HAND_EDGE_MIN_PIXELS and top_contact >= (
         _HAND_BORDER_DOMINANCE * max(bot_contact, 1)
