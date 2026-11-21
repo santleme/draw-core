@@ -69,17 +69,18 @@ _FIT_EDGE_BORDER_GAP_FRAC = 0.02
 _FIT_EXCURSION_DIAG_FRAC = 0.15
 
 
-def _edge_border_side(p, q, border_gap, width, height):
-    """Borda do quadro ao longo da qual a aresta p→q corre, ou None."""
+def _edge_border_sides(p, q, border_gap, width, height):
+    """Bordas do quadro ao longo das quais a aresta p→q pode correr."""
+    sides = []
     if max(p[0], q[0]) <= border_gap:
-        return "left"
+        sides.append("left")
     if max(p[1], q[1]) <= border_gap:
-        return "top"
+        sides.append("top")
     if width - min(p[0], q[0]) <= border_gap:
-        return "right"
+        sides.append("right")
     if height - min(p[1], q[1]) <= border_gap:
-        return "bottom"
-    return None
+        sides.append("bottom")
+    return sides
 
 
 def _mask_supports_cut(mask, side, p, q, scale_x, scale_y):
@@ -128,21 +129,18 @@ def fit_plausible(corners, frame_shape, mask=None, scale_x=1.0, scale_y=1.0):
         # dela. O corte vizinho so vale se o contorno da mascara nativa
         # alcanca a borda ali: uma aresta de papel comum passando perto
         # da borda nao isenta um vizinho colapsado.
-        on_border = (
-            _edge_border_side(
-                quad[short], quad[(short + 1) % 4], border_gap, width, height
-            )
-            is not None
+        on_border = _edge_border_sides(
+            quad[short], quad[(short + 1) % 4], border_gap, width, height
         )
         cut = False
-        if not on_border:
+        if not on_border and mask is not None:
             for u, v in ((short - 1, short), (short + 1, short + 2)):
                 p, q = quad[u % 4], quad[v % 4]
-                side = _edge_border_side(p, q, border_gap, width, height)
-                if (
-                    side is not None
-                    and mask is not None
-                    and _mask_supports_cut(mask, side, p, q, scale_x, scale_y)
+                # Perto de um canto a aresta pode caber em duas bordas:
+                # vale o recorte se a mascara suporta qualquer uma.
+                if any(
+                    _mask_supports_cut(mask, side, p, q, scale_x, scale_y)
+                    for side in _edge_border_sides(p, q, border_gap, width, height)
                 ):
                     cut = True
                     break

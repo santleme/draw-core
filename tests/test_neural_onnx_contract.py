@@ -292,6 +292,21 @@ def test_plausibility_guard_accepts_clip_that_truncates_short_edge_corner():
     assert fit_plausible(quad, (720, 1280), mask, 10.0, 10.0) is True
 
 
+def test_plausibility_guard_tries_all_borders_for_corner_cut():
+    # Perto do canto, o corte vizinho cabe na tolerancia de duas bordas.
+    # A mascara so suporta a segunda (coluna da direita, linha 0 vazia):
+    # checar so a primeira rejeitaria uma folha clipada valida.
+    quad = np.array(
+        [[1279.0, 10.0], [1100.0, 25.0], [640.0, 400.0], [1275.0, 4.0]],
+        dtype=np.float32,
+    )
+    mask = np.zeros((72, 128), np.uint8)
+    mask[1:60, 64:] = 255
+    assert fit_plausible(quad, (720, 1280), mask, 10.0, 10.0) is True
+    mask[:, 127] = 0  # sem suporte na borda direita, nada isenta
+    assert fit_plausible(quad, (720, 1280), mask, 10.0, 10.0) is False
+
+
 def test_plausibility_guard_refuses_paper_edge_passing_near_border():
     # Uma aresta de papel a ~12 px da borda NAO e corte de frame: a
     # mascara nativa nao alcanca a borda ali, entao a aresta vizinha
