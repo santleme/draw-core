@@ -557,7 +557,11 @@ def open_wsl_hvcam_fallback(source, *, timeout_ms=None, connect_timeout_ms=None)
             )
             return "hvcam+reverse://", hv_cap
 
-    # 3. Fallback manual: escuta hvcam+reverse:// caso o usuario suba o host a mao.
+    # 3. Fallback manual: escuta hvcam+reverse:// apenas quando o indice padrao
+    #    (0) foi pedido. Para um --source N explicito, um host manual no Windows
+    #    nao informa qual dispositivo esta servindo e poderia entregar outra camera.
+    if source != 0:
+        return None, None
     print("Aguardando hvcam-host.exe --reverse conectar no Windows (ate 35 s)...")
     hv_cap = HvcamCapture("hvcam+reverse://", **kwargs)
     if hv_cap.isOpened():
@@ -568,7 +572,11 @@ def open_wsl_hvcam_fallback(source, *, timeout_ms=None, connect_timeout_ms=None)
 
 
 def _try_other_local_cameras(source, capture_factory):
-    """Quando o indice padrao (0) falha, tenta outras webcams locais disponiveis."""
+    """Quando o indice padrao (0) falha, tenta outras webcams locais disponiveis.
+
+    So aceita um candidato depois de confirmar que ele efetivamente entregou
+    ao menos um quadro (evita travar num dispositivo que abre mas nao transmite).
+    """
     if source != 0:
         return None
     if sys.platform.startswith("linux"):
@@ -584,7 +592,9 @@ def _try_other_local_cameras(source, capture_factory):
         if cap.isOpened():
             _configure_local_capture(cap)
             cap = _supervise_local_open(idx, cap, capture_factory)
-            if cap.isOpened():
+            probe = _LAST_OPEN_PROBE
+            has_frame = probe is not None and probe.get("brilho_medio") is not None
+            if cap.isOpened() and has_frame:
                 print(f"Camera {source} indisponivel; usando camera local {idx}.")
                 return cap
         cap.release()

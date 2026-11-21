@@ -818,34 +818,41 @@ class HvcamCapture:
 
 
 def _windows_cache_dir():
-    """Pasta de cache no filesystem do Windows (%LOCALAPPDATA%\\draw).
+    """Pasta de cache no filesystem do Windows (LocalApplicationData\\draw).
 
     Windows Media Foundation bloqueia o acesso a camera com 0x80070490
     quando hvcam-host.exe e executado a partir de um caminho UNC do WSL
     (\\\\wsl.localhost\\...). Copiar/extrair o binario para o disco do
     Windows evita esse bloqueio sem exigir configuracao manual.
+
+    Usa a API de Known Folders do .NET com saida UTF-8 explicita para nao
+    ler variaveis de ambiente nem quebrar em perfis com acento (CP850/1252).
     """
     cwd = "/mnt/c" if os.path.isdir("/mnt/c") else None
+    ps_cmd = (
+        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+        "[Environment]::GetFolderPath('LocalApplicationData')"
+    )
     try:
-        raw = subprocess.check_output(
-            ["cmd.exe", "/c", "echo %LOCALAPPDATA%"],
+        raw_bytes = subprocess.check_output(
+            ["powershell.exe", "-NoProfile", "-Command", ps_cmd],
             cwd=cwd,
             stderr=subprocess.DEVNULL,
-            text=True,
-            timeout=5,
-        ).strip()
-        if not raw or raw == "%LOCALAPPDATA%":
+            timeout=10,
+        )
+        raw = raw_bytes.decode("utf-8").strip()
+        if not raw:
             return None
-        wsl_path = subprocess.check_output(
+        wsl_bytes = subprocess.check_output(
             ["wslpath", raw],
             stderr=subprocess.DEVNULL,
-            text=True,
             timeout=5,
-        ).strip()
+        )
+        wsl_path = wsl_bytes.decode("utf-8").strip()
         if not wsl_path:
             return None
         return Path(wsl_path) / "draw"
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError, UnicodeDecodeError):
         return None
 
 
@@ -1065,7 +1072,7 @@ def open_managed_reverse(
                 ],
                 cwd=run_cwd,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
             )
             _MANAGED_HOST_PROCS.add(proc)
             box[0] = proc
@@ -1083,7 +1090,19 @@ def open_managed_reverse(
         )
         if cap.isOpened():
             cap._host_proc = proc_box[0]
-            return cap, dev_idx, dev_name
+            if not try_all or _probe_hvcam_frame(cap):
+                return cap, dev_idx, dev_name
+            cap.release()
+            continue
         cap.release()
         _terminate_host_process(proc_box[0])
     return None, None, None
+
+
+def _probe_hvcam_frame(capture, attempts=3):
+    """Confirma que a fonte hvcam entrega ao menos um quadro valido."""
+    for _ in range(attempts):
+        ok, frame = capture.read()
+        if ok and frame is not None:
+            return True
+    return False

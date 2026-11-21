@@ -882,11 +882,17 @@ def test_open_managed_reverse_falls_back_to_working_device_and_cleans_up(tmp_pat
             self.url = url
             self._host_proc = None
             kw["on_listening"]()
-            device = procs[-1].cmd[-1]
-            self._opened = device == "1"
+            self._device = procs[-1].cmd[-1]
+            # Dispositivo 0 abre mas nao entrega quadros; dispositivo 1 abre e entrega.
+            self._opened = self._device in ("0", "1")
 
         def isOpened(self):
             return self._opened
+
+        def read(self):
+            if self._device == "1":
+                return True, _frame()
+            return False, None
 
         def release(self):
             self._opened = False
@@ -898,7 +904,7 @@ def test_open_managed_reverse_falls_back_to_working_device_and_cleans_up(tmp_pat
         device=0,
         try_all=True,
         host_exe=fake_exe,
-        devices=[(0, "Broken Cam"), (1, "Working Cam")],
+        devices=[(0, "Frameless Cam"), (1, "Working Cam")],
         popen=fake_popen,
         capture_cls=_FakeManagedCap,
     )
@@ -910,3 +916,74 @@ def test_open_managed_reverse_falls_back_to_working_device_and_cleans_up(tmp_pat
 
     cap.release()
     assert procs[1].terminated is True
+
+
+def test_windows_cache_dir_handles_accented_utf8_profile(monkeypatch):
+    def fake_check_output(cmd, **_kw):
+        if cmd[0] == "powershell.exe":
+            return "C:\\Users\\João\\AppData\\Local\r\n".encode("utf-8")
+        if cmd[0] == "wslpath":
+            assert cmd[1] == "C:\\Users\\João\\AppData\\Local"
+            return "/mnt/c/Users/João/AppData/Local\n".encode("utf-8")
+        raise AssertionError(cmd)
+
+    monkeypatch.setattr(hvcam_module.subprocess, "check_output", fake_check_output)
+    result = hvcam_module._windows_cache_dir()
+    assert result is not None
+    assert str(result).endswith("/Users/João/AppData/Local/draw")
+
+
+def test_try_other_local_cameras_skips_frameless_candidate(monkeypatch):
+    class _FakeLocalCap:
+        def __init__(self, idx, has_frame):
+            self.idx = idx
+            self._has_frame = has_frame
+            self._opened = True
+            self.released = False
+
+        def isOpened(self):
+            return self._opened
+
+        def set(self, *_):
+            return True
+
+        def read(self):
+            if self._has_frame:
+                return True, np.full((32, 32, 3), 100, dtype=np.uint8)
+            return False, None
+
+        def release(self):
+            self._opened = False
+            self.released = True
+
+    caps = {1: _FakeLocalCap(1, False), 2: _FakeLocalCap(2, True)}
+    monkeypatch.setattr(camera_module.sys, "platform", "linux")
+    monkeypatch.setattr(
+        camera_module, "_video_nodes", lambda: ["/dev/video1", "/dev/video2"]
+    )
+    chosen = camera_module._try_other_local_cameras(0, lambda idx: caps[idx])
+    assert chosen is caps[2]
+    assert caps[1].released is True
+
+
+def test_open_wsl_hvcam_fallback_does_not_use_manual_host_for_nonzero_source(
+    monkeypatch,
+):
+    seen = []
+
+    def fake_hvcam(source, **kw):
+        seen.append(source)
+        return HvcamCapture(
+            source,
+            camera_factory=_factory(FakeCamera([], fail=OSError("no host"))),
+        )
+
+    monkeypatch.setattr(camera_module.sys, "platform", "linux")
+    monkeypatch.setattr(camera_module, "is_wsl", lambda: True)
+    monkeypatch.setattr(camera_module.os.path, "exists", lambda _p: False)
+    monkeypatch.setattr(camera_module, "_video_nodes", lambda: [])
+    monkeypatch.setattr(camera_module, "HvcamCapture", fake_hvcam)
+
+    candidate, cap = camera_module.open_wsl_hvcam_fallback(1)
+    assert (candidate, cap) == (None, None)
+    assert seen == []
