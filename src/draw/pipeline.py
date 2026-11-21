@@ -81,8 +81,16 @@ def _paper_mean_bgr(image, coverage):
     `image[coverage].mean(axis=0)` copiava os ~700-800k pixels do
     papel (~24 ms por submit medidos na VM, issue #98) antes de
     reduzir — mesmo resultado, ~43x mais barato.
+
+    cv2.mean multiplica a soma pelo recíproco da contagem em vez de
+    dividir: uma média em inteiro exato pode sair 1 ulp abaixo e o
+    cast para uint8 truncar um nível a menos. Recupera a soma exata
+    com round(mean*count) e divide direto — bit a bit igual ao
+    astype(uint8) do caminho antigo (floor para valores >= 0).
     """
-    return np.array(cv2.mean(image, coverage.astype(np.uint8))[:3], np.uint8)
+    count = int(coverage.sum())
+    means = np.array(cv2.mean(image, coverage.astype(np.uint8))[:3])
+    return (np.round(means * count) // count).astype(np.uint8)
 
 
 def _acquisition_record(trace, frame_index, consumed, before, after, tracker_event):

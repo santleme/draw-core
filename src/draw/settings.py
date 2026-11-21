@@ -60,7 +60,11 @@ class PipelineConfig:
       draw.photometry.division_normalize na passada, antes do
       page_clean — o domínio de entrada do modelo de tinta v4
       (sombra da mão e pauta viram problema supervisionado).
-      Desligado: o v2 congelado espera RGB cru.
+      Desligado: o v2 congelado espera RGB cru. O flag precisa
+      bater nos dois lados: `PipelineConfig.ink_divnorm` desliga o
+      preenchimento/ganho na pipeline e o `ink_divnorm` da
+      PageCleanWorker normaliza — ligado num lado só entrega warp
+      sem normalização ao modelo.
     - follow_move (era DRAW_INK_FOLLOW_MOVE): com a geometria de
       tinta congelada sem mão, um deslocamento sustentado da folha
       reparte o histórico de cantos na posição nova.
