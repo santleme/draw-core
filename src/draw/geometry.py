@@ -196,9 +196,10 @@ def fit_plausible(
     if mask is not None:
         # Evidencia do corte = pixels reais da mascara dentro do contorno
         # escolhido para o ajuste: foreground destacado ou preenchimento
-        # de casco nao conta como contato com a borda. Mao e "nao
-        # observavel" — nem evidencia nem falha — mas so dentro do
-        # contorno selecionado.
+        # de casco nao conta como contato com a borda. O denominador e o
+        # trecho INTEIRO observavel — fundo visivel fora do contorno
+        # conta como "nao papel"; so pixels de mao saem como nao
+        # observaveis (e nunca podem ser evidencia).
         if contour is None:
             region = np.ones(mask.shape, bool)
         else:
@@ -206,9 +207,10 @@ def fit_plausible(
             cv2.fillPoly(region, [contour], 255)
             region = region.astype(bool)
         evidence = (mask > 0) & region
-        observable = (
-            region if hand is None or hand.shape != mask.shape else (hand == 0) & region
-        )
+        observable = np.ones(mask.shape, bool)
+        if hand is not None and hand.shape == mask.shape:
+            evidence &= hand == 0
+            observable = hand == 0
     for a, b in ((0, 2), (3, 1)):
         ratio = max(edges[a], edges[b]) / min(edges[a], edges[b])
         if ratio <= _FIT_OPPOSITE_RATIO_MAX:

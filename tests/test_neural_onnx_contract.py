@@ -353,9 +353,11 @@ def test_plausibility_guard_treats_hand_on_border_as_unobserved():
     mask[0:6, 40:100] = 0  # a mao apaga o meio do trecho na borda
     hand = np.zeros((72, 128), np.uint8)
     hand[0:6, 40:100] = 255
-    assert fit_plausible(quad, (720, 1280), mask, 10.0, 10.0, hand=hand) is True
+    contour = np.array([[[10, 0]], [[117, 0]], [[117, 29]], [[10, 29]]], dtype=np.int32)
+    kwargs = dict(mask=mask, scale_x=10.0, scale_y=10.0, contour=contour, hand=hand)
+    assert fit_plausible(quad, (720, 1280), **kwargs) is True
     mask[0:6, :] = 0  # sem papel observado na borda, mao nao basta
-    assert fit_plausible(quad, (720, 1280), mask, 10.0, 10.0, hand=hand) is False
+    assert fit_plausible(quad, (720, 1280), **kwargs) is False
 
 
 def test_plausibility_guard_refuses_paper_edge_passing_near_border():
