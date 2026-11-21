@@ -611,6 +611,8 @@ def _dil(mask, px=3):
 
 def _flag_value(raw, current):
     raw = raw.strip()
+    if raw.lower() == "none":
+        return None
     if isinstance(current, bool):
         if raw.lower() in ("1", "true"):
             return True

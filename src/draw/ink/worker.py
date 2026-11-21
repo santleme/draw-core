@@ -12,7 +12,21 @@ from .. import photometry
 from ..contracts import InkDelta, InkDisplaySnapshot, InkSnapshot
 from . import accumulator, identity, motion, registration, ruling, votes
 from . import anchor as anchor_mod
-from .config import InkConfig
+from .config import InkConfig, resolve_border_guard_yx
+
+
+def _zero_border(prob, guard_y, guard_x):
+    if guard_y <= 0 and guard_x <= 0:
+        return prob
+    out = np.array(prob, copy=True)
+    if guard_y > 0:
+        out[:guard_y, :] = 0.0
+        out[-guard_y:, :] = 0.0
+    if guard_x > 0:
+        out[:, :guard_x] = 0.0
+        out[:, -guard_x:] = 0.0
+    return out
+
 
 # Porta de ociosidade sem mao: no maximo uma sonda a cada
 # _IDLE_PROBE_SECONDS. A porta e a presenca da mao, nao um
@@ -1927,6 +1941,16 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 # None para o avaliador nao projetar GT por uma
                 # geometria que nunca chegou ao canvas.
                 self._last_registration = None
+            guard_corners = (
+                self._anchor_corners if self._anchor_corners is not None else corners
+            )
+            guard_y, guard_x = resolve_border_guard_yx(
+                prob.shape,
+                self._config.border_guard_px,
+                guard_corners,
+                min_auto_side=200,
+            )
+            prob = _zero_border(prob, guard_y, guard_x)
             result = self._accumulator.add(
                 prob,
                 visible,
