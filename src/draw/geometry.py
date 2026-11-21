@@ -267,6 +267,50 @@ def _line_normal_shift_at(point, line_ref):
     return abs(float((point - pt_ref) @ normal))
 
 
+def _rectified_translation_consistent(fallback_lines, out_i, out_mid, in_i, in_mid):
+    """Confere se dois saltos em arestas opostas sao iguais e opostos no plano
+    retificado da pagina anterior (invariante a perspectiva de camera inclinada).
+
+    Retorna True/False quando o quadrilatero anterior e valido, ou None quando
+    faltam retas de fallback para montar a homografia.
+    """
+    if any(line is None for line in fallback_lines):
+        return None
+    prev_corners = []
+    for k in range(4):
+        corner = _intersect(fallback_lines[k - 1], fallback_lines[k])
+        if corner is None:
+            return None
+        prev_corners.append(corner)
+    prev_quad = np.asarray(prev_corners, dtype=np.float32)
+    if not cv2.isContourConvex(prev_quad.reshape(4, 1, 2)):
+        return None
+    unit_sq = np.float32([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]])
+    homography = cv2.getPerspectiveTransform(prev_quad, unit_sq)
+
+    def _outward_offset(edge_idx, point):
+        p = homography @ np.array([point[0], point[1], 1.0], dtype=np.float64)
+        if abs(p[2]) < 1e-9:
+            return None
+        u, v = float(p[0] / p[2]), float(p[1] / p[2])
+        if edge_idx == 0:
+            return -v
+        if edge_idx == 1:
+            return u - 1.0
+        if edge_idx == 2:
+            return v - 1.0
+        return -u
+
+    out_off = _outward_offset(out_i, out_mid)
+    in_off = _outward_offset(in_i, in_mid)
+    if out_off is None or in_off is None:
+        return None
+    if out_off <= 0.0 or in_off >= 0.0:
+        return False
+    mag = max(abs(out_off), abs(in_off))
+    return abs(out_off + in_off) <= max(0.04, 0.35 * mag)
+
+
 def _best_inlier_seed_line(side, along, pixel_scale=1.0):
     """Escolhe semente linear robusta a entalhe de braço no meio da aresta."""
     candidates = [_fit_line(side)]
@@ -457,38 +501,45 @@ def _refit_corners(contour, quad, frame_shape, fallback_lines=None, scale=(1.0, 
                 if float((centroid - pt_prev) @ norm_out) > 0:
                     norm_out = -norm_out
                 shift_outward = float((proj_mid - pt_prev) @ norm_out)
-                is_outward = (
-                    shift_outward > 2.0 * pixel_scale
-                    and ang <= _MEMORY_STATIONARY_ANGLE_DEG * 1.5
-                )
-                jumped.append((i, shift_outward, ang, is_outward))
+                jumped.append((i, shift_outward, ang, proj_mid))
         if len(steady) >= 2 and len(jumped) == 1:
-            bad, _shift_outward, _ang, is_outward = jumped[0]
-            if not is_outward:
+            bad, shift_outward, ang, _proj_mid = jumped[0]
+            # Desobstrucao/expansao genuina move a aresta para fora do centroide
+            # (sem giro extremo); oclusao move para dentro ou gira no lugar.
+            is_outward_reveal = (
+                shift_outward > 2.0 * pixel_scale
+                and ang <= _MEMORY_SINGLE_OUTLIER_ANGLE_DEG
+            )
+            if not is_outward_reveal:
                 lines[bad] = fallback_lines[bad]
                 locked[bad] = True
                 trusted[bad] = False
         elif len(steady) >= 2 and len(jumped) == 2:
-            # Uma aresta exposta (para fora) acompanhada de um salto para dentro
-            # so caracteriza translacao rigida quando ocorre em arestas opostas
-            # com angulo estavel e deslocamento assinalado coerente. Caso
-            # contrario (ex.: braco sai de um lado e cobre o lado vizinho),
-            # a aresta exposta e aceita e a aresta invadida segue protegida.
-            outward_edges = [entry for entry in jumped if entry[3]]
-            inward_edges = [entry for entry in jumped if not entry[3]]
+            # Classifica deslocamento para fora vs para dentro pelo sinal de
+            # shift_outward (nao pela negacao do limiar angular), para que uma
+            # aresta que reaparece e desentorta nao seja confundida com oclusao.
+            outward_edges = [entry for entry in jumped if entry[1] > 2.0 * pixel_scale]
+            inward_edges = [entry for entry in jumped if entry[1] < -2.0 * pixel_scale]
             if len(outward_edges) == 1 and len(inward_edges) == 1:
-                out_i, out_shift, _out_ang, _ = outward_edges[0]
-                in_i, in_shift, in_ang, _ = inward_edges[0]
+                out_i, out_shift, out_ang, out_mid = outward_edges[0]
+                in_i, in_shift, in_ang, in_mid = inward_edges[0]
                 opposite = (out_i + 2) % 4 == in_i
-                # Em arestas opostas paralelas, translacao rigida desloca a
-                # aresta lider em +d e a traseira em -d (out_shift + in_shift ~ 0).
-                mag = max(abs(out_shift), abs(in_shift))
-                consistent_translation = (
-                    opposite
-                    and in_shift < -2.0 * pixel_scale
-                    and in_ang <= _MEMORY_STATIONARY_ANGLE_DEG * 1.5
-                    and abs(out_shift + in_shift) <= max(12.0 * pixel_scale, 0.35 * mag)
+                angles_ok = (
+                    out_ang <= _MEMORY_SINGLE_OUTLIER_ANGLE_DEG
+                    and in_ang <= _MEMORY_SINGLE_OUTLIER_ANGLE_DEG
                 )
+                consistent_translation = False
+                if opposite and angles_ok:
+                    rect_ok = _rectified_translation_consistent(
+                        fallback_lines, out_i, out_mid, in_i, in_mid
+                    )
+                    if rect_ok is not None:
+                        consistent_translation = rect_ok
+                    else:
+                        mag = max(abs(out_shift), abs(in_shift))
+                        consistent_translation = abs(out_shift + in_shift) <= max(
+                            12.0 * pixel_scale, 0.35 * mag
+                        )
                 if not consistent_translation:
                     lines[in_i] = fallback_lines[in_i]
                     locked[in_i] = True

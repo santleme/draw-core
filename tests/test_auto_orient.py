@@ -414,9 +414,9 @@ def test_neural_detector_shifting_occlusion_recovers_exposed_edge_and_guards_new
 def test_neural_detector_expansion_without_fresh_lines_clears_stale_edges(
     monkeypatch,
 ):
-    """Se _fit_quad_impl devolve cantos via _min_area_quad (lines=None) em uma
-    expansao de caderno, o detector nao pode elevar o pico nem parear a nova
-    mascara com as linhas pre-expansao no quadro seguinte."""
+    """Se _approx_quad falha e _fit_quad_impl cai no caminho real de
+    _min_area_quad (lines=None) em uma expansao de caderno, o detector nao
+    pode elevar o pico nem parear a nova mascara com as linhas pre-expansao."""
     from draw import geometry as _geometry
     from draw.perception import NeuralSheetDetector
 
@@ -432,22 +432,35 @@ def test_neural_detector_expansion_without_fresh_lines_clears_stale_edges(
     m2[80:320, 70:260] = 255
     m2[80:320, 270:500] = 255
 
+    orig_approx = _geometry._approx_quad
+    orig_min_area = _geometry._min_area_quad
     orig_fit = _geometry._fit_quad_impl
-    calls = {"n": 0}
+    approx_calls = {"n": 0}
+    min_area_calls = {"n": 0}
     seen_fallbacks = []
 
-    def _fit_no_lines_first(mask, frame, fallback, sx, sy, **kwargs):
-        calls["n"] += 1
+    def _approx_none_once(contour):
+        approx_calls["n"] += 1
+        if approx_calls["n"] == 1:
+            return None
+        return orig_approx(contour)
+
+    def _spy_min_area(contour):
+        min_area_calls["n"] += 1
+        return orig_min_area(contour)
+
+    def _spy_fit(mask, frame, fallback, sx, sy, **kwargs):
         seen_fallbacks.append(fallback)
-        corners, lines, trusted = orig_fit(mask, frame, fallback, sx, sy, **kwargs)
-        if calls["n"] == 1:
-            return corners, None, None
-        return corners, lines, trusted
+        return orig_fit(mask, frame, fallback, sx, sy, **kwargs)
 
-    monkeypatch.setattr(_geometry, "_fit_quad_impl", _fit_no_lines_first)
+    monkeypatch.setattr(_geometry, "_approx_quad", _approx_none_once)
+    monkeypatch.setattr(_geometry, "_min_area_quad", _spy_min_area)
+    monkeypatch.setattr(_geometry, "_fit_quad_impl", _spy_fit)
 
-    # Quadro da expansao sem linhas medidas: pico nao sobe e retas velhas sao limpas.
+    # Quadro da expansao exercitando o _min_area_quad real: pico nao sobe e
+    # retas pre-expansao sao limpas.
     assert det._fit(m2) is not None
+    assert min_area_calls["n"] == 1
     assert det._edge_lines is None
     assert det._memory_spread_area == initial_peak
 
@@ -455,3 +468,71 @@ def test_neural_detector_expansion_without_fresh_lines_clears_stale_edges(
     assert det._fit(m2) is not None
     assert seen_fallbacks[-1] is None
     assert det._memory_spread_area > initial_peak * 1.05
+
+
+def test_neural_detector_trapezoidal_perspective_slide_does_not_stretch():
+    """Deslize rigido de um trapezio sob camera inclinada (onde a borda proxima
+    anda mais pixels que a distante na imagem, mas deslocamentos sao iguais e
+    opostos no plano retificado) nao pode travar a borda traseira."""
+    from draw.perception import NeuralSheetDetector
+
+    det = NeuralSheetDetector("unused.onnx", verify=None)
+    scale_x, scale_y = 1280.0 / 384.0, 720.0 / 384.0
+
+    # Trapezio inicial em mascara 384x384: topo y=100 (x=97..287), base y=285 (x=57..327).
+    trap1 = np.array([[97, 100], [287, 100], [327, 285], [57, 285]], dtype=np.int32)
+    m1 = np.zeros((384, 384), dtype=np.uint8)
+    cv2.fillPoly(m1, [trap1], 255)
+    q1 = det._fit(m1, scale_x=scale_x, scale_y=scale_y)
+    assert q1 is not None
+    assert abs(q1[:, 1].max() - 285.0 * scale_y) <= 8.0
+
+    # Desliza para cima no plano da mesa mantendo as retas laterais fixas:
+    # topo sobe para y=91, base sobe para y=266.
+    def _side_x(y, x0, y0, x1, y1):
+        return int(round(x0 + (y - y0) * (x1 - x0) / (y1 - y0)))
+
+    trap2 = np.array(
+        [
+            [_side_x(91, 97, 100, 57, 285), 91],
+            [_side_x(91, 287, 100, 327, 285), 91],
+            [_side_x(266, 287, 100, 327, 285), 266],
+            [_side_x(266, 97, 100, 57, 285), 266],
+        ],
+        dtype=np.int32,
+    )
+    m2 = np.zeros((384, 384), dtype=np.uint8)
+    cv2.fillPoly(m2, [trap2], 255)
+
+    for _ in range(3):
+        q2 = det._fit(m2, scale_x=scale_x, scale_y=scale_y)
+        assert q2 is not None
+        assert abs(q2[:, 1].min() - 91.0 * scale_y) <= 8.0
+        assert abs(q2[:, 1].max() - 266.0 * scale_y) <= 10.0
+
+
+def test_neural_detector_uncovering_two_edges_with_angle_change_recovers_both():
+    """Quando duas bordas reaparecem juntas para fora e uma delas desentorta
+    > 4,5 graus (ex.: ~5,6 graus), ambas devem ser aceitas e permanecer
+    recuperadas em quadros repetidos."""
+    from draw.perception import NeuralSheetDetector
+
+    det = NeuralSheetDetector("unused.onnx", verify=None)
+
+    # Quadro 1 (384x384): topo em y=85, borda esquerda cortada em diagonal
+    # de (87, 85) ate (110, 320), direita em x=310, base em y=320.
+    poly1 = np.array([[87, 85], [310, 85], [310, 320], [110, 320]], dtype=np.int32)
+    m1 = np.zeros((384, 384), dtype=np.uint8)
+    cv2.fillPoly(m1, [poly1], 255)
+    q1 = det._fit(m1)
+    assert q1 is not None
+
+    # Quadro 2+: ambas as oclusoes saem -> topo volta para y=64 e esquerda
+    # volta reta para x=75 (ambas para fora, esquerda desentortando ~5,6 graus).
+    m2 = np.zeros((384, 384), dtype=np.uint8)
+    m2[64:320, 75:310] = 255
+    for _ in range(3):
+        q2 = det._fit(m2)
+        assert q2 is not None
+        assert abs(q2[:, 1].min() - 64.0) <= 5.0
+        assert abs(q2[:, 0].min() - 75.0) <= 5.0
