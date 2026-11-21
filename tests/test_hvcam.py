@@ -1273,3 +1273,133 @@ def test_open_wsl_hvcam_fallback_does_not_use_manual_host_for_nonzero_source(
     candidate, cap = camera_module.open_wsl_hvcam_fallback(1)
     assert (candidate, cap) == (None, None)
     assert seen == []
+
+
+def _strip_jpeg_dht(raw_jpeg):
+    out = bytearray()
+    i = 0
+    while i < len(raw_jpeg):
+        if raw_jpeg[i] == 0xFF and i + 1 < len(raw_jpeg):
+            marker = raw_jpeg[i + 1]
+            if marker == 0xDA:
+                out.extend(raw_jpeg[i:])
+                break
+            if marker in (0xD8, 0xD9, 0x01) or 0xD0 <= marker <= 0xD7:
+                out.extend(raw_jpeg[i : i + 2])
+                i += 2
+                continue
+            seg_len = int.from_bytes(raw_jpeg[i + 2 : i + 4], "big")
+            if marker != 0xC4:
+                out.extend(raw_jpeg[i : i + 2 + seg_len])
+            i += 2 + seg_len
+        else:
+            out.append(raw_jpeg[i])
+            i += 1
+    return bytes(out)
+
+
+def test_sanitize_mjpeg_trims_uvc_padding_and_injects_missing_dht():
+    img = np.full((64, 96, 3), (40, 120, 210), dtype=np.uint8)
+    ok, encoded = cv2.imencode(".jpg", img)
+    assert ok
+    raw = encoded.tobytes()
+
+    # 1. Padding UVC antes do SOI e apos o EOI (causa comum de "extraneous bytes").
+    padded = b"\x00\x00" + raw + b"\x00" * 64
+    clean_padded = hvcam_module._sanitize_mjpeg(np.frombuffer(padded, dtype=np.uint8))
+    assert clean_padded[:2].tobytes() == b"\xff\xd8"
+    assert clean_padded[-2:].tobytes() == b"\xff\xd9"
+    dec1 = cv2.imdecode(clean_padded, cv2.IMREAD_COLOR)
+    assert dec1 is not None and dec1.shape == img.shape
+
+    # 2. MJPEG sem segmento DHT (padrao UVC/RFC 2435): DHT padrao e injetado.
+    no_dht = _strip_jpeg_dht(raw) + b"\x00" * 16
+    cam = object.__new__(hvcam_module.Camera)
+    dec2 = cam.to_bgr(
+        {"width": 96, "height": 64, "format": 4, "flags": 1},
+        np.frombuffer(no_dht, dtype=np.uint8),
+    )
+    assert dec2 is not None and dec2.shape == img.shape
+    assert np.allclose(dec2.mean(axis=(0, 1)), (40, 120, 210), atol=5.0)
+
+
+def test_sanitize_mjpeg_rejects_truncated_payload_before_decode():
+    img = np.full((32, 48, 3), 180, dtype=np.uint8)
+    ok, encoded = cv2.imencode(".jpg", img)
+    assert ok
+    truncated = encoded.tobytes()[:-10]  # Remove o marcador EOI (0xFFD9).
+    with pytest.raises(ValueError, match="EOI"):
+        hvcam_module._sanitize_mjpeg(np.frombuffer(truncated, dtype=np.uint8))
+
+
+def test_open_managed_reverse_requests_720p_and_falls_back_to_nv12_on_mjpeg_errors(
+    tmp_path,
+):
+    fake_exe = tmp_path / "hvcam-host.exe"
+    fake_exe.write_bytes(b"MZ")
+    cmds = []
+
+    class _FakeProc:
+        def __init__(self, cmd):
+            self.cmd = cmd
+            self.stdout = None
+            self.stderr = None
+            self.stdin = None
+            self._rc = None
+
+        def poll(self):
+            return self._rc
+
+        def terminate(self):
+            self._rc = 0
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            self._rc = -9
+
+    def fake_popen(cmd, **_kw):
+        cmds.append(list(cmd))
+        return _FakeProc(cmd)
+
+    class _MjpegBrokenCap:
+        def __init__(self, url, **kw):
+            self.url = url
+            self._host_proc = None
+            self.mjpeg_decode_errors = 0
+            kw["on_listening"]()
+            self._cmd = cmds[-1]
+            self._opened = True
+
+        def isOpened(self):
+            return self._opened
+
+        def read(self):
+            if "--format" in self._cmd and "nv12" in self._cmd:
+                return True, _frame()
+            self.mjpeg_decode_errors += 1
+            return False, None
+
+        def release(self):
+            self._opened = False
+
+    cap, dev_idx, dev_name = hvcam_module.open_managed_reverse(
+        device=0,
+        try_all=True,
+        host_exe=fake_exe,
+        devices=[(0, "Corrupt MJPEG Cam")],
+        popen=fake_popen,
+        capture_cls=_MjpegBrokenCap,
+    )
+    assert cap is not None
+    assert (dev_idx, dev_name) == (0, "Corrupt MJPEG Cam")
+    assert len(cmds) == 2
+    # Primeira tentativa pede 1280x720@30fps.
+    assert "--width" in cmds[0] and "1280" in cmds[0]
+    assert "--height" in cmds[0] and "720" in cmds[0]
+    assert "--fps" in cmds[0] and "30" in cmds[0]
+    assert cmds[0][-2:] == ["--device", "0"]
+    # Segunda tentativa cai para NV12 (sem JPEG) no mesmo dispositivo.
+    assert "--format" in cmds[1] and "nv12" in cmds[1]
+    assert cmds[1][-2:] == ["--device", "0"]
