@@ -826,12 +826,30 @@ def test_two_edge_ambiguity_resets_pending_inverted_streak_but_empty_frame_does_
     for _ in range(3):
         assert not det.observe_mask(top_entry)
     assert not det.observe_mask(empty)  # mao ausente: sequencia preservada
+    assert det.observe_mask(top_entry)  # quarto voto efetivo confirma
+    det.reset()
+    for _ in range(3):
+        assert not det.observe_mask(top_entry)
     assert not det.observe_mask(two_edge)  # conflito: sequencia zerada
-    assert not det.observe_mask(top_entry)
     assert not det.flipped
-    for _ in range(2):
-        det.observe_mask(top_entry)
+    for _ in range(3):
+        assert not det.observe_mask(top_entry)
     assert det.observe_mask(top_entry) and det.flipped
+
+
+def test_pure_lateral_mask_preserves_pending_inverted_streak():
+    top_entry = np.zeros((720, 1280), dtype=np.uint8)
+    top_entry[0:90, 500:700] = 255
+    lateral = np.zeros((720, 1280), dtype=np.uint8)
+    lateral[:, 0:150] = 255  # alcanca as duas faixas, mas e lateral pura
+    assert hand_mask_orientation_vote(lateral) is None
+
+    det = AutoRotationDetector(confirm_votes=4)
+    for _ in range(3):
+        det.observe_mask(top_entry)
+    det.observe_mask(lateral)  # nao e conflito: preserva a sequencia
+    assert det.observe_mask(top_entry)
+    assert det.flipped
 
 
 @pytest.mark.parametrize("h", [480, 720, 1280])

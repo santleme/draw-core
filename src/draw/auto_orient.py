@@ -131,7 +131,14 @@ def _hand_orientation_evidence(hand_mask):
         and bot_contact >= (_HAND_BORDER_DOMINANCE * max(top_contact, 1))
     ):
         return "upright", False
-    both = top_contact >= _HAND_EDGE_MIN_PIXELS and bot_contact >= _HAND_EDGE_MIN_PIXELS
+    # Conflito real: as duas bordas tem contato medido e ao menos uma
+    # sobrevive a elegibilidade. Entrada lateral pura (as duas rejeitadas)
+    # preserva a sequencia como um frame sem componente.
+    both = (
+        (top_ok or bot_ok)
+        and top_contact >= _HAND_EDGE_MIN_PIXELS
+        and bot_contact >= _HAND_EDGE_MIN_PIXELS
+    )
     return None, both
 
 
