@@ -225,6 +225,45 @@ def test_sustained_rejection_releases_edge_memory(monkeypatch):
     assert q_after is not None and q_after[:, 0].max() < 500.0
 
 
+def test_absent_frames_reset_the_rejection_streak(monkeypatch):
+    """Rejeições separadas por frames sem folha não acumulam a
+    sequência: a mão cobrindo a folha inteira pula o _fit e a memória
+    sobrevive para recuperar a aresta depois."""
+    det = perception.NeuralSheetDetector("unused.onnx", verify=None)
+    empty = np.zeros((384, 384), np.uint8)  # tudo fundo
+    det._session = _Session({"logits": _logits_for_classes(empty)})
+    frame = np.zeros((480, 640, 3), np.uint8)
+
+    clean = np.zeros((480, 640), np.uint8)
+    clean[80:400, 120:520] = 255
+    assert det._fit(clean) is not None
+
+    contaminated = clean.copy()
+    cv2.fillConvexPoly(
+        contaminated,
+        np.array(
+            [[10, 20], [300, 70], [410, 300], [260, 430], [20, 230]],
+            np.int32,
+        ),
+        255,
+    )
+
+    def _reject_once():
+        with monkeypatch.context() as m:
+            m.setattr(geometry, "_approx_quad", lambda contour: None)
+            assert det._fit(contaminated) is None
+
+    for _ in range(perception._REJECTED_FIT_STREAK_LIMIT + 2):
+        _reject_once()
+        corners, verdict, _ = det(frame, return_mask=False)
+        assert corners is None and verdict is None
+
+    occluded = clean.copy()
+    occluded[:, 440:] = 0
+    q_occ = det._fit(occluded)
+    assert q_occ is not None and q_occ[:, 0].max() >= 500.0
+
+
 def test_neural_detector_rejects_exploding_quad():
     """Via detector: mancha de fundo rotulada como papel explode o quad e
     a detecção volta None em vez de entregar o frame inteiro."""

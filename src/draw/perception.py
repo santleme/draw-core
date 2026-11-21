@@ -614,6 +614,11 @@ class NeuralSheetDetector:
             corners = self._fit(
                 mask, frame, scale_x=frame_w / mask_w, scale_y=frame_h / mask_h
             )
+        else:
+            # Ausência não é rejeição: o ajuste nem rodou e a cena
+            # pode estar vazia ou com a folha sob a mão — zerar a
+            # sequência para frames assim não esvaziarem a memória.
+            self._reject_streak = 0
         verdict = "paper" if corners is not None else None
         if return_mask:
             mask = cv2.resize(mask, (frame_w, frame_h), interpolation=cv2.INTER_NEAREST)
