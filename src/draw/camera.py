@@ -585,13 +585,32 @@ def open_wsl_hvcam_fallback(source, *, timeout_ms=None, connect_timeout_ms=None)
     return None, None
 
 
-def _confirm_stream_alive(capture, attempts=3):
-    """Confirma que uma captura que falhou no probe volta a entregar quadro."""
-    for _ in range(attempts):
+_RECOVERY_WINDOW_SECONDS = 0.35
+
+
+def _confirm_stream_alive(
+    capture,
+    *,
+    window_s=_RECOVERY_WINDOW_SECONDS,
+    retry_s=_READ_RETRY_SECONDS,
+    now=time.monotonic,
+    sleep=time.sleep,
+):
+    """Confirma que uma captura que falhou no warm-up volta a entregar quadro.
+
+    Usa uma janela curta com pausa entre falhas (como o LatestFrameCapture)
+    para nao descartar uma camera que da falhas imediatas durante 20-50 ms
+    no aquecimento, mantendo teto baixo para cameras realmente travadas.
+    """
+    deadline = now() + window_s
+    while True:
         ok, frame = capture.read()
         if ok and frame is not None:
             return True
-    return False
+        remaining = deadline - now()
+        if remaining <= 0:
+            return False
+        sleep(min(retry_s, remaining))
 
 
 def _try_other_local_cameras(source, capture_factory):

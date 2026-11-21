@@ -997,6 +997,52 @@ def test_try_other_local_cameras_accepts_camera_that_recovers_after_missed_read(
     assert recovering.released is False
 
 
+def test_confirm_stream_alive_recovers_after_short_gap_and_fails_on_stall():
+    now = [0.0]
+
+    def fake_clock():
+        return now[0]
+
+    def fake_sleep(dt):
+        now[0] += dt
+
+    class _GapCap:
+        def __init__(self, resume_at):
+            self._resume_at = resume_at
+
+        def read(self):
+            if self._resume_at is not None and now[0] >= self._resume_at:
+                return True, np.full((16, 16, 3), 100, dtype=np.uint8)
+            return False, None
+
+    # Falhas imediatas por 30 ms e retomada em seguida -> aceita.
+    assert (
+        camera_module._confirm_stream_alive(
+            _GapCap(resume_at=0.03),
+            window_s=0.35,
+            retry_s=0.005,
+            now=fake_clock,
+            sleep=fake_sleep,
+        )
+        is True
+    )
+    assert now[0] < 0.1
+
+    # Camera permanentemente travada -> encerra no teto da janela.
+    now[0] = 0.0
+    assert (
+        camera_module._confirm_stream_alive(
+            _GapCap(resume_at=None),
+            window_s=0.05,
+            retry_s=0.01,
+            now=fake_clock,
+            sleep=fake_sleep,
+        )
+        is False
+    )
+    assert now[0] >= 0.05
+
+
 def test_try_other_local_cameras_skips_camera_that_stalls_permanently(monkeypatch):
     class _StalledAfterOneCap:
         def __init__(self):
