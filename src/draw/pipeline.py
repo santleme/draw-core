@@ -479,6 +479,15 @@ class Pipeline:
         self._coverage_mask = None
         self._hand_mask_det = None
         self._detections_since = since
+        want_shape = (config_module.PAPER_H, config_module.PAPER_W, 3)
+        buf = getattr(self, "canvas_buffer", None)
+        if buf is not None and buf.shape != want_shape:
+            self.canvas_buffer = np.empty(want_shape, dtype=np.uint8)
+
+    @property
+    def last_hand_mask(self):
+        """Ultima mascara semantica de mao publicada pelo detector, ou None."""
+        return self._hand_mask_det
 
     def step(self, packet):
         """Um quadro do laco sem marcadores.

@@ -112,6 +112,20 @@ class LatestFrameCapture:
         self._thread.start()
         return self
 
+    @property
+    def rotation(self):
+        with self._condition:
+            return self._rotation
+
+    def set_rotation(self, rotation):
+        """Atualiza a rotacao de entrada (0 ou 180) em tempo de execucao."""
+        if rotation not in INPUT_ROTATIONS:
+            raise ValueError(
+                f"rotacao de entrada {rotation!r} invalida; aceitas: {INPUT_ROTATIONS}"
+            )
+        with self._condition:
+            self._rotation = rotation
+
     def _pump(self):
         # Um driver que levanta (cv2 levanta em varios modos de falha)
         # matava a thread com traceback na saida de erro e um
@@ -143,7 +157,9 @@ class LatestFrameCapture:
                 # rotacao: o HUD de latencia mede da leitura em
                 # diante, e o tempo de girar o quadro e latencia.
                 captured_at = time.monotonic()
-                if self._rotation == 180:
+                with self._condition:
+                    rotation = self._rotation
+                if rotation == 180:
                     frame = cv2.rotate(frame, cv2.ROTATE_180)
                 # Identidade do emissor quando a fonte a expõe
                 # (HelperCapture): entra no pacote e alimenta a

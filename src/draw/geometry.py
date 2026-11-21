@@ -106,6 +106,55 @@ def _largest_contour(mask_bin):
     return max(contours, key=cv2.contourArea)
 
 
+def _is_two_page_spread(contour_a, contour_b):
+    """True quando dois contornos grandes formam um caderno aberto (2 paginas).
+
+    Quando a lombada ou espiral divide a mascara de papel em duas metades
+    adjacentes e alinhadas de tamanho semelhante, unir as duas evita fechar
+    o quadrilatero em apenas uma pagina do caderno.
+    """
+    area_a = float(cv2.contourArea(contour_a))
+    area_b = float(cv2.contourArea(contour_b))
+    if area_a <= 0 or area_b < 0.35 * area_a:
+        return False
+    x1, y1, w1, h1 = cv2.boundingRect(contour_a)
+    x2, y2, w2, h2 = cv2.boundingRect(contour_b)
+    if min(w1, h1, w2, h2) <= 0:
+        return False
+
+    # Paginas lado a lado (lombada vertical — caso mais comum).
+    v_overlap = min(y1 + h1, y2 + h2) - max(y1, y2)
+    h_gap = max(x1, x2) - min(x1 + w1, x2 + w2)
+    if (
+        v_overlap >= 0.55 * min(h1, h2)
+        and min(h1, h2) >= 0.65 * max(h1, h2)
+        and -0.15 * min(w1, w2) <= h_gap <= 0.25 * max(w1, w2)
+    ):
+        return True
+
+    # Paginas empilhadas (lombada horizontal / caderno girado 90°).
+    h_overlap = min(x1 + w1, x2 + w2) - max(x1, x2)
+    v_gap = max(y1, y2) - min(y1 + h1, y2 + h2)
+    return (
+        h_overlap >= 0.55 * min(w1, w2)
+        and min(w1, w2) >= 0.65 * max(w1, w2)
+        and -0.15 * min(h1, h2) <= v_gap <= 0.25 * max(h1, h2)
+    )
+
+
+def _sheet_contour(mask_bin):
+    """Contorno da folha: maior contorno ou uniao das 2 paginas do caderno."""
+    contours, _ = cv2.findContours(mask_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    if not contours:
+        return None
+    if len(contours) == 1:
+        return contours[0]
+    ranked = sorted(contours, key=cv2.contourArea, reverse=True)
+    if _is_two_page_spread(ranked[0], ranked[1]):
+        return cv2.convexHull(np.vstack([ranked[0], ranked[1]]))
+    return ranked[0]
+
+
 def _approx_quad(contour):
     perimeter = cv2.arcLength(contour, True)
     for epsilon in _paper._SHEET_EPSILON_LADDER:
@@ -416,7 +465,7 @@ def _fit_quad_impl(mask_bin, frame, fallback_lines, scale_x=1.0, scale_y=1.0):
     por aresta ou None). fallback_lines são as retas confiáveis da
     chamada anterior, oferecidas às arestas sem cobertura.
     """
-    contour = _largest_contour(mask_bin)
+    contour = _sheet_contour(mask_bin)
     if contour is None:
         return None, None, None
     frame_area = float(mask_bin.shape[0] * mask_bin.shape[1])
