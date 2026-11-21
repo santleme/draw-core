@@ -22,9 +22,12 @@ from . import paper as paper_module
 _HAND_MIN_AREA_RATIO = 0.005
 _HAND_EDGE_TOL_RATIO = 0.02
 _HAND_EDGE_SLACK_RATIO = 0.005
+_HAND_SIDE_SLACK_RATIO = 0.008
 _HAND_EDGE_MIN_SLACK = 3
 _HAND_EDGE_MIN_PIXELS = 12
 _HAND_BORDER_DOMINANCE = 3.0
+_HAND_SIDE_DOMINANCE_EXACT = 2.0
+_HAND_SIDE_DOMINANCE_SLACK = 5.0
 
 
 def hand_mask_orientation_vote(hand_mask):
@@ -35,58 +38,102 @@ def hand_mask_orientation_vote(hand_mask):
     altura para recortes de segmentacao). Entradas apenas pelas laterais
     (esquerda/direita) devolvem None para nao virar cameras corretas.
     """
+    return _hand_orientation_evidence(hand_mask)[0]
+
+
+def _hand_orientation_evidence(hand_mask):
+    """Devolve (voto, ambiguo): ambiguo = contato real nas duas bordas sem vencedor."""
     if hand_mask is None or hand_mask.ndim < 2 or hand_mask.size == 0:
-        return None
+        return None, False
     h, w = hand_mask.shape[:2]
     binary = (hand_mask > 0).astype(np.uint8)
     min_area = max(40, int(h * w * _HAND_MIN_AREA_RATIO))
     if int(np.count_nonzero(binary)) < min_area:
-        return None
+        return None, False
 
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary)
     if num_labels <= 1:
-        return None
+        return None, False
     largest_label = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
     if int(stats[largest_label, cv2.CC_STAT_AREA]) < min_area:
-        return None
+        return None, False
 
     comp = labels == largest_label
     tol = max(3, int(round(h * _HAND_EDGE_TOL_RATIO)))
     top_contact = int(np.count_nonzero(comp[:tol, :]))
     bot_contact = int(np.count_nonzero(comp[h - tol :, :]))
-    # Contato EXATO com as bordas (primeira/ultima linha ou coluna) e a evidencia
-    # forte; a folga curta serve so para a segmentacao que deixa 1-3 px vazios.
-    top_exact = int(np.count_nonzero(comp[0, :]))
-    bot_exact = int(np.count_nonzero(comp[h - 1, :]))
-    side_exact = max(
-        int(np.count_nonzero(comp[:, 0])), int(np.count_nonzero(comp[:, w - 1]))
+    slack = max(_HAND_EDGE_MIN_SLACK, int(round(h * _HAND_EDGE_SLACK_RATIO)))
+    # Evidencia lateral: linhas do componente numa faixa curta de cada lateral
+    # (nao so a coluna 0), pois a mascara neural redimensionada deixa colunas
+    # vazias na borda. A faixa lateral e um pouco mais larga que a folga de
+    # topo/base para cobrir colunas vazias do modelo redimensionado.
+    side_w = max(_HAND_EDGE_MIN_SLACK, int(round(w * _HAND_SIDE_SLACK_RATIO)))
+    left_rows = comp[:, :side_w].any(axis=1)
+    right_rows = comp[:, w - side_w :].any(axis=1)
+    side_rows = left_rows | right_rows
+    side_strength = max(
+        int(np.count_nonzero(left_rows)), int(np.count_nonzero(right_rows))
     )
-    if side_exact > 0:
-        # A mao toca uma lateral de verdade: so vota se o contato exato com
-        # topo/base for ao menos tao forte quanto o lateral; entrada lateral
-        # que apenas sobrepoe a faixa de folga abstem-se.
-        if side_exact >= max(top_exact, bot_exact):
-            return None
-        if top_exact == 0:
-            top_contact = 0
-        if bot_exact == 0:
-            bot_contact = 0
-    else:
-        slack = max(_HAND_EDGE_MIN_SLACK, int(round(h * _HAND_EDGE_SLACK_RATIO)))
-        if not bool(comp[:slack, :].any()):
-            top_contact = 0
-        if not bool(comp[h - slack :, :].any()):
-            bot_contact = 0
 
-    if top_contact >= _HAND_EDGE_MIN_PIXELS and top_contact >= (
-        _HAND_BORDER_DOMINANCE * max(bot_contact, 1)
+    def can_vote(is_top):
+        """Elegibilidade do voto; nao altera o contato medido da borda."""
+        if side_strength == 0:
+            return True
+        rows = slice(0, slack) if is_top else slice(h - slack, h)
+        exact = bool(comp[0 if is_top else h - 1, :].any())
+        if not exact:
+            # Folga sem toque exato e a evidencia de topo/base colada na
+            # lateral tocada: o mesmo braco faz os dois contatos — e
+            # entrada lateral, nao entrada pelo topo/base. Uma escova
+            # lateral separada do braco segue para a dominancia.
+            edge_cols = np.flatnonzero(comp[rows].any(axis=0))
+            margin = side_w + slack
+            if edge_cols.size and (
+                (bool(left_rows.any()) and edge_cols[0] <= margin)
+                or (bool(right_rows.any()) and edge_cols[-1] >= w - 1 - margin)
+            ):
+                return False
+        strength = int(np.count_nonzero(comp[rows, :].any(axis=0)))
+        if exact:
+            # Toque exato estreito nao libera o limiar: a linha externa
+            # domina por 2x ou a faixa de folga inteira por 5x.
+            outer = int(np.count_nonzero(comp[0 if is_top else h - 1, :]))
+            return (
+                outer >= _HAND_SIDE_DOMINANCE_EXACT * side_strength
+                or strength >= _HAND_SIDE_DOMINANCE_SLACK * side_strength
+            )
+        return strength >= _HAND_SIDE_DOMINANCE_SLACK * side_strength
+
+    top_ok = can_vote(True)
+    bot_ok = can_vote(False)
+    if not bool(comp[:slack, :].any()):
+        top_contact = 0
+    if not bool(comp[h - slack :, :].any()):
+        bot_contact = 0
+
+    if (
+        top_ok
+        and top_contact >= _HAND_EDGE_MIN_PIXELS
+        and top_contact >= (_HAND_BORDER_DOMINANCE * max(bot_contact, 1))
     ):
-        return "inverted"
-    if bot_contact >= _HAND_EDGE_MIN_PIXELS and bot_contact >= (
-        _HAND_BORDER_DOMINANCE * max(top_contact, 1)
+        return "inverted", False
+    if (
+        bot_ok
+        and bot_contact >= _HAND_EDGE_MIN_PIXELS
+        and bot_contact >= (_HAND_BORDER_DOMINANCE * max(top_contact, 1))
     ):
-        return "upright"
-    return None
+        return "upright", False
+    # Conflito real: contato medido nas duas bordas — a menos que a mesma
+    # evidencia lateral atravesse as duas faixas de borda (entrada lateral
+    # pura, que preserva a sequencia como um frame sem componente). Uma
+    # escova lateral no meio do quadro nao isenta o conflito.
+    side_at_both_bands = bool(side_rows[:tol].any() and side_rows[h - tol :].any())
+    both = (
+        top_contact >= _HAND_EDGE_MIN_PIXELS
+        and bot_contact >= _HAND_EDGE_MIN_PIXELS
+        and not side_at_both_bands
+    )
+    return None, both
 
 
 class AutoRotationDetector:
@@ -128,7 +175,12 @@ class AutoRotationDetector:
         return False
 
     def observe_mask(self, hand_mask):
-        return self.observe_vote(hand_mask_orientation_vote(hand_mask))
+        vote, ambiguous = _hand_orientation_evidence(hand_mask)
+        if ambiguous and not self._flipped:
+            # Contato real nas duas bordas sem vencedor: evidencia conflitante
+            # interrompe a sequencia (diferente de mao ausente, que so abstem).
+            self._inverted_streak = 0
+        return self.observe_vote(vote)
 
 
 def _ratio_for_focal(centered_quad, focal):

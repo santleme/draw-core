@@ -1,6 +1,7 @@
 """Testes de orientacao automatica (180°, retrato/paisagem) e caderno de 2 paginas."""
 
 import os
+from threading import Event
 
 import cv2
 import numpy as np
@@ -200,9 +201,26 @@ def test_latest_frame_capture_set_rotation_guarantees_next_packet_flipped():
         src.stop()
 
 
-def test_ink_stream_publisher_updates_paper_mm_on_orientation_change(tmp_path):
-    import time
+def test_ink_stream_publisher_updates_paper_mm_on_orientation_change(
+    tmp_path, monkeypatch
+):
+    first_write = Event()
+    open_record = InkStreamPublisher._open_record
 
+    def open_record_signaling_write(path):
+        sink = open_record(path)
+        write = sink.write
+
+        def write_and_signal(data):
+            write(data)
+            first_write.set()
+
+        sink.write = write_and_signal
+        return sink
+
+    monkeypatch.setattr(
+        InkStreamPublisher, "_open_record", staticmethod(open_record_signaling_write)
+    )
     rec = tmp_path / "orient.dral"
     pub = InkStreamPublisher(
         port=None,
@@ -213,10 +231,8 @@ def test_ink_stream_publisher_updates_paper_mm_on_orientation_change(tmp_path):
         portrait_mask = np.zeros((120, 85), dtype=np.uint8)
         portrait_mask[10:20, 10:20] = 255
         pub.publish(contracts.InkPublication(1, 1, portrait_mask))
-        # Aguarda o registro retrato ser gravado antes de publicar a proxima geracao.
-        deadline = time.monotonic() + 2.0
-        while rec.stat().st_size == 0 and time.monotonic() < deadline:
-            time.sleep(0.01)
+        # Aguarda o primeiro write antes que a proxima publicacao possa substitui-lo.
+        assert first_write.wait(timeout=2)
 
         # Simula transicao para paisagem antes da nova geracao.
         pub.set_paper_mm(config.paper_mm("a4", "paisagem"))
@@ -718,6 +734,51 @@ def test_notebook_with_narrow_gutter_is_still_a_spread():
     assert _is_two_page_spread(a, b) is True
 
 
+def test_wide_notebook_gutter_requires_explicit_spread_mode():
+    from draw.geometry import _is_two_page_spread
+
+    a = _contour_of(50, 50, 300, 350)
+    b = _contour_of(340, 50, 590, 350)
+    assert _is_two_page_spread(a, b) is False
+    assert _is_two_page_spread(a, b, mode="always") is True
+    assert _is_two_page_spread(a, b, mode="never") is False
+
+
+def test_spread_mode_rejects_unknown_values():
+    from draw.geometry import _is_two_page_spread
+
+    a = _contour_of(50, 50, 300, 350)
+    b = _contour_of(310, 50, 560, 350)
+    with pytest.raises(ValueError, match="spread_mode"):
+        _is_two_page_spread(a, b, mode="sometimes")
+
+
+def test_pipeline_config_exposes_validated_spread_mode():
+    from draw.settings import PipelineConfig
+
+    assert PipelineConfig().spread_mode == "auto"
+    assert PipelineConfig(spread_mode="always").spread_mode == "always"
+    assert PipelineConfig(spread_mode="never").spread_mode == "never"
+    with pytest.raises(ValueError, match="spread_mode"):
+        PipelineConfig(spread_mode="sometimes")
+
+
+def test_neural_detector_honors_spread_mode_never():
+    from draw.perception import NeuralSheetDetector
+
+    mask = np.zeros((400, 800), dtype=np.uint8)
+    mask[50:350, 50:300] = 255
+    mask[50:350, 310:560] = 255
+
+    automatic = NeuralSheetDetector("unused.onnx", verify=None)
+    automatic._fit(mask)
+    never = NeuralSheetDetector("unused.onnx", verify=None, spread_mode="never")
+    never._fit(mask)
+
+    assert automatic._memory_is_spread is True
+    assert never._memory_is_spread is False
+
+
 def test_fit_does_not_swallow_typeerror_from_geometry(monkeypatch):
     from draw import geometry as geometry_module
     from draw.perception import NeuralSheetDetector
@@ -740,6 +801,206 @@ def test_hand_vote_tolerates_narrow_segmentation_gap_at_top_edge(h):
     mask = np.zeros((h, 720), dtype=np.uint8)
     mask[2 : h // 4, 300:420] = 255  # segmentacao deixou 2 linhas vazias no topo
     assert hand_mask_orientation_vote(mask) == "inverted"
+
+
+def test_hand_vote_abstains_on_resized_side_entry_with_gaps_on_both_edges():
+    # Issue #89: mascara 384x384 (linhas 1-95, colunas 1-55) em retrato 720x1280.
+    small = np.zeros((384, 384), dtype=np.uint8)
+    small[1:96, 1:56] = 255
+    mask = cv2.resize(small, (720, 1280), interpolation=cv2.INTER_NEAREST)
+    assert not mask[:, 0].any() and not mask[0, :].any()
+    assert hand_mask_orientation_vote(mask) is None
+    assert hand_mask_orientation_vote(mask[::-1, ::-1].copy()) is None
+
+
+def test_hand_vote_top_entry_with_brief_side_touch_still_votes():
+    # Issue #90: 2 linhas de folga no topo, toque lateral de 19 linhas abaixo.
+    mask = np.zeros((720, 1280), dtype=np.uint8)
+    mask[2:90, 500:780] = 255
+    mask[60:79, 0:780] = 255
+    assert hand_mask_orientation_vote(mask) == "inverted"
+    assert hand_mask_orientation_vote(mask[::-1].copy()) == "upright"
+
+
+def _flips(mask):
+    return [mask, mask[::-1].copy(), mask[:, ::-1].copy(), mask[::-1, ::-1].copy()]
+
+
+def test_hand_vote_abstains_on_wide_side_arm_near_top_without_top_contact():
+    mask = np.zeros((720, 1280), dtype=np.uint8)
+    mask[2:62, 0:400] = 255  # so a lateral; 400 colunas na faixa de folga
+    for m in (mask, mask[:, ::-1].copy()):
+        assert hand_mask_orientation_vote(m) is None
+        assert hand_mask_orientation_vote(m[::-1].copy()) is None
+
+
+def test_hand_vote_two_edge_arm_keeps_real_opposite_contact():
+    mask = np.zeros((720, 1280), dtype=np.uint8)
+    mask[0:30, 100:220] = 255  # topo: 120 colunas
+    mask[30:720, 100:146] = 255  # base: 46 colunas
+    mask[300:350, 0:146] = 255  # lateral: 50 linhas
+    for m in _flips(mask):
+        assert hand_mask_orientation_vote(m) is None
+
+
+def test_hand_vote_top_entry_with_visible_side_gap_still_votes():
+    mask = np.zeros((720, 1280), dtype=np.uint8)
+    mask[0:225, 20:170] = 255  # 20 px da lateral: nao e contato lateral
+    assert hand_mask_orientation_vote(mask) == "inverted"
+    assert hand_mask_orientation_vote(mask[::-1].copy()) == "upright"
+
+
+def test_hand_vote_top_entry_with_brief_side_brush_inside_contact_band_votes():
+    small = np.zeros((384, 384), dtype=np.uint8)
+    small[1:80, 8:95] = 255  # entrada pelo topo com folga de 1 linha
+    small[5:8, 1:9] = 255  # toque lateral breve ligado ao braco
+    mask = cv2.resize(small, (1280, 720), interpolation=cv2.INTER_NEAREST)
+    assert not mask[0, :].any() and mask[:14, :6].any() and not mask[:4, :6].any()
+    assert hand_mask_orientation_vote(mask) == "inverted"
+    assert hand_mask_orientation_vote(mask[::-1].copy()) == "upright"
+    assert hand_mask_orientation_vote(mask[:, ::-1].copy()) == "inverted"
+
+
+def test_hand_vote_abstains_on_diagonal_side_entry_below_top_band():
+    # Regressao: braco entra pela esquerda logo abaixo da faixa de contato
+    # (18 linhas a partir da linha 12) e sobe em diagonal ate a linha 2,
+    # abrindo ~233 colunas nas linhas de folga. O contato lateral continuo
+    # precisa vetar o voto mesmo sem toque exato na borda (rev. PR #97).
+    mask = np.zeros((720, 1280), dtype=np.uint8)
+    mask[12:30, 0:8] = 255  # contato lateral real
+    mask[2:30, 6:240] = 255  # contorno sobe por dentro da imagem
+    mask[2:80, 100:240] = 255
+    for m in _flips(mask):
+        assert hand_mask_orientation_vote(m) is None
+
+
+def test_short_side_entry_reaching_top_slack_abstains_through_observe_mask():
+    # Regressao: entrada lateral curta alcanca as linhas de folga do topo
+    # (~12 linhas de contato, ~146 colunas na faixa). O braco colado na
+    # lateral e entrada lateral, nao "topo com toque breve" (rev. PR #97).
+    small = np.zeros((384, 384), dtype=np.uint8)
+    small[1:7, 1:46] = 255  # contato lateral curto alcancando a folga do topo
+    small[7:60, 10:46] = 255  # massa interior: passa de min_area sem mudar o perfil
+    mask = cv2.resize(small, (1280, 720), interpolation=cv2.INTER_NEAREST)
+    assert hand_mask_orientation_vote(mask) is None
+
+    det = AutoRotationDetector(confirm_votes=4)
+    for _ in range(4):
+        assert not det.observe_mask(mask)
+    assert not det.flipped
+
+
+def test_hand_vote_top_entry_with_longer_side_brush_below_slack_votes():
+    # Regressao: escova lateral de ~19 linhas dentro da faixa de contato,
+    # separada do braco que entra pelo topo (longe da lateral): nao e
+    # entrada lateral e a dominancia decide (rev. PR #97).
+    mask = np.zeros((720, 1280), dtype=np.uint8)
+    mask[2:90, 300:590] = 255  # topo: 290 colunas com folga de 2 linhas
+    mask[10:29, 0:16] = 255  # escova lateral, linhas 10-28
+    mask[10:15, 16:300] = 255  # ligacao da escova ao braco
+    assert hand_mask_orientation_vote(mask) == "inverted"
+    assert hand_mask_orientation_vote(mask[:, ::-1].copy()) == "inverted"
+
+
+def test_mid_frame_side_brush_two_edge_conflict_resets_streak():
+    # Regressao: escova lateral no meio do quadro nao isenta o conflito
+    # real das duas bordas — a sequencia de votos zera (rev. PR #97).
+    top_entry = np.zeros((720, 1280), dtype=np.uint8)
+    top_entry[0:90, 500:700] = 255
+    conflict = np.zeros((720, 1280), dtype=np.uint8)
+    conflict[0:30, 100:220] = 255  # topo real: 120 colunas
+    conflict[30:720, 100:146] = 255  # base real: 46 colunas
+    conflict[300:365, 0:146] = 255  # escova lateral: 65 linhas no meio
+    assert hand_mask_orientation_vote(conflict) is None
+
+    det = AutoRotationDetector(confirm_votes=4)
+    for _ in range(3):
+        det.observe_mask(top_entry)
+    det.observe_mask(conflict)  # conflito zera a sequencia
+    assert not det.flipped
+    for _ in range(3):
+        assert not det.observe_mask(top_entry)
+    assert det.observe_mask(top_entry) and det.flipped
+
+
+def test_two_edge_ambiguity_resets_pending_inverted_streak_but_empty_frame_does_not():
+    top_entry = np.zeros((200, 300), dtype=np.uint8)
+    top_entry[0:90, 110:190] = 255
+    two_edge = np.zeros((720, 1280), dtype=np.uint8)
+    two_edge[0:30, 100:220] = 255
+    two_edge[30:720, 100:146] = 255
+    assert hand_mask_orientation_vote(two_edge) is None
+    empty = np.zeros((200, 300), dtype=np.uint8)
+
+    det = AutoRotationDetector(confirm_votes=4)
+    for _ in range(3):
+        assert not det.observe_mask(top_entry)
+    assert not det.observe_mask(empty)  # mao ausente: sequencia preservada
+    assert det.observe_mask(top_entry)  # quarto voto efetivo confirma
+    det.reset()
+    for _ in range(3):
+        assert not det.observe_mask(top_entry)
+    assert not det.observe_mask(two_edge)  # conflito: sequencia zerada
+    assert not det.flipped
+    for _ in range(3):
+        assert not det.observe_mask(top_entry)
+    assert det.observe_mask(top_entry) and det.flipped
+
+
+def test_pure_lateral_mask_preserves_pending_inverted_streak():
+    top_entry = np.zeros((720, 1280), dtype=np.uint8)
+    top_entry[0:90, 500:700] = 255
+    lateral = np.zeros((720, 1280), dtype=np.uint8)
+    lateral[:, 0:150] = 255  # alcanca as duas faixas, mas e lateral pura
+    assert hand_mask_orientation_vote(lateral) is None
+
+    det = AutoRotationDetector(confirm_votes=4)
+    for _ in range(3):
+        det.observe_mask(top_entry)
+    det.observe_mask(lateral)  # nao e conflito: preserva a sequencia
+    assert det.observe_mask(top_entry)
+    assert det.flipped
+
+
+def test_hand_vote_abstains_on_dominant_side_entry_near_top():
+    # Issue #90: entrada lateral dominante perto do topo (com e sem toque exato).
+    mask_exact = np.zeros((720, 1280), dtype=np.uint8)
+    mask_exact[0:180, 0:220] = 255
+    assert hand_mask_orientation_vote(mask_exact) is None
+
+    mask_slack = np.zeros((720, 1280), dtype=np.uint8)
+    mask_slack[2:180, 0:220] = 255
+    assert hand_mask_orientation_vote(mask_slack) is None
+
+
+def test_hand_vote_abstains_on_side_entry_with_narrow_corner_touch():
+    # Review PR #96: toque estreito na linha 0 nao pode liberar limiar 2x para a banda.
+    small = np.zeros((384, 384), dtype=np.uint8)
+    small[0:1, 0:3] = 255
+    small[1:32, 0:66] = 255
+    mask = cv2.resize(small, (1280, 720), interpolation=cv2.INTER_NEAREST)
+    assert hand_mask_orientation_vote(mask) is None
+    assert hand_mask_orientation_vote(mask[::-1].copy()) is None
+
+
+def test_hand_vote_top_entry_near_but_not_touching_side_still_votes():
+    # Review PR #96: braco a 20 px da lateral nao conta como evidencia lateral.
+    mask = np.zeros((720, 1280), dtype=np.uint8)
+    mask[0:180, 20:140] = 255
+    assert hand_mask_orientation_vote(mask) == "inverted"
+
+
+def test_hand_vote_abstains_on_resized_side_entry_with_two_blank_model_cols():
+    # Review PR #96: 2 colunas vazias no modelo 384x384 viram 7 px em 1280x720.
+    small = np.zeros((384, 384), dtype=np.uint8)
+    small[1:96, 2:56] = 255
+    mask = cv2.resize(small, (1280, 720), interpolation=cv2.INTER_NEAREST)
+    assert not mask[:, :6].any() and mask[2:4, 7:].any()
+    assert hand_mask_orientation_vote(mask) is None
+    mirrored = cv2.resize(
+        small[::-1, ::-1].copy(), (1280, 720), interpolation=cv2.INTER_NEAREST
+    )
+    assert hand_mask_orientation_vote(mirrored) is None
 
 
 @pytest.mark.parametrize("h", [480, 720, 1280])

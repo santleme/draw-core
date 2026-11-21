@@ -92,6 +92,48 @@ def test_helper_capture_reads_drawcap(tmp_path):
 
     ok, frame = capture.read()
     assert not ok and frame is None  # fim do arquivo: fonte parada
+    assert capture.last_error is None  # EOF limpo não é falha
+    capture.release()
+
+
+def test_helper_capture_drawcap_truncado_expoe_last_error(tmp_path):
+    """Registro cortado no payload: fim por erro, não EOF silencioso.
+
+    O read() devolve o mesmo (False, None) do fim de arquivo — o
+    last_error é o que separa a captura truncada da completa (a
+    auditoria de cena marca o resumo com ele).
+    """
+    from draw.protocol import HEADER_SIZE, ProtocolError
+
+    payload = _jpeg()
+    path = tmp_path / "trunc.drawcap"
+    path.write_bytes(
+        pack_record(0, 0, payload) + pack_record(1, 33_333, payload)[: HEADER_SIZE + 10]
+    )
+    capture = HelperCapture(str(path), pace=False)
+    assert capture.isOpened()
+
+    ok, frame = capture.read()
+    assert ok and frame is not None
+    ok, frame = capture.read()
+    assert not ok and frame is None
+    assert isinstance(capture.last_error, ProtocolError)
+    assert "truncado" in str(capture.last_error)
+    capture.release()
+
+
+def test_helper_capture_payload_sem_decode_expoe_last_error(tmp_path):
+    """Payload que o jpeg não decodifica: também é fim por erro."""
+    from draw.protocol import ProtocolError
+
+    path = tmp_path / "ruim.drawcap"
+    path.write_bytes(pack_record(0, 0, b"nao-e-jpeg"))
+    capture = HelperCapture(str(path), pace=False)
+    assert capture.isOpened()
+
+    ok, frame = capture.read()
+    assert not ok and frame is None
+    assert isinstance(capture.last_error, ProtocolError)
     capture.release()
 
 
