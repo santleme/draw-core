@@ -10,7 +10,9 @@ standalone e a superfície antiga continua idêntica.
 import socket
 import subprocess
 import sys
+import sysconfig
 import threading
+from pathlib import Path
 
 import numpy as np
 
@@ -113,6 +115,86 @@ def test_pacote_nao_arrasta_runtime_pesado():
         "assert 'draw' not in sys.modules\n"
     )
     subprocess.run([sys.executable, "-c", code], check=True)
+
+
+def test_scripts_de_lab_resolvem_dral_sem_instalacao_editavel(tmp_path):
+    repo = Path(__file__).resolve().parents[1]
+    scripts = {
+        "diag_live.py": [
+            "--source",
+            "not-a-camera-source",
+            "--out",
+            "{out}",
+            "--frames",
+            "1",
+            "--warmup",
+            "0",
+            "--spacing",
+            "0",
+        ],
+        "desk_capture.py": [
+            "--source",
+            "not-a-camera-source",
+            "--out",
+            "{out}",
+            "--max-frames",
+            "1",
+        ],
+        "seg_scene_audit.py": [
+            "--source",
+            "not-a-camera-source",
+            "--model",
+            "unused.onnx",
+            "--out",
+            "{out}",
+            "--allow-unverified",
+        ],
+    }
+    child = """
+import runpy, sys, types
+from pathlib import Path
+site_packages, script, output, *args = sys.argv[1:]
+sys.path.insert(0, site_packages)  # third-party deps; -S skips editable .pth files
+if script.endswith(('diag_live.py', 'seg_scene_audit.py')):
+    perception = types.ModuleType('draw.perception')
+    class NeuralSheetDetector:
+        def __init__(self, *args, **kwargs): pass
+        def load(self): pass
+    perception.NeuralSheetDetector = NeuralSheetDetector
+    sys.modules['draw.perception'] = perception
+if script.endswith('diag_live.py'):
+    page_clean = types.ModuleType('draw.page_clean')
+    class PageCleanInk:
+        def __init__(self, *args, threshold=0.5, **kwargs): self.threshold = threshold
+        def load(self): pass
+    page_clean.PageCleanInk = PageCleanInk
+    sys.modules['draw.page_clean'] = page_clean
+sys.argv = [script, *(arg.replace('{out}', output) for arg in args)]
+try:
+    runpy.run_path(script, run_name='__main__')
+except (SystemExit, ValueError, RuntimeError):
+    pass
+assert 'draw.camera' in sys.modules
+assert 'draw_dral.wire' in sys.modules
+assert Path(sys.modules['draw_dral'].__file__).resolve().is_relative_to(
+    Path(script).resolve().parents[1] / 'packages' / 'draw-dral' / 'src'
+)
+"""
+    for name, args in scripts.items():
+        output = tmp_path / name.removesuffix(".py")
+        command = [
+            sys.executable,
+            "-S",
+            "-c",
+            child,
+            sysconfig.get_path("purelib"),
+            str(repo / "lab" / name),
+            str(output),
+            *args,
+        ]
+        subprocess.run(
+            command, cwd=tmp_path, check=True, capture_output=True, text=True
+        )
 
 
 def test_init_reexporta_superficie():

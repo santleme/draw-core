@@ -29,6 +29,7 @@ import cv2
 import numpy as np
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_REPO_ROOT / "packages" / "draw-dral" / "src"))
 sys.path.insert(0, str(_REPO_ROOT / "src"))
 
 from draw import config  # noqa: E402

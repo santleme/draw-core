@@ -37,9 +37,11 @@ Enquanto `draw-dral` nao esta publicado num indice, quem instala
 `draw-core` por Git precisa deste pino explicito: `[tool.uv.sources]`
 nao acompanha a distribuicao.
 
-Duas ressalvas de consumo: (1) o pino de SHA fixa a fonte, mas pip pode
-manter uma copia ja instalada da mesma versao — atualizar pede
-`--force-reinstall` ou ambiente novo; (2) o drawlink so deixa de puxar
-as dependencias pesadas do draw-core quando remover seus demais
+Duas ressalvas de consumo: (1) para atualizar `draw-dral` sozinho, use
+`pip install --force-reinstall` com este pino ou um ambiente novo; para
+atualizar `draw-core` junto, reinstale os dois pinos na mesma invocacao,
+pois reinstalar so o core pode fazer pip procurar o `draw-dral` nao
+publicado num indice; (2) o drawlink so deixa de puxar as dependencias
+pesadas do draw-core quando remover seus demais
 imports `draw.*` (`draw.config`, `draw.exporters`) — repointar so o fio
 nao basta.

@@ -66,8 +66,9 @@ versioned together with `draw-core` (same version, same commit); an
 install straight from Git therefore pins both at the same SHA:
 
 ```sh
-pip install "draw-dral @ git+https://github.com/santleme/draw-core@<SHA>#subdirectory=packages/draw-dral"
-pip install "draw-core @ git+https://github.com/santleme/draw-core@<SHA>"
+pip install \
+  "draw-dral @ git+https://github.com/santleme/draw-core@<SHA>#subdirectory=packages/draw-dral" \
+  "draw-core @ git+https://github.com/santleme/draw-core@<SHA>"
 ```
 
 If `draw-dral` is later published to an index, plain `draw-core` resolves
@@ -76,10 +77,12 @@ normally and these extra pins become unnecessary.
 Two notes for consumers that pin to a commit. First, a same-version pin
 (like `0.1.0` today) does not by itself upgrade an environment that
 already has the dist installed — pip may keep the existing copy. Update
-flows should reinstall explicitly (`pip install --force-reinstall` or a
-fresh venv). Second, drawlink only stops pulling `draw-core`'s heavy
-deps when it drops its remaining `draw.*` imports (`draw.config`,
-`draw.exporters`) — repointing the wire imports alone is not enough.
+flows should reinstall both Git pins in one `pip install --force-reinstall`
+command or use a fresh venv; reinstalling only `draw-core` can make pip look
+for the unpublished `draw-dral` on an index. Second, drawlink only stops
+pulling `draw-core`'s heavy deps when it drops its remaining `draw.*` imports
+(`draw.config`, `draw.exporters`) — repointing the wire imports alone is not
+enough.
 
 For a quick local check, run the module's tests directly, then use Testmon for
 changes that can affect other modules.
