@@ -1477,6 +1477,69 @@ def test_page_model_adapts_to_sustained_dimming_and_captures_new_stroke(monkeypa
         worker.stop()
 
 
+def test_page_model_survives_global_chroma_shift(monkeypatch):
+    """Review do #162: deslocamento global de cor congelava o modelo.
+
+    Uma lampada quente reprova a razao B/R na folha inteira de uma
+    vez; a porta de croma fechava `exposed` em tudo, `observe` parava
+    de observar e as referencias de croma nunca adaptavam — a folha
+    ficava "oculta" para sempre e traco novo nao confirmava. A porta
+    agora so se aplica quando a reprovacao e local; a global segue
+    pela luminancia ate os refs de croma convergirem."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    worker = _worker(InkConfig(page_model=True))
+    try:
+        generation = worker.new_generation()
+        page = np.full((H, W), PAPER, dtype=np.float32)
+        for _ in range(7):
+            _drive(worker, generation, page)
+        pm = worker._page_model
+        assert pm.seeded_fraction == pytest.approx(1.0)
+
+        def drive(img):
+            before = worker.stats()["passes_total"]
+            worker.submit(WarpedPage(img, generation, Q0))
+            deadline = time.monotonic() + 5.0
+            while worker.stats()["passes_total"] <= before:
+                if time.monotonic() > deadline:
+                    raise AssertionError("a passada nao executou")
+                time.sleep(0.001)
+
+        # Lampada quente: azul cai para metade (B/R de 1,0 para ~0,5)
+        # com a luminancia quase intacta (gray ~209, ainda papel).
+        warm = np.stack([(page * 0.5), page, page], axis=-1).astype(np.uint8)
+        # Antes da correcao, exposed devolvia tudo-False aqui.
+        exp = pm.exposed(page, bgr=warm)
+        assert np.count_nonzero(exp[40:-40, 40:-40]) > 0.9 * (H - 80) * (W - 80)
+
+        # Com a folha exposta, observe adapta os refs de croma; depois
+        # de convergir a razao volta a valer — um objeto local fora da
+        # nova razao (B/R ~1,0 contra referencia ~0,5) segue mascarado.
+        for _ in range(40):
+            drive(warm)
+        exp = pm.exposed(page, bgr=warm)
+        assert np.all(exp[40:-40, 40:-40])
+        skin = warm.copy().astype(np.float32)
+        skin[90:150, 60:160] = page[90:150, 60:160][..., None] * 0.8
+        exp = pm.exposed(page, bgr=skin.astype(np.uint8))
+        assert not np.any(exp[100:140, 70:150])
+
+        # E o caminho inteiro segue vivo: traco novo confirma sob a
+        # luz quente que congelava a geracao antes da correcao. Tinta
+        # real tambem muda de cor com a lampada — B/R ~0,5 como o resto.
+        stroke = warm.copy().astype(np.float32)
+        stroke[60:66, 80:160, 0] = 20.0
+        stroke[60:66, 80:160, 1:] = 40.0
+        for _ in range(8):
+            drive(stroke.astype(np.uint8))
+        confirmed = _confirmed(worker, generation)
+        # Sob o congelamento o contador ficava em zero; as bordas do
+        # retangulo confirmam mais devagar, entao metade ja discrimina.
+        assert np.count_nonzero(confirmed[60:66, 80:160]) > 0.5 * 6 * 80
+    finally:
+        worker.stop()
+
+
 def test_page_model_hand_exit_holds_until_uncovered_stroke_confirms_before_rest(
     monkeypatch,
 ):

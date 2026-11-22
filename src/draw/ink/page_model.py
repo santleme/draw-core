@@ -493,6 +493,7 @@ class PageModel:
         self._last_chroma_ok = chroma_ok
         eff_gain = min(gain, 1.0)
         ok = ~has_ref | (gray_peak >= (min_ratio * eff_gain) * ref_peak)
+        vis_peak = cv2.dilate(input_vis.astype(np.uint8)[::step, ::step], kernel)
         if (
             self._has_chroma_ref
             and bgr is not None
@@ -518,9 +519,20 @@ class PageModel:
                 & (blue_f >= (paper_ratio - spread) * red_f)
                 & (blue_f <= (paper_ratio + spread) * red_f)
             )
-            ok &= ~has_ref | (r_ref_peak <= 1.0) | chroma_ok
+            # Um oclusor local so reprova croma onde ele esta; um desloca-
+            # mento global de iluminacao (lampada quente/fria) reprova a
+            # area referenciada visivel quase inteira de uma vez. Nesse
+            # caso a porta de croma e suspensa — o termo de luminancia
+            # segue barrando oclusores escuros e observe() adapta os refs
+            # de croma ate a razao convergir de volta (review do #162: a
+            # versao anterior congelava para sempre, pois obs_visible
+            # esvaziada tambem impedia os refs de deriva).
+            gated = has_ref & (r_ref_peak > 1.0) & (vis_peak > 0)
+            gated_n = int(np.count_nonzero(gated))
+            kept_n = int(np.count_nonzero(chroma_ok & gated))
+            if gated_n == 0 or kept_n >= 0.3 * gated_n:
+                ok &= ~has_ref | (r_ref_peak <= 1.0) | chroma_ok
         if visible is not None:
-            vis_peak = cv2.dilate(input_vis.astype(np.uint8)[::step, ::step], kernel)
             ok |= vis_peak == 0
         half = max(1, cells // 2) + 1
         ok = cv2.erode(
