@@ -28,11 +28,13 @@ antes de abrir (sha256 + tamanho); --allow-unverified rebaixa a
 recusa para aviso.
 
 A tinta usa por padrao o preset de producao (InkConfig.production):
-ganho digital, voto 0,85, remocao de pauta, histerese, veto por
-movimento, passadas a 0,15 s e Detect-Wake. --no-ink-ruling tira so a
-pauta (pode apagar lapis fino sobre a linha); --legacy-ink volta ao
-comportamento anterior; --ink-vote e --ink-interval ajustam os numeros.
---ink-baseline ignora o que ja estava na folha (PageModel); z recaptura.
+ganho digital, voto 0,85, PageModel (que suprime a pauta pela
+referencia persistente), histerese, veto por movimento, passadas a
+0,15 s e Detect-Wake. --no-ink-ruling so age nos perfis --preset
+(technical e o unico que ainda ativa o removedor); --legacy-ink volta
+ao comportamento anterior; --ink-vote e --ink-interval ajustam os
+numeros. --ink-baseline forca o PageModel em perfis que nao o tem;
+z recaptura.
 
 A fonte via rede (MJPEG/RTSP) e o caminho recomendado no WSL. O WSL nao
 enxerga webcams USB do Windows por padrao, mas enxerga streams de rede.
@@ -1248,8 +1250,9 @@ def main():
         "--no-ink-ruling",
         action="store_true",
         help=(
-            "desliga a remocao de pauta do preset de producao "
-            "(InkConfig.ruling_removal): ela segue a curvatura da lombada, mas "
+            "desliga a remocao de pauta (InkConfig.ruling_removal, hoje so o "
+            "perfil technical a ativa; o preset de producao suprime pauta "
+            "pelo PageModel): ela segue a curvatura da lombada, mas "
             "pode apagar lapis fino deitado sobre a linha impressa (PR #56)"
         ),
     )
@@ -1356,7 +1359,7 @@ def main():
             elif args.preset == "technical":
                 ink_config = InkConfig.technical()
             else:
-                options = {"ruling_removal": not args.no_ink_ruling}
+                options = {}
                 if args.ink_vote is not None:
                     options["vote_level"] = args.ink_vote
                 if args.ink_interval is not None:

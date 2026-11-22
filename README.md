@@ -44,14 +44,17 @@ manylinux_2_28 binaries): Ubuntu 20.04+, Debian 11+, Fedora 34+ or WSL2 —
 older glibc releases cannot run the runtime.
 
 No flags selects the production preset (`InkConfig.production()` plus
-`PipelineConfig()` defaults): digital gain, strict vote `0.85`, ruling
-removal, hysteresis, motion veto, `0.15 s` ink interval and Detect-Wake.
-`--source` selects the camera (`0` by default); `--ink-vote` and
-`--ink-interval` tune the numbers. Known trade-offs: the strict vote thins
-strokes (it relies on the gain), and ruling removal can suppress fine pencil
-laid over printed lines (`--no-ink-ruling` turns just that off).
-`--legacy-ink` restores the pre-preset behaviour for comparison. Streaming
-still requires an explicit port and token file; model verification stays on.
+`PipelineConfig()` defaults): digital gain, strict vote `0.85`, the
+persistent PageModel baseline (which suppresses printed rulings and
+pre-existing content by itself), hysteresis, motion veto, `0.15 s` ink
+interval and Detect-Wake. `--source` selects the camera (`0` by
+default); `--ink-vote` and `--ink-interval` tune the numbers. Known
+trade-off: the strict vote thins strokes (it relies on the gain).
+`--no-ink-ruling` only matters on the technical profile, the one place
+the standalone ruling filter still runs — production's PageModel does
+not use it. `--legacy-ink` restores the pre-preset behaviour for
+comparison. Streaming still requires an explicit port and token file;
+model verification stays on.
 
 ```sh
 pip install -e ".[dev]"

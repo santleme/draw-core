@@ -1,5 +1,6 @@
 """Guarda fotometrica pelo worker real (issue #129): mao sem mascara."""
 
+import dataclasses
 import threading
 import time
 
@@ -235,7 +236,9 @@ def _mature(monkeypatch, config, *, idle_probe=False):
 def test_stroke_hidden_on_the_first_post_exit_pass_still_confirms(monkeypatch):
     """Sombra ainda cobre o traco na 1a passada pos-saida (modelo ve 0,0) e
     some na seguinte: a janela cheia de votos precisa sobrar apos o hold."""
-    config = InkConfig.production()
+    config = dataclasses.replace(
+        InkConfig.production(), page_model=False, paper_guard=True
+    )
     worker, ink, generation = _mature(monkeypatch, config)
     try:
         worker.set_hand_presence(True)
@@ -263,7 +266,9 @@ def test_stroke_hidden_on_the_first_post_exit_pass_still_confirms(monkeypatch):
 def test_stroke_erased_under_a_shadow_is_removed_after_hand_exit(monkeypatch):
     """Apagou um traco confirmado sob a sombra da mao: ao levantar a mao, o
     hold barra a remocao, mas o descanso nao pode chegar antes dela."""
-    config = InkConfig.production()
+    config = dataclasses.replace(
+        InkConfig.production(), page_model=False, paper_guard=True
+    )
     worker, ink, generation = _mature(monkeypatch, config, idle_probe=True)
     try:
         worker.set_hand_presence(True)
@@ -303,7 +308,9 @@ def test_lingering_shadow_across_all_post_exit_passes_still_confirms_and_border_
     enquanto o modelo detecta o traco: o orcamento congelado mantem o worker
     acordado ate limpar e confirmar, e uma borda escura permanente ainda deixa
     o worker descansar."""
-    config = InkConfig.production()
+    config = dataclasses.replace(
+        InkConfig.production(), page_model=False, paper_guard=True
+    )
     worker, ink, generation = _mature(monkeypatch, config, idle_probe=True)
     try:
         border_paper = _paper()
@@ -364,7 +371,10 @@ def test_stationary_hand_samples_do_not_cancel_the_adopted_fill_vote(
     monkeypatch.setattr(worker_mod, "_HAND_REST_STILL_SECONDS", 0.3)
     now = [1000.0]
     ink = _Scripted()
-    config = InkConfig.production(pass_interval_s=0.1)
+    config = dataclasses.replace(
+        InkConfig.production(pass_interval_s=0.1),
+        page_model=False,
+    )
     worker = worker_mod.PageCleanWorker(ink, config=config, clock=lambda: now[0])
     generation = worker.new_generation()
     visible = np.ones((H, W), bool)
@@ -437,7 +447,10 @@ def test_fill_streak_born_as_another_dies_still_reaches_adoption(monkeypatch):
     fechava na 4a passada do novo e a trabalhadora dormia antes
     da leitura que adota o bloco. A carência por idade deixa o
     streak tardio completar o horizonte dele."""
-    config = InkConfig.production(pass_interval_s=0.02)
+    config = dataclasses.replace(
+        InkConfig.production(pass_interval_s=0.02),
+        page_model=False,
+    )
     worker, ink, generation = _mature(monkeypatch, config, idle_probe=True)
     try:
         # Blocos 3x4+ tiles, longe da testemunha e do traco base.
@@ -505,7 +518,10 @@ def test_alternating_fill_support_still_hits_the_wait_bound(monkeypatch):
     """Vaivém sem adoção continua limitado: o suporte alternando
     entre dois blocos mantém o pendente aceso sem borda de adoção;
     a espera tem que fechar e a trabalhadora descansar."""
-    config = InkConfig.production(pass_interval_s=0.02)
+    config = dataclasses.replace(
+        InkConfig.production(pass_interval_s=0.02),
+        page_model=False,
+    )
     worker, ink, generation = _mature(monkeypatch, config, idle_probe=True)
     try:
         shadow_a = (slice(24, 96), slice(240, 336))  # tiles 1-3 x 10-13
