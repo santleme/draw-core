@@ -4356,6 +4356,11 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
     def stats(self):
         """Contadores para a telemetria: passadas e custo da ultima."""
         with self._condition:
+            # pm_* vem do registro da ultima passada (mesmo deque de
+            # telemetry_snapshot, escrito sob este lock): None quando o
+            # PageModel esta desligado ou a passada foi abstida, como
+            # pass_ms antes da primeira.
+            record = self._telemetry_records[-1] if self._telemetry_records else {}
             return {
                 "passes_total": self._passes_total,
                 "pass_ms": (
@@ -4379,6 +4384,11 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 ),
                 "resting": self._at_rest(),
                 "hand_present": self._hand_state,
+                "pm_seeded_frac": record.get("pm_seeded_frac"),
+                "pm_novel_px": record.get("pm_novel_px"),
+                "pm_suppressed_px": record.get("pm_suppressed_px"),
+                "pm_pending_px": record.get("pm_pending_px"),
+                "pm_unseeded_px": record.get("pm_unseeded_px"),
             }
 
     @property
