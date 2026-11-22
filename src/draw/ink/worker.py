@@ -183,12 +183,12 @@ _REST_QUIET_PASSES = 2
 _HAND_REST_STILL_SECONDS = 1.0
 
 
-# Evento geometrico que acorda o descanso (frente do cenario E3):
-# a premissa do descanso sem mao e "a pagina nao muda" — mas a
-# folha que desliza sem mao na cena mostra exatamente o contrario
-# (medido em 2026-11-12: o warp congelado seguiu vendo mesa e a
-# trabalhadora dormiu no meio do movimento, porque submit nao
-# acorda). Um quad
+# Evento geometrico que acorda o descanso (frente do cenario E3,
+# InkConfig.follow_move do preset de producao): a premissa do
+# descanso sem mao e "a pagina nao muda" — mas a folha que desliza
+# sem mao na cena mostra exatamente o contrario (medido em
+# 2026-11-12: o warp congelado seguiu vendo mesa e a trabalhadora
+# dormiu no meio do movimento, porque submit nao acorda). Um quad
 # submetido a mais de _GEO_WAKE_MOVE_PX da ancora e evidencia de
 # cena nova — enquanto o deslocamento persistir, a quietude nao
 # acumula e a sonda segue; quando a geometria retorna a moldura,
@@ -241,15 +241,6 @@ def _fill_page_outside(image, coverage):
     return filled
 
 
-def _bbox_of(mask):
-    """(y0, y1, x0, x1) meio-aberto do que e True em mask, ou None."""
-    rows = np.flatnonzero(mask.any(axis=1))
-    if rows.size == 0:
-        return None
-    cols = np.flatnonzero(mask.any(axis=0))
-    return int(rows[0]), int(rows[-1]) + 1, int(cols[0]), int(cols[-1]) + 1
-
-
 def _provisional_for_display(provisional, min_px):
     """Camada provisoria como a tela a ve (issue #134).
 
@@ -266,7 +257,7 @@ def _provisional_for_display(provisional, min_px):
     """
     mask = provisional > 0
     out = np.zeros(provisional.shape, dtype=np.uint8)
-    bbox = _bbox_of(mask)
+    bbox = _mask_bbox(mask)
     if bbox is None:
         return out
     y0, y1, x0, x1 = bbox
@@ -1337,18 +1328,18 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         self._reg_frozen_corners = None
         self._reg_deadband_over = 0
         self._reg_deadband_releases = 0
-        # Arbitragem de ancora: o evento aberto, o streak de
-        # assentamento com seus escores por passada e o snapshot
-        # do canvas pre-evento.
+        # Arbitragem de ancora (InkConfig.anchor_arbitration): o
+        # evento aberto, o streak de assentamento com seus escores
+        # por passada e o snapshot do canvas pre-evento.
         self._arb_event_open = False
         self._arb_streak_quads = []
         self._arb_scores = []
         self._arb_snapshot = None
         self._arb_actions = 0
         self._arb_events = deque(maxlen=128)
-        # Mobilidade da ancora: o evento de divergencia
-        # assentada, o streak de quads assentados e a retencao
-        # por veredito spurious da arbitragem.
+        # Mobilidade da ancora (InkConfig.anchor_follow): o evento
+        # de divergencia assentada, o streak de quads assentados e
+        # a retencao por veredito spurious da arbitragem.
         self._follow_event_open = False
         self._follow_streak = 0
         self._follow_streak_quads = []
@@ -1436,9 +1427,10 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         # _HAND_REST_STILL_SECONDS. None = nenhum movimento
         # reportado ainda — nao conta como parada.
         self._hand_motion_at = None
-        # Estado do evento geometrico (frente do cenario E3):
-        # True enquanto o quad submetido segue fora da moldura da
-        # ancora — o periodo em que o descanso nao pode fechar.
+        # Estado do evento geometrico (frente do cenario E3,
+        # InkConfig.follow_move): True enquanto o quad submetido
+        # segue fora da moldura da ancora — o periodo em que o
+        # descanso nao pode fechar.
         self._geo_away = False
         # Telemetria por etapa (U0 do loop v2): contadores e os
         # carimbos das ultimas passadas, para medir onde o tempo
@@ -1720,7 +1712,11 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         with self._condition:
             if self._stopped or generation != self._generation:
                 return
-            if corners is not None and self._anchor_corners is not None:
+            if (
+                self._config.follow_move
+                and corners is not None
+                and self._anchor_corners is not None
+            ):
                 # Evento geometrico: o quad deste warp saiu da
                 # moldura da ancora (folha que se moveu de
                 # verdade, nao jitter — quem envia aqui ja e a
@@ -1912,8 +1908,10 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         propria mao, reportado pela assinatura da mascara.
         Ver _REST_MIN_GENERATION_PASSES/_REST_QUIET_PASSES.
         """
-        if self._accumulator._removal_streak is not None and np.any(
-            self._accumulator._removal_streak
+        if (
+            self._config.removal
+            and self._accumulator._removal_streak is not None
+            and np.any(self._accumulator._removal_streak)
         ):
             return False
         if self._identity_recovery_requested and self._identity_reference is not None:
@@ -2001,6 +1999,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         """
         with self._condition:
             snapshot = {
+                "anchor_arbitration_enabled": self._config.anchor_arbitration,
                 "submits": self._telemetry_submits,
                 "submits_replaced": self._telemetry_replaced,
                 "passes": self._telemetry_passes,
@@ -2013,14 +2012,16 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             }
             if self._config.reg_deadband or self._reg_deadband_releases:
                 snapshot["reg_deadband_releases"] = self._reg_deadband_releases
-            snapshot["anchor_arbitration_actions"] = self._arb_actions
-            snapshot["anchor_arbitration_events"] = [
-                dict(event) for event in self._arb_events
-            ]
-            snapshot["anchor_reanchors"] = self._anchor_reanchors
-            snapshot["anchor_reanchor_events"] = [
-                dict(event) for event in self._follow_events
-            ]
+            if self._config.anchor_arbitration or self._arb_actions:
+                snapshot["anchor_arbitration_actions"] = self._arb_actions
+                snapshot["anchor_arbitration_events"] = [
+                    dict(event) for event in self._arb_events
+                ]
+            if self._config.anchor_follow or self._anchor_reanchors:
+                snapshot["anchor_reanchors"] = self._anchor_reanchors
+                snapshot["anchor_reanchor_events"] = [
+                    dict(event) for event in self._follow_events
+                ]
             return snapshot
 
     def poll(self, generation, after_version):
@@ -2064,7 +2065,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         bbox, mask = None, np.zeros((0, 0), np.uint8)
         if not full:
             new = now & ~prev[1]
-            bbox = _bbox_of(new)
+            bbox = _mask_bbox(new)
             if bbox is not None:
                 mask = new[bbox[0] : bbox[1], bbox[2] : bbox[3]].astype(np.uint8) * 255
         record = (
@@ -2134,7 +2135,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         removed_px = sum(r[5] for r in records)
         if full:
             full_mask = confirmed > 0
-            bbox = _bbox_of(full_mask)
+            bbox = _mask_bbox(full_mask)
             mask = (
                 np.zeros((0, 0), np.uint8)
                 if bbox is None
@@ -3084,80 +3085,90 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         campos do _Pass lidos no voto; pouso/re-ancoragem
         re-registra a evidencia na ancora nova.
         """
+        p.arbitration_abstain = False
+        arb_event = None
+        anchor_arbitration = self._config.anchor_arbitration
         reg_anchor_median = self._config.reg_anchor_median
         reg_deadband = self._config.reg_deadband
-        arb_status, arb_event = self._anchor_arbitration_step(
-            p.generation,
-            p.corners,
-            p.prob.shape,
-            p.identity_owned,
-            reg_anchor_median,
-            reg_deadband,
-            p.prob,
-            p.camera_prob,
-            p.visible,
-        )
-        p.arbitration_abstain = arb_status == "open"
-        p.reg_info["arb_event_open"] = self._arb_event_open
-        p.reg_info["arb_abstained"] = p.arbitration_abstain
-        p.reg_info["arb_streak"] = len(self._arb_streak_quads)
-        if self._arb_scores:
-            scores = self._arb_scores[-1]
-            p.reg_info["arb_pass_score_page"] = scores[0]
-            p.reg_info["arb_pass_score_camera"] = scores[1]
-            p.reg_info["arb_pass_scores_cyclic"] = list(scores[2:5])
-        if arb_event is not None:
-            p.reg_info["arbitration_event"] = dict(arb_event)
-            p.reg_info["arb_verdict"] = arb_event["verdict"]
-            p.reg_info["arb_score_page"] = arb_event["score_page"]
-            p.reg_info["arb_score_camera"] = arb_event["score_camera"]
-            p.reg_info["arb_rotation_k"] = arb_event["rotation_k"]
-        if arb_status == "verdict" and arb_event is not None and arb_event["action"]:
-            # Pouso: a passada corrente entra ja
-            # registrada na ancora nova, por cima do
-            # estado INTOCADO (a v3 nao move o estado).
-            # A decisao do portao foi contra a ancora velha.
-            self._reregister_current(
-                p,
-                self._reg_frozen_corners if reg_deadband else p.corners,
+        anchor_follow = self._config.anchor_follow
+        if anchor_arbitration:
+            arb_status, arb_event = self._anchor_arbitration_step(
+                p.generation,
+                p.corners,
+                p.prob.shape,
+                p.identity_owned,
+                reg_anchor_median,
+                reg_deadband,
+                p.prob,
+                p.camera_prob,
+                p.visible,
             )
-            p.force_publish = True
-        # Mobilidade da ancora (frente 34): roda DEPOIS
-        # da arbitragem — o veredito dela nesta passada
-        # (arb_event) e a precedencia que o passo le.
-        follow_status, follow_event = self._anchor_follow_step(
-            p.generation,
-            p.corners,
-            p.prob.shape,
-            p.identity_owned,
-            reg_anchor_median,
-            reg_deadband,
-            p.watch_step_px,
-            arb_event,
-        )
-        p.follow_abstain = follow_status == "open"
-        p.reg_info["follow_event_open"] = self._follow_event_open
-        p.reg_info["follow_abstained"] = p.follow_abstain
-        p.reg_info["follow_streak"] = self._follow_streak
-        p.reg_info["follow_hold"] = self._follow_hold
-        if follow_event is not None:
-            p.reg_info["follow_reanchored"] = True
-            p.reg_info["follow_displacement_px"] = follow_event["displacement_px"]
-            p.reg_info["follow_closed_arb_event"] = follow_event["closed_arb_event"]
-            if follow_event["closed_arb_event"]:
-                p.reg_info["arb_event_open"] = False
-            # A passada corrente entra ja registrada na
-            # ancora nova, por cima do estado INTOCADO
-            # (a troca e so de ancora) — e o evento de
-            # arbitragem que a abstinha foi fechado pela
-            # re-ancoragem. A decisao do portao foi contra a
-            # ancora velha.
-            self._reregister_current(
-                p,
-                self._reg_frozen_corners if reg_deadband else p.corners,
+            p.arbitration_abstain = arb_status == "open"
+            p.reg_info["arb_event_open"] = self._arb_event_open
+            p.reg_info["arb_abstained"] = p.arbitration_abstain
+            p.reg_info["arb_streak"] = len(self._arb_streak_quads)
+            if self._arb_scores:
+                scores = self._arb_scores[-1]
+                p.reg_info["arb_pass_score_page"] = scores[0]
+                p.reg_info["arb_pass_score_camera"] = scores[1]
+                p.reg_info["arb_pass_scores_cyclic"] = list(scores[2:5])
+            if arb_event is not None:
+                p.reg_info["arbitration_event"] = dict(arb_event)
+                p.reg_info["arb_verdict"] = arb_event["verdict"]
+                p.reg_info["arb_score_page"] = arb_event["score_page"]
+                p.reg_info["arb_score_camera"] = arb_event["score_camera"]
+                p.reg_info["arb_rotation_k"] = arb_event["rotation_k"]
+            if (
+                arb_status == "verdict"
+                and arb_event is not None
+                and arb_event["action"]
+            ):
+                # Pouso: a passada corrente entra ja
+                # registrada na ancora nova, por cima do
+                # estado INTOCADO (a v3 nao move o estado).
+                # A decisao do portao foi contra a ancora velha.
+                self._reregister_current(
+                    p,
+                    self._reg_frozen_corners if reg_deadband else p.corners,
+                )
+                p.force_publish = True
+        if anchor_follow:
+            # Mobilidade da ancora (frente 34): roda DEPOIS
+            # da arbitragem — o veredito dela nesta passada
+            # (arb_event) e a precedencia que o passo le.
+            follow_status, follow_event = self._anchor_follow_step(
+                p.generation,
+                p.corners,
+                p.prob.shape,
+                p.identity_owned,
+                reg_anchor_median,
+                reg_deadband,
+                p.watch_step_px,
+                arb_event,
             )
-            p.arbitration_abstain = False
-            p.force_publish = True
+            p.follow_abstain = follow_status == "open"
+            p.reg_info["follow_event_open"] = self._follow_event_open
+            p.reg_info["follow_abstained"] = p.follow_abstain
+            p.reg_info["follow_streak"] = self._follow_streak
+            p.reg_info["follow_hold"] = self._follow_hold
+            if follow_event is not None:
+                p.reg_info["follow_reanchored"] = True
+                p.reg_info["follow_displacement_px"] = follow_event["displacement_px"]
+                p.reg_info["follow_closed_arb_event"] = follow_event["closed_arb_event"]
+                if follow_event["closed_arb_event"]:
+                    p.reg_info["arb_event_open"] = False
+                # A passada corrente entra ja registrada na
+                # ancora nova, por cima do estado INTOCADO
+                # (a troca e so de ancora) — e o evento de
+                # arbitragem que a abstinha foi fechado pela
+                # re-ancoragem. A decisao do portao foi contra a
+                # ancora velha.
+                self._reregister_current(
+                    p,
+                    self._reg_frozen_corners if reg_deadband else p.corners,
+                )
+                p.arbitration_abstain = False
+                p.force_publish = True
 
     def _reregister_current(self, p, registration_corners):
         """Re-registra a passada corrente na ancora nova (apos
@@ -3762,6 +3773,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         self._telemetry_records.append(
             {
                 **p.reg_info,
+                "anchor_arbitration_enabled": self._config.anchor_arbitration,
                 "sequence": self._telemetry_passes,
                 "pass_gap_s": None
                 if self._previous_pass_started_at is None
@@ -3791,7 +3803,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 "mask_px": int(np.count_nonzero(p.prob > self._accumulator.threshold)),
                 "confirmed_px": result["confirmed_px"],
                 "new_confirmed_px": result["new_confirmed_px"],
-                "removed_confirmed_px": result["removed_confirmed_px"],
+                "removed_confirmed_px": result.get("removed_confirmed_px", 0),
                 "visible_fraction": 1.0
                 if p.visible is None
                 else np.count_nonzero(p.visible) / p.visible.size,
