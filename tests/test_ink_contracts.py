@@ -220,23 +220,24 @@ def _dilate(mask, px):
     return out
 
 
-# Regimes sob medicao. "production" e o preset do PipelineConfig.
-# "page_model_solo" liga o PageModel e desliga os remendos que ele
-# propoe subsumir (pauta por DP, guarda de borda, guarda de papel):
-# se este regime sustentar os mesmos contratos, a pilha de remendos
-# #129-#132 e redundante para o produto.
+# Regimes sob medicao. "production" e o preset do PipelineConfig —
+# desde o PR que promoveu o PageModel, ele ja carrega o modelo
+# persistente com os remendos #129-#132 desligados. "legacy_patches"
+# reconstrui a pilha anterior (pauta por DP, guarda de papel, guarda
+# de borda auto, sem PageModel): os mesmos 8 contratos precisam
+# sustentar-se nos dois regimes para a troca ser segura.
 PRODUCTION = InkConfig.production()
-PAGE_MODEL_SOLO = dataclasses.replace(
+LEGACY_PATCHES = dataclasses.replace(
     PRODUCTION,
-    page_model=True,
-    ruling_removal=False,
-    paper_guard=False,
-    border_guard_px=0,
+    page_model=False,
+    ruling_removal=True,
+    paper_guard=True,
+    border_guard_px=None,
 )
 
 REGIMES = {
     "production": PRODUCTION,
-    "page_model_solo": PAGE_MODEL_SOLO,
+    "legacy_patches": LEGACY_PATCHES,
 }
 
 
@@ -486,3 +487,32 @@ def test_light_sheet_slide_does_not_duplicate_ink(ink):
     assert total <= 1.4 * original_px
     # Uma copia deslocada apareceria como segundo componente ou como
     # excesso de pixels: o total acima ja barra a duplicacao limpa.
+
+
+# ------------------------------------------------------------------
+# Contrato 8: traco lido uma vez antes da mao sair termina de
+# confirmar nas passadas pos-saida, sem a mao voltar.
+# ------------------------------------------------------------------
+
+
+def test_stroke_seen_once_before_hand_exit_finishes_confirming(ink):
+    worker, clock = ink
+    generation = worker.new_generation()
+    scene = _Scene()
+    _passes(worker, clock, generation, scene, 4, dt=_DT_IDLE)
+
+    # O traco e desenhado um instante antes da mao levantar: so uma
+    # leitura com a mao presente; o resto da janela de votos acontece
+    # nas passadas que a saida re-arma (review #74/#122).
+    stroke = (90, 96, 60, 260)
+    scene.draw(stroke)
+    worker.set_hand_presence(True, moved=True)
+    _passes(worker, clock, generation, scene, 1)
+    worker.set_hand_presence(False)
+    _passes(worker, clock, generation, scene, 8, dt=_DT_IDLE)
+
+    want = _rect_mask(stroke)
+    got = _confirmed(worker, generation) > 0
+    assert np.count_nonzero(got & want) >= 0.95 * np.count_nonzero(want)
+    extra = got & ~_dilate(want, 2)
+    assert np.count_nonzero(extra) <= 0.02 * np.count_nonzero(want)

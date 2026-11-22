@@ -1220,7 +1220,7 @@ def test_page_model_adapts_to_sustained_dimming_and_captures_new_stroke(monkeypa
         assert np.count_nonzero(_confirmed(worker, generation)) == 0
 
         # Iluminacao cai de 235 para 170: papel le 170 e marca impressa cai de 95 para 69
-        # (queda bruta de 26 > novel_delta=24, mas proporcionalmente inalterada),
+        # (razao de queda 26/95 = 0,27 < novel_ratio=0,30 — proporcionalmente inalterada),
         # junto de um traco novo a 40 em [50:60, 80:90].
         dimmed = np.full((H, W), 170.0, dtype=np.float32)
         dimmed[14:22, 14:44] = 69.0

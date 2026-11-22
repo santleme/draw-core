@@ -283,7 +283,7 @@ def test_main_default_is_on_and_legacy_ink_turns_it_off(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["draw"])
     app_module.main()
     ink = seen[-1]["pipeline_config"].ink
-    assert ink.hysteresis and ink.ruling_removal and ink.vote_score_strong > 1.9
+    assert ink.hysteresis and ink.page_model and ink.vote_score_strong > 1.9
     monkeypatch.setattr(sys, "argv", ["draw", "--legacy-ink"])
     app_module.main()
     assert seen[-1]["pipeline_config"].ink.hysteresis is False

@@ -21,8 +21,10 @@ persistente da superfície, na grade retificada da âncora:
   `confirm_obs=3` passadas consecutivas; rastreada com `rate=0.125`
   apenas onde o chamador afirma papel (`worker.py` `pm.observe` passa
   `paper = visible & (prob <= _REMOVAL_LOW_PROB)`).
-- `novel(gray)` = semeado **e** `ref - gray > novel_delta=24`: só o que
-  **escureceu** contra a referência conta como tinta nova.
+- `novel(gray)` = semeado **e** `ref - gray > novel_ratio · ref`
+  (contraste de Weber, `novel_ratio=0,30` calibrado nas capturas
+  reais): só o que **escureceu** contra a referência conta como tinta
+  nova.
 - `admissible(visible)` = `seeded & visible`: pixel nunca observado
   limpo ("pendente") não entrega evidência.
 

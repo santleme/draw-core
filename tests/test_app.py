@@ -1118,7 +1118,9 @@ def test_main_sem_flags_usa_o_preset_de_producao(monkeypatch):
     assert pipeline.ink_auto_gain is True
     assert pipeline.detect_wake is True
     ink = pipeline.ink
-    assert ink.ruling_removal and ink.hysteresis and ink.motion_veto
+    assert ink.page_model and ink.hysteresis and ink.motion_veto
+    assert not ink.ruling_removal and not ink.paper_guard
+    assert ink.border_guard_px == 0
     assert ink.pass_interval_s == 0.15
     assert ink.vote_score_strong > 1.9
 
@@ -1132,9 +1134,11 @@ def test_main_legacy_ink_volta_ao_comportamento_anterior(monkeypatch):
     )
 
 
-def test_main_no_ink_ruling_tira_so_a_pauta(monkeypatch):
+def test_main_no_ink_ruling_aceito_no_preset_de_producao(monkeypatch):
+    # O preset de producao ja suprime pauta pelo PageModel; a flag
+    # continua aceita (vale para --preset technical) sem efeito aqui.
     pipeline = _run_main(monkeypatch, "--no-ink-ruling")["pipeline_config"]
-    assert pipeline.ink == app_module.InkConfig.production(ruling_removal=False)
+    assert pipeline.ink == app_module.InkConfig.production()
     assert pipeline.ink_auto_gain and pipeline.detect_wake
 
 

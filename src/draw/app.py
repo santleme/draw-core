@@ -1193,8 +1193,9 @@ def main():
         "--no-ink-ruling",
         action="store_true",
         help=(
-            "desliga a remocao de pauta do preset de producao "
-            "(InkConfig.ruling_removal): ela segue a curvatura da lombada, mas "
+            "desliga a remocao de pauta (InkConfig.ruling_removal, hoje so o "
+            "perfil technical a ativa; o preset de producao suprime pauta "
+            "pelo PageModel): ela segue a curvatura da lombada, mas "
             "pode apagar lapis fino deitado sobre a linha impressa (PR #56)"
         ),
     )
@@ -1292,7 +1293,7 @@ def main():
             elif args.preset == "technical":
                 ink_config = InkConfig.technical()
             else:
-                options = {"ruling_removal": not args.no_ink_ruling}
+                options = {}
                 if args.ink_vote is not None:
                     options["vote_level"] = args.ink_vote
                 if args.ink_interval is not None:
