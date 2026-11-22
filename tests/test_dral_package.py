@@ -7,6 +7,7 @@ inferência. Estes testes travam as duas pontas: a API nova existe
 standalone e a superfície antiga continua idêntica.
 """
 
+import os
 import socket
 import subprocess
 import sys
@@ -180,6 +181,9 @@ assert Path(sys.modules['draw_dral'].__file__).resolve().is_relative_to(
     Path(script).resolve().parents[1] / 'packages' / 'draw-dral' / 'src'
 )
 """
+    clean_env = os.environ.copy()
+    clean_env.pop("PYTHONPATH", None)
+    clean_env.pop("PYTHONHOME", None)
     for name, args in scripts.items():
         output = tmp_path / name.removesuffix(".py")
         command = [
@@ -193,7 +197,12 @@ assert Path(sys.modules['draw_dral'].__file__).resolve().is_relative_to(
             *args,
         ]
         subprocess.run(
-            command, cwd=tmp_path, check=True, capture_output=True, text=True
+            command,
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+            text=True,
+            env=clean_env,
         )
 
 
