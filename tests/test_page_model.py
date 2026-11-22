@@ -1166,7 +1166,7 @@ def test_page_model_baseline_footprint_without_border_guard(monkeypatch):
     registro nao semeia a referencia de pagina limpa — a pegada do
     modelo nao depende da guarda."""
     monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
-    worker = _worker(InkConfig(page_model=True, border_guard_px=0, paper_guard=False))
+    worker = _worker(InkConfig(page_model=True, border_guard_px=0))
     try:
         generation = worker.new_generation()
         image = np.full((H, W), PAPER, dtype=np.float32)
@@ -1175,8 +1175,7 @@ def test_page_model_baseline_footprint_without_border_guard(monkeypatch):
 
         # Folha recuada 6 px a direita e 4 px para baixo: o warp deixa
         # padding (zeros) nas linhas < 4 e colunas < 6 da ancora. Sem
-        # mascara de visibilidade, sem guarda de borda e sem a guarda
-        # de papel (que ja rejeitaria o preto do padding), a pegada e
+        # mascara de visibilidade e sem guarda de borda, a pegada e
         # a unica coisa que separa "nao observei" de "observei vazio".
         shifted_quad = Q0 + np.float32([[6, 4], [6, 4], [6, 4], [6, 4]])
         for _ in range(6):
@@ -1393,42 +1392,6 @@ def test_page_model_exposed_hold_counts_exact_recovery_passes():
         assert not model.hold_mask[48, 64]
 
 
-def test_page_model_does_not_seed_under_startup_shadow_rejected_by_paper_guard(
-    monkeypatch,
-):
-    """R2285-2293: sombra local na abertura rejeitada por paper_ok nao semeia baseline."""
-    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
-    worker = _worker(InkConfig(page_model=True, occlusion_hold_passes=1))
-    try:
-        generation = worker.new_generation()
-        real_sheet = np.full((H, W), PAPER, dtype=np.float32)
-        real_sheet[40:50, 40:50] = INK  # marca impressa pre-existente
-
-        # Sombra local [32:64, 32:64] em nivel 110 (paper_ok False contra papel 235),
-        # mas sem mascara de mao (visible=None) e marca pre-existente a 40.
-        shadowed = real_sheet.copy()
-        shadowed[32:64, 32:64] = 110.0
-        shadowed[40:50, 40:50] = INK
-        for _ in range(4):
-            _drive(worker, generation, shadowed)
-        assert not np.any(worker._page_model.seeded[32:64, 32:64])
-        assert np.count_nonzero(_confirmed(worker, generation)) == 0
-
-        # Sombra sai: hold esgota e o bloco semeia COM a marca pre-existente como fundo
-        for _ in range(5):
-            _drive(worker, generation, real_sheet)
-        assert np.all(worker._page_model.seeded[32:64, 32:64])
-        assert np.count_nonzero(_confirmed(worker, generation)) == 0
-
-        # Traco novo na mesma regiao confirma normalmente
-        real_sheet[52:60, 40:50] = INK
-        for _ in range(4):
-            _drive(worker, generation, real_sheet)
-        assert np.count_nonzero(_confirmed(worker, generation)[52:60, 40:50]) == 80
-    finally:
-        worker.stop()
-
-
 def test_page_model_adapts_to_sustained_dimming_and_captures_new_stroke(monkeypatch):
     """R307-311 & R369-371: marca impressa semeada continua suprimida sob dimming e relighting."""
     monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
@@ -1554,8 +1517,8 @@ def test_page_model_hand_exit_holds_until_uncovered_stroke_confirms_before_rest(
     )
     generation = worker.new_generation()
     # Folha com papel a 200 e patch [24:72, 40:88] mais claro a 250:
-    # uma sombra local a 180 no patch cai abaixo de 0.78 * 250 = 195 (aciona hold
-    # do PageModel), mas fica acima de 0.78 * 200 = 156 (paper_ok global = True).
+    # uma sombra local a 180 no patch cai abaixo de 0.78 * 250 = 195 (aciona
+    # o hold do PageModel na regiao), mas segue exposta no resto da folha.
     base = np.full((H, W), 200.0, dtype=np.float32)
     base[24:72, 40:88] = 250.0
     worker.set_hand_presence(True)
