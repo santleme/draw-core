@@ -25,5 +25,3 @@ logs/
 .idea/
 .vscode/
 
-site/.env.local
-site/.env*.local
