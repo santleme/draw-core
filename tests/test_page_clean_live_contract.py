@@ -50,6 +50,8 @@ class _FakeInk:
 @pytest.mark.slow
 def test_new_ink_reaches_published_canvas_within_3_passes(monkeypatch):
     monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.02)
+    # A sonda ociosa de producao (1 s) nao pode vazar para o arnes.
+    monkeypatch.setattr(worker_mod, "_IDLE_PROBE_SECONDS", 0.02)
     fake = _FakeInk()
     worker = worker_mod.PageCleanWorker(fake).start()
     try:

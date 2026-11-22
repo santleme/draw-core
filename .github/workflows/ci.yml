@@ -34,7 +34,7 @@ jobs:
       - run: uv pip install -e ".[dev]"
       - run: ruff check .
       - run: ruff format --check .
-      - run: pytest -q -n auto --dist worksteal -m "not slow and not timing"
+      - run: pytest -q -n auto --dist worksteal --durations=20 -m "not slow and not timing"
       - run: pytest -q -m timing
 
   slow:

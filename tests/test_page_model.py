@@ -33,6 +33,15 @@ PAPER = 235.0
 INK = 40.0
 
 
+@pytest.fixture(autouse=True)
+def _fast_idle_probe(monkeypatch):
+    # A sonda ociosa de producao (1 Hz para poupar CPU) nao pode vazar
+    # para o arnes: cada passada sintetica pagaria ~1 s de espera real
+    # na cadencia. Testes que fixam a propria sonda (pump com relogio
+    # falso) sobrescrevem este patch depois — o setattr tardio vence.
+    monkeypatch.setattr(worker_mod, "_IDLE_PROBE_SECONDS", 0.01)
+
+
 def _paper(shape=(H, W)):
     return np.full(shape, PAPER, dtype=np.float32)
 

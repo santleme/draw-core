@@ -135,6 +135,11 @@ def test_worker_display_shows_provisional_before_poll_confirms(
     # provisoria vive ~270ms — margem segura para o poll de 5ms;
     # com 0,01s a v1 morria entre dois polls e o teste oscilava.
     monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.05)
+    # A sonda ociosa de producao (1 s) nao pode vazar para o arnes, mas
+    # tambem nao pode ficar abaixo da cadencia configurada: quando a
+    # sonda governa (pagina assentada), o provisorio precisa dos mesmos
+    # ~270 ms de vida entre passadas que pass_interval_s garante.
+    monkeypatch.setattr(worker_mod, "_IDLE_PROBE_SECONDS", 0.3)
     strong_twice = _prob([(STRONG, 0.95)])
     fake = _ScriptedProbInk([strong_twice])
     config = worker_mod.InkConfig(pass_interval_s=0.3)
