@@ -338,7 +338,6 @@ class Pipeline:
         self.last_tracker_event = None
         # Ganho digital do ultimo warp de tinta (ink_auto_gain); 1.0 sem ganho.
         self.last_ink_gain = 1.0
-        self._paper_gain_smoother = exposure.PaperGainSmoother()
         self.generation_events = {"drop": 0, "reopen": 0}
         # Telemetria do piso de cobertura (issue #105): o
         # coverage_iou_floor nao tem denominador natural para
@@ -539,23 +538,7 @@ class Pipeline:
                     gain_mask &= coverage
                 if visible is not None:
                     gain_mask &= visible
-                # Máscara vazia — a mão cobrindo a folha inteira, ou a
-                # cobertura devolvendo seu veredito vazio deliberado:
-                # paper_gain mediria o frame todo (mesa e oclusor
-                # contam como "papel") e ainda contaminaria as
-                # estatísticas do suavizador; um quadro claro
-                # derrubaria o ganho a 1,0 num passo — o flash escuro
-                # e a reconvergência da issue #133. Sem folha visível
-                # não há estimativa: o último ganho segue aplicado —
-                # identidade antes da primeira medida — até o papel
-                # reaparecer.
-                if gain_mask.any():
-                    target_gain = exposure.paper_gain(frame, gain_mask)
-                    gain_at = packet.captured_at
-                    self.last_ink_gain = self._paper_gain_smoother.update(
-                        target_gain, gain_at, image=frame, mask=gain_mask
-                    )
-                frame = exposure.apply_gain(frame, self.last_ink_gain or 1.0)
+                frame, self.last_ink_gain = exposure.apply_paper_gain(frame, gain_mask)
             fill_color = None
             if coverage is not None and coverage.any():
                 # Fora da folha o warp é preto: a transição
@@ -642,18 +625,6 @@ class Pipeline:
             full=full,
         )
 
-    def _reset_paper_gain(self):
-        """Zera o estado de exposição do papel, suavizador e ganho juntos.
-
-        Resetar só o suavizador deixaria `last_ink_gain` com o ganho da
-        folha velha: com a máscara vazia (mão cobrindo tudo) a
-        estimativa não roda e o frame recebe aquele ganho até a
-        primeira medida — uma folha clara entraria clipada a 255
-        (Devin Review PR #140).
-        """
-        self._paper_gain_smoother.reset()
-        self.last_ink_gain = 1.0
-
     def reset_source(self, since):
         """Fronteira de fonte: a camera nova comeca uma pagina nova.
 
@@ -682,7 +653,6 @@ class Pipeline:
         self.clean_display_version = 0
         # A tinta antiga morreu: a saida ao vivo precisa saber (canvas limpo).
         self._on_ink(contracts.InkPublication(-1, 0, None))
-        self._reset_paper_gain()
         self.tracker.reset()
         detect_wake = getattr(self, "_detect_wake", None)
         if detect_wake is not None:
@@ -1035,7 +1005,6 @@ class Pipeline:
                 self.clean_generation = self.ink_worker.new_generation(
                     preserve_identity=self.clean_recovery_pending
                 )
-                self._reset_paper_gain()
                 self.clean_recovery_pending = False
                 self.clean_display_version = 0
                 self.clean_provisional_mask = None

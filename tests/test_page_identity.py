@@ -1,14 +1,11 @@
 """F-11 Block 2: identidade por geracao no worker real, sem tracker paralelo."""
 
-import dataclasses
-
 import numpy as np
 import pytest
 
 from draw.contracts import WarpedPage
 from draw.ink import identity as identity_mod
 from draw.ink import worker as worker_mod
-from draw.ink.config import InkConfig
 
 SHAPE = (120, 100)
 QUAD = np.float32([[0, 0], [100, 0], [100, 120], [0, 120]])
@@ -180,28 +177,6 @@ def test_fragment_match_does_not_restore_unevaluated_reference(worker):
     assert not np.any(confirmed[:, :55])
 
 
-def test_guard_majority_ink_still_resolves_same_page(worker):
-    # A guarda alarga DEPOIS do desenho confirmado (re-ancoragem
-    # adota posicao nova): 62% da tinta salva fica sob a faixa e
-    # nunca mais e julgavel. Com o piso de cobertura medido sobre
-    # a referencia total, um match perfeito no miolo nunca o
-    # atingia e a quarentena apagava o desenho no timeout — a
-    # medida e so geometrica, sobre a tinta julgavel.
-    ink_a = np.zeros(SHAPE, np.float32)
-    ink_a[2:9, 15:85] = 0.95
-    ink_a[111:118, 15:85] = 0.95
-    ink_a[40:60, 30:60] = 0.95
-    for _ in range(4):
-        drive(worker, 0, prob=ink_a)
-    canvas_a = worker.poll(0, 0).confirmed
-    assert np.count_nonzero(canvas_a) > 0
-    gen = worker.new_generation(preserve_identity=True)
-    worker._config = dataclasses.replace(worker._config, border_guard_px=10)
-    drive(worker, gen, prob=ink_a)
-    assert last_event(worker)["decision"] == "same_page"
-    np.testing.assert_array_equal(worker.poll(gen, 0).confirmed, canvas_a)
-
-
 def test_hand_over_majority_holds_then_restores_same_page(worker):
     canvas_a = settle(worker)
     gen = worker.new_generation(preserve_identity=True)
@@ -353,49 +328,6 @@ def test_near_quarter_coverage_still_holds(worker):
     drive(worker, gen, prob=ink_a, corners=part_quad)
     assert last_event(worker)["decision"] == "same_page"
     np.testing.assert_array_equal(worker.poll(gen, 0).confirmed, canvas_a)
-
-
-def test_reanchored_auto_guard_keeps_recovery(monkeypatch):
-    # Cobertura com a guarda AUTOMATICA e mudanca real de ancora
-    # (o estado que o follow deixa: canvas intacto, ancora nova).
-    # A tinta na faixa ja estava confirmada quando a faixa passou a
-    # cobri-la — a guarda so limita votos novos e remocao, nao
-    # apaga o confirmado. A referencia e capturada na ancora
-    # migrada e o same_page devolve o desenho inteiro: com o piso
-    # medido sobre a referencia total, o match perfeito no miolo
-    # deferiria ate o timeout apagar o desenho.
-    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0)
-    monkeypatch.setattr(worker_mod, "_IDLE_PROBE_SECONDS", 0)
-    shape = (240, 320)
-    quad_a = np.float32([[0, 0], [320, 0], [320, 240], [0, 240]])
-    quad_b = np.float32([[8, 4], [316, 6], [312, 236], [10, 234]])
-    worker = worker_mod.PageCleanWorker(
-        Model(), config=InkConfig(border_guard_px=None)
-    ).start()
-    try:
-        interior = np.zeros(shape, np.float32)
-        interior[60:110, 130:190] = 0.95
-        for _ in range(4):
-            drive(worker, 0, prob=interior, corners=quad_a)
-        edge = np.zeros(shape, np.uint8)
-        edge[0:5, 10:310] = 255
-        edge[235:239, 10:310] = 255
-        edge[5:235, 0:5] = 255
-        edge[5:235, 315:319] = 255
-        worker._accumulator.restore_confirmed(edge)
-        canvas_a = worker._accumulator._confirmed.copy()
-        worker._anchor_corners = quad_b
-        gen = worker.new_generation(preserve_identity=True)
-        drive(
-            worker,
-            gen,
-            prob=np.maximum(interior, edge.astype(np.float32)),
-            corners=quad_b,
-        )
-        assert last_event(worker)["decision"] == "same_page"
-        np.testing.assert_array_equal(worker.poll(gen, 0).confirmed, canvas_a)
-    finally:
-        worker.stop()
 
 
 def test_deferral_fields_declared_in_all_states(worker):

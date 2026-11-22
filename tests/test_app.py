@@ -1119,8 +1119,6 @@ def test_main_sem_flags_usa_o_preset_de_producao(monkeypatch):
     assert pipeline.detect_wake is True
     ink = pipeline.ink
     assert ink.page_model and ink.hysteresis and ink.motion_veto
-    assert not ink.ruling_removal and not ink.paper_guard
-    assert ink.border_guard_px == 0
     assert ink.pass_interval_s == 0.15
     assert ink.vote_score_strong > 1.9
 
@@ -1128,18 +1126,10 @@ def test_main_sem_flags_usa_o_preset_de_producao(monkeypatch):
 def test_main_legacy_ink_volta_ao_comportamento_anterior(monkeypatch):
     pipeline = _run_main(monkeypatch, "--legacy-ink")["pipeline_config"]
     assert pipeline == app_module.PipelineConfig(
-        ink=app_module.InkConfig(paper_guard=False),
+        ink=app_module.InkConfig(),
         ink_auto_gain=False,
         detect_wake=False,
     )
-
-
-def test_main_no_ink_ruling_aceito_no_preset_de_producao(monkeypatch):
-    # O preset de producao ja suprime pauta pelo PageModel; a flag
-    # continua aceita (vale para --preset technical) sem efeito aqui.
-    pipeline = _run_main(monkeypatch, "--no-ink-ruling")["pipeline_config"]
-    assert pipeline.ink == app_module.InkConfig.production()
-    assert pipeline.ink_auto_gain and pipeline.detect_wake
 
 
 def test_main_ink_vote_e_interval_ajustam_o_preset(monkeypatch):
@@ -1212,7 +1202,7 @@ def test_run_warns_when_spread_mode_has_no_neural_detector(
 
 def test_main_markers_sem_flags_usa_o_preset_legado(monkeypatch):
     pipeline = _run_main(monkeypatch, "--markers")["pipeline_config"]
-    assert pipeline.ink == app_module.InkConfig(paper_guard=False)
+    assert pipeline.ink == app_module.InkConfig()
     assert pipeline.ink_auto_gain is False and pipeline.detect_wake is False
 
 

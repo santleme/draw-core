@@ -1056,31 +1056,6 @@ def test_page_model_coverage_drop_preserves_confirmed_ink_reconfirmation(monkeyp
         worker.stop()
 
 
-def test_page_model_missed_hand_over_seeded_paper_is_blocked(monkeypatch):
-    """Issue 7: mao nao mascarada sobre papel ja semeado nao vota nem puxa ref."""
-    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
-    worker = _worker(InkConfig(page_model=True))
-    try:
-        generation = worker.new_generation()
-        image = np.full((H, W), PAPER, dtype=np.float32)
-        for _ in range(3):
-            _drive(worker, generation, image)
-        assert worker._page_model.seeded_fraction == pytest.approx(1.0)
-
-        # Mao escura/quente 48x48 (visible=True) com vincos onde _ScriptInk da 0.95
-        hand_bgr = _bgr(image)
-        hand_bgr[24:72, 40:88] = (90, 110, 150)
-        hand_bgr[42:52, 55:65] = (30, 35, 45)
-        for _ in range(5):
-            _drive_page(worker, generation, WarpedPage(hand_bgr, generation, Q0))
-        assert np.count_nonzero(_confirmed(worker, generation)) == 0
-        np.testing.assert_allclose(
-            worker._page_model.reference[24:72, 40:88], PAPER, atol=1e-3
-        )
-    finally:
-        worker.stop()
-
-
 def test_page_model_missed_hand_preserves_existing_confirmed_ink(monkeypatch):
     """Issue 7: mao nao mascarada sobre traco confirmado nao o apaga nem corrompe ref."""
     monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
@@ -1105,106 +1080,6 @@ def test_page_model_missed_hand_preserves_existing_confirmed_ink(monkeypatch):
         worker.stop()
 
 
-def test_page_model_occlusion_hold_blocks_recovery_edge_shadow(monkeypatch):
-    """Issue 7 & R351-357: occlusion_hold_passes bloqueia todas as N passadas de recuperacao."""
-    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
-    worker = _worker(InkConfig(page_model=True, occlusion_hold_passes=2))
-    try:
-        generation = worker.new_generation()
-        image = np.full((H, W), PAPER, dtype=np.float32)
-        for _ in range(3):
-            _drive(worker, generation, image)
-
-        # 1 passada com mao nao mascarada -> arma hold=2
-        hand_bgr = _bgr(image)
-        hand_bgr[24:72, 40:88] = (80, 90, 110)
-        _drive_page(worker, generation, WarpedPage(hand_bgr, generation, Q0))
-
-        # Nas 2 passadas seguintes (dentro do hold=2), residuo escuro recebe ZERO votos.
-        # Uma 3a passada entrega apenas o 1o voto elegivel (insuficiente para confirmar,
-        # pois o voto forte exige 2 leituras).
-        residue = image.copy()
-        residue[42:52, 55:65] = INK
-        for _ in range(3):
-            _drive(worker, generation, residue)
-        assert np.count_nonzero(_confirmed(worker, generation)) == 0
-
-        # A 4a passada (2o voto elegivel apos o hold=2) confirma o traco
-        _drive(worker, generation, residue)
-        assert np.count_nonzero(_confirmed(worker, generation)[42:52, 55:65]) == 100
-    finally:
-        worker.stop()
-
-
-def test_page_model_exposed_hold_counts_exact_recovery_passes():
-    """R351-357 & page_model.py:417: hold conta apenas passadas de recuperacao VISIVEIS."""
-    for hold_n in (1, 3):
-        model = pm_mod.PageModel((H, W), confirm_obs=1)
-        paper = _paper()
-        model.observe(paper)
-        occluded = paper.copy()
-        occluded[24:72, 40:88] = 80.0
-        exp0 = model.exposed(occluded, hold_passes=hold_n)
-        assert not exp0[48, 64]
-        assert model.recovering_px == 0
-
-        # Quadros ocultos pela mascara visible=False nao consomem o hold
-        hidden_vis = np.zeros((H, W), dtype=bool)
-        for _ in range(hold_n + 2):
-            model.exposed(paper, visible=hidden_vis, hold_passes=hold_n)
-            assert model.recovering_px == 0
-            assert not model.hold_mask[48, 64]
-
-        for step in range(hold_n):
-            exp_rec = model.exposed(paper, hold_passes=hold_n)
-            assert not exp_rec[48, 64], (
-                f"hold={hold_n} liberou cedo na passada {step + 1}"
-            )
-            assert model.recovering_px > 0
-            assert model.hold_mask[48, 64]
-
-        exp_done = model.exposed(paper, hold_passes=hold_n)
-        assert exp_done[48, 64]
-        assert model.recovering_px == 0
-        assert not model.hold_mask[48, 64]
-
-
-def test_page_model_does_not_seed_under_startup_shadow_rejected_by_paper_guard(
-    monkeypatch,
-):
-    """R2285-2293: sombra local na abertura rejeitada por paper_ok nao semeia baseline."""
-    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
-    worker = _worker(InkConfig(page_model=True, occlusion_hold_passes=1))
-    try:
-        generation = worker.new_generation()
-        real_sheet = np.full((H, W), PAPER, dtype=np.float32)
-        real_sheet[40:50, 40:50] = INK  # marca impressa pre-existente
-
-        # Sombra local [32:64, 32:64] em nivel 110 (paper_ok False contra papel 235),
-        # mas sem mascara de mao (visible=None) e marca pre-existente a 40.
-        shadowed = real_sheet.copy()
-        shadowed[32:64, 32:64] = 110.0
-        shadowed[40:50, 40:50] = INK
-        for _ in range(4):
-            _drive(worker, generation, shadowed)
-        assert not np.any(worker._page_model.seeded[32:64, 32:64])
-        assert np.count_nonzero(_confirmed(worker, generation)) == 0
-
-        # Sombra sai: hold esgota e o bloco semeia COM a marca pre-existente como fundo
-        for _ in range(5):
-            _drive(worker, generation, real_sheet)
-        assert np.all(worker._page_model.seeded[32:64, 32:64])
-        assert np.count_nonzero(_confirmed(worker, generation)) == 0
-
-        # Traco novo na mesma regiao confirma normalmente
-        real_sheet[52:60, 40:50] = INK
-        for _ in range(4):
-            _drive(worker, generation, real_sheet)
-        assert np.count_nonzero(_confirmed(worker, generation)[52:60, 40:50]) == 80
-    finally:
-        worker.stop()
-
-
 def test_page_model_adapts_to_sustained_dimming_and_captures_new_stroke(monkeypatch):
     """R307-311 & R369-371: marca impressa semeada continua suprimida sob dimming e relighting."""
     monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
@@ -1225,13 +1100,6 @@ def test_page_model_adapts_to_sustained_dimming_and_captures_new_stroke(monkeypa
         dimmed = np.full((H, W), 170.0, dtype=np.float32)
         dimmed[14:22, 14:44] = 69.0
         dimmed[50:60, 80:90] = INK
-        dimmed_with_occluder = dimmed.copy()
-        dimmed_with_occluder[0:36, 70:106] = 70.0
-        exp = worker._page_model.exposed(
-            dimmed_with_occluder, bgr=_bgr(dimmed_with_occluder)
-        )
-        assert exp[55, 85]
-        assert not exp[10, 85]
 
         # Dimming sustentado por 10 passadas: marca impressa segue suprimida, traco novo confirma
         for _ in range(10):
@@ -1251,67 +1119,6 @@ def test_page_model_adapts_to_sustained_dimming_and_captures_new_stroke(monkeypa
         assert not np.any(confirmed_relit[14:22, 14:44] > 0)
     finally:
         worker.stop()
-
-
-def test_page_model_hand_exit_holds_until_uncovered_stroke_confirms_before_rest(
-    monkeypatch,
-):
-    """R2392-2404: hold do PageModel estende a janela pos-saida ate confirmar traco."""
-    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.02)
-    monkeypatch.setattr(worker_mod, "_IDLE_PROBE_SECONDS", 0.05)
-    now = [1000.0]
-    worker = worker_mod.PageCleanWorker(
-        _ScriptInk(),
-        config=InkConfig(page_model=True, occlusion_hold_passes=2),
-        clock=lambda: now[0],
-    )
-    generation = worker.new_generation()
-    # Folha com papel a 200 e patch [24:72, 40:88] mais claro a 250:
-    # uma sombra local a 180 no patch cai abaixo de 0.78 * 250 = 195 (aciona hold
-    # do PageModel), mas fica acima de 0.78 * 200 = 156 (paper_ok global = True).
-    base = np.full((H, W), 200.0, dtype=np.float32)
-    base[24:72, 40:88] = 250.0
-    worker.set_hand_presence(True)
-    for _ in range(3):
-        worker.submit(WarpedPage(_bgr(base), generation, Q0))
-        assert worker.pump()
-        now[0] += 0.05
-
-    shadow = base.copy()
-    shadow[24:72, 40:88] = 180.0
-    worker.submit(WarpedPage(_bgr(shadow), generation, Q0))
-    assert worker.pump()
-    now[0] += 0.05
-
-    # Mao sai, sombra limpa e revela traco novo em [42:52, 55:65]:
-    # as 2 passadas de hold do PageModel nao podem esgotar a confirmacao antes do descanso.
-    uncovered = base.copy()
-    uncovered[42:52, 55:65] = INK
-    worker.set_hand_presence(False)
-    for _ in range(12):
-        worker.submit(WarpedPage(_bgr(uncovered), generation, Q0))
-        worker.pump()
-        now[0] += 0.06
-        if worker.stats()["resting"]:
-            break
-    assert worker.stats()["resting"]
-    snap = worker.poll(generation, 0)
-    assert snap is not None
-    assert np.count_nonzero(snap.confirmed[42:52, 55:65]) == 100
-
-    # Controle: oclusao permanente (~raw_exposed) ainda atinge descanso finito
-    worker.set_hand_presence(True, moved=True)
-    worker.submit(WarpedPage(_bgr(shadow), generation, Q0))
-    assert worker.pump()
-    now[0] += 0.05
-    worker.set_hand_presence(False)
-    for _ in range(12):
-        worker.submit(WarpedPage(_bgr(shadow), generation, Q0))
-        worker.pump()
-        now[0] += 0.06
-        if worker.stats()["resting"]:
-            break
-    assert worker.stats()["resting"]
 
 
 def test_page_model_coverage_drop_preserves_identity_baseline_on_reacquisition(

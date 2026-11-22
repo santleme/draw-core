@@ -721,9 +721,7 @@ def test_cached_hand_mask_on_hand_exit_still_confirms_final_stroke_under_product
     # tinta confirmada: o cenario e a maquinaria pos-saida/re-entrada,
     # exercitada na pilha que o teste descreve (guarda de papel ligada).
     cfg = PipelineConfig(
-        ink=dataclasses.replace(
-            InkConfig.production(), page_model=False, paper_guard=True
-        )
+        ink=dataclasses.replace(InkConfig.production(), page_model=False)
     )
     ink_worker = PageCleanWorker(_DarkIsInk(), config=cfg.ink, clock=lambda: now[0])
     pipe = pipeline.Pipeline(

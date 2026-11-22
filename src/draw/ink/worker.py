@@ -16,108 +16,11 @@ from . import (
     identity,
     motion,
     page_model,
-    paper_evidence,
     registration,
-    ruling,
     votes,
 )
 from . import anchor as anchor_mod
-from .config import InkConfig, resolve_border_guard_px
-
-
-def _inset_quad(corners, inset_px):
-    """Recua um quadrilatero convexo em `inset_px` para dentro no espaco da camera."""
-    pts = np.asarray(corners, dtype=np.float64)
-    if pts.shape != (4, 2) or not np.isfinite(pts).all():
-        return None
-    center = pts.mean(axis=0)
-    normals = []
-    offsets = []
-    for i in range(4):
-        p0 = pts[i]
-        p1 = pts[(i + 1) % 4]
-        edge = p1 - p0
-        length = float(np.hypot(edge[0], edge[1]))
-        if length < 1e-6:
-            return None
-        normal = np.array([-edge[1] / length, edge[0] / length], dtype=np.float64)
-        if float(np.dot(normal, center - p0)) < 0.0:
-            normal = -normal
-        normals.append(normal)
-        offsets.append(float(np.dot(normal, p0)) + float(inset_px))
-    inset_pts = np.empty((4, 2), dtype=np.float64)
-    for i in range(4):
-        prev = (i - 1) % 4
-        mat = np.vstack((normals[prev], normals[i]))
-        det = float(mat[0, 0] * mat[1, 1] - mat[0, 1] * mat[1, 0])
-        if abs(det) < 1e-6:
-            return None
-        inset_pts[i] = np.linalg.solve(mat, np.array([offsets[prev], offsets[i]]))
-    if not np.isfinite(inset_pts).all():
-        return None
-    return inset_pts
-
-
-def _border_guard_mask(
-    shape,
-    configured,
-    corners=None,
-    *,
-    min_auto_side=0,
-    camera_jitter_px=3.5,
-):
-    """Mascara booleana da area util na grade retificada (False na faixa de guarda)."""
-    h, w = shape[:2]
-    base = resolve_border_guard_px(shape, configured, min_auto_side=min_auto_side)
-    if base <= 0:
-        return None
-    mask = np.ones((h, w), dtype=bool)
-    mask[:base, :] = False
-    mask[-base:, :] = False
-    mask[:, :base] = False
-    mask[:, -base:] = False
-    if configured is None and corners is not None:
-        # Quad corrompido (NaN/degenerado): sem dominio para julgar
-        # a passada — devolver uma mascara todo-False apagaria o
-        # provisorio e contaria retracao falsa; None = a guarda se
-        # abstem nesta passada.
-        if not np.isfinite(corners).all():
-            return None
-        inset_cam = _inset_quad(corners, camera_jitter_px)
-        if inset_cam is not None:
-            # Mesma homografia camera->pagina do warp/registration
-            # (destino (0,0)..(W,H)): a grade w-1/h-1 deslocava o
-            # inset ~0,5 px e admitia amostras dentro do jitter.
-            homography = registration._corners_page_matrix(corners, w, h)
-            inset_page = cv2.perspectiveTransform(
-                inset_cam.reshape(1, 4, 2).astype(np.float32),
-                homography,
-            )[0]
-            # Rasteriza o inset testando os QUATRO cantos de cada
-            # pixel contra os quatro semi-planos: o pixel so entra
-            # na area util inteiro. Testar so o centro admitia a
-            # amostra de fronteira ~0,5 px de pagina mais perto da
-            # borda do que o inset de camera previsto — dentro da
-            # faixa de jitter que a guarda existe para excluir.
-            xs = np.arange(w, dtype=np.float64)[None, :]
-            ys = np.arange(h, dtype=np.float64)[:, None]
-            cx, cy = inset_page.mean(axis=0)
-            inside = np.ones((h, w), dtype=bool)
-            for i in range(4):
-                p1 = inset_page[i].astype(np.float64)
-                p2 = inset_page[(i + 1) % 4].astype(np.float64)
-                ex, ey = p2[0] - p1[0], p2[1] - p1[1]
-                ref = ex * (cy - p1[1]) - ey * (cx - p1[0])
-                for dx, dy in ((-0.5, -0.5), (0.5, -0.5), (-0.5, 0.5), (0.5, 0.5)):
-                    cross = ex * (ys + dy - p1[1]) - ey * (xs + dx - p1[0])
-                    inside &= cross * ref >= 0
-            mask &= inside
-    if not mask.any():
-        # Dominio inspecionado vazio nao e "tudo falhou": a guarda
-        # nao pode julgar esta passada, entao se abstem.
-        return None
-    return mask
-
+from .config import InkConfig
 
 # Porta de ociosidade sem mao: no maximo uma sonda a cada
 # _IDLE_PROBE_SECONDS. A porta e a presenca da mao, nao um
@@ -161,9 +64,6 @@ _NO_HAND_REST_AFTER_STILL_PASSES = 4
 # de acordar desse clone — com a porta de fronteira, ela nao
 # acumula mais.
 _REST_MIN_GENERATION_PASSES = 3
-# Pixels minimos de papel em recuperacao (hold) para re-armar a janela de
-# confirmacao pos-saida; abaixo disso e ruido de borda.
-_RECOVERY_MIN_PX = 256
 
 
 _REST_QUIET_PASSES = 2
@@ -715,7 +615,6 @@ class _Pass:
     coverage_page: object = None
     coverage_anchor: object = None
     prob: object = None
-    paper_ok_page: object = None
     # estado de ancora / registro
     first_pass: bool = False
     recovering: bool = False
@@ -763,13 +662,10 @@ class _Pass:
     confirmed_ink: object = None
     pm_baseline_ink: object = None
     next_baseline_ink: object = None
-    paper_ok: object = None
     reg_coverage: object = None
     coverage_matches_last_reg: bool = False
     pm_seeding_remaining: int = 0
     pm_confirm_obs: int = 0
-    pm_recovering_px: int = 0
-    pm_hold_pending_px: int = 0
     reg_info: dict = field(default_factory=dict)
 
 
@@ -849,9 +745,6 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         # porque a passada tem folga de cadência; o laço principal
         # não paga o blur de página inteira (~42 ms/submit, #101).
         self._ink_divnorm = bool(ink_divnorm)
-        # Filtro de pauta (InkConfig.ruling_removal, opt-in): modelo em cache
-        # por folha; zerado quando a geracao vira (outra folha, outro quad).
-        self._ruling = ruling.RulingFilter() if self._config.ruling_removal else None
         # Veto por movimento residual (InkConfig.motion_veto, opt-in):
         # ver draw.ink.motion.
         self._motion = (
@@ -864,7 +757,6 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         self._motion_corrections_total = 0
         self._motion_fail_open_total = 0
         self._motion_unregistered_total = 0
-        self._ruling_generation = None
         # Modelo persistente da pagina limpa (InkConfig.page_model,
         # opt-in): mantido por epoca (canvas_epoch, pm_reset_seq) e
         # propriedade exclusiva da thread trabalhadora — ver draw.ink.page_model.
@@ -950,14 +842,9 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         self._identity_defer_count = 0
         self._identity_switch_votes = 0
         self._identity_hold_seen = False
-        # Memo da guarda por quad: a ancora fica estavel por longas
-        # sequencias e rasterizar a mascara cheia a cada passada,
-        # sob o lock, custa arrays da pagina inteira.
-        self._guard_memo = {}
         # Degrau entre quads consecutivos (a entrada de cadencia
         # geometrica do follow e do portao de remocao).
         self._previous_corners = None
-        self._paper_ref = None
         self._spent_confirm_pass = False
         self._accumulator = accumulator.LayeredInkAccumulator(
             threshold=self._config.seen_threshold, config=self._config
@@ -1040,9 +927,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             self._identity_defer_count = 0
             self._identity_switch_votes = 0
             self._identity_hold_seen = False
-            self._guard_memo.clear()
             self._previous_corners = None
-            self._paper_ref = None
             if preserve_identity:
                 if self._identity_reference is None:
                     # MOVER (nao copiar) o desenho confirmado para a
@@ -1111,40 +996,15 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             self._condition.notify_all()
             return self._generation
 
-    def _cached_border_guard(self, shape, corners):
-        """Guarda da passada com memo por quad.
-
-        Rasterizar a mascara cheia a cada passada, sob o lock,
-        aloca arrays da pagina inteira; a ancora fica estavel por
-        longas sequencias, entao a mascara depende so do quad.
-        """
-        key = (shape, None if corners is None else corners.tobytes())
-        if key not in self._guard_memo:
-            if len(self._guard_memo) >= 8:
-                self._guard_memo.clear()
-            self._guard_memo[key] = _border_guard_mask(
-                shape,
-                self._config.border_guard_px,
-                corners,
-                min_auto_side=200,
-            )
-        return self._guard_memo[key]
-
     def _pass_sampled(self, anchor, corners, shape, live_corners=None):
-        """Pegada amostrada do registro, so quando ha consumidor.
+        """Pegada amostrada do registro: o que a passada cobriu de
+        fato na grade da ancora.
 
-        Sem guarda ativa o dominio valido nao a consome — o warp
-        da pagina inteira seria descartado (o registro so precisa
-        da dele quando recorta a visibilidade, e rasteriza a
-        propria nesse caso). Com guarda, ela segue necessaria
-        mesmo havendo mascara de visibilidade: a fusao provisoria
-        distingue "fora do dominio" (limpa) de "coberto pela mao"
-        (preserva), e a visibilidade sozinha confunde os dois
-        casos. Computada antes do registro para ser reaproveitada
-        no clipe de visibilidade em vez de warp'ada duas vezes.
+        Distingue "nao observei" de "observei vazio" quando nao ha
+        mascara de visibilidade — alimenta o dominio julgavel da
+        F-11, o clipe de visibilidade do registro (reuso em vez de
+        rasterizar de novo) e o dominio valido do voto.
         """
-        if self._config.border_guard_px == 0:
-            return None
         return registration._observed_footprint(anchor, corners, live_corners, shape)
 
     def _register_into(
@@ -1920,25 +1780,6 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             p.prob = ink_prob(p.warped)
         else:
             p.prob = (self._page_clean.ink_mask(p.warped) > 0).astype(np.float32)
-        if self._config.paper_guard and p.warped.dtype == np.uint8:
-            # Guarda fotometrica (issue #129): so papel exposto
-            # pode apagar ou votar; mao/sombra/caneta congelam,
-            # com ou sem a deteccao do MediaPipe. So imagem
-            # fotometrica (uint8): mapa float nao e foto.
-            reference = paper_evidence.paper_reference(p.warped, p.visible)
-            if reference is not None:
-                self._paper_ref = reference
-            # Sem NENHUMA referencia de papel (imagem preta desde o
-            # inicio da geracao) nao ha o que comparar: a guarda se
-            # abstem como antes. Com referencia previa, incerteza
-            # (reference None) congela a pagina inteira.
-            if self._paper_ref is not None:
-                p.paper_ok_page = paper_evidence.paper_exposed(p.warped, reference)
-        if self._ruling is not None:
-            if p.generation != self._ruling_generation:
-                self._ruling.reset()
-                self._ruling_generation = p.generation
-            p.prob = self._ruling.apply(p.prob, p.visible)
         # Cobertura de folha (cobertura de folha do loop) viaja em
         # canal proprio ate depois do registro: o veto nao e
         # cego nem se confunde com oclusao de mao — ver o
@@ -2166,16 +2007,15 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 # A correcao afim tambem recorta a pegada: a
                 # faixa que o warp_back preenche de zeros nao
                 # foi observada.
-                if self._config.border_guard_px != 0:
-                    p.sampled = (
-                        p.motion_fix.warp_back(
-                            np.ones(p.prob.shape, np.uint8)
-                            if p.sampled is None
-                            else p.sampled.astype(np.uint8),
-                            nearest=True,
-                        )
-                        > 0
+                p.sampled = (
+                    p.motion_fix.warp_back(
+                        np.ones(p.prob.shape, np.uint8)
+                        if p.sampled is None
+                        else p.sampled.astype(np.uint8),
+                        nearest=True,
                     )
+                    > 0
+                )
         if p.coverage_cam is not None or p.coverage_page_static is not None:
             # Gate de re-confirmacao (cobertura de folha do loop): onde
             # o warp nao e folha, so a tinta que a ancora JA
@@ -2305,7 +2145,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     p.registered_prob,
                     p.registered_visible,
                     identity_sampled,
-                    self._cached_border_guard(p.prob.shape, p.identity_corners_snap),
+                    None,
                     p.identity_hold_seen_snap,
                     self._accumulator.threshold,
                 ),
@@ -2416,7 +2256,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                         p.registered_prob,
                         p.registered_visible,
                         identity_sampled,
-                        self._cached_border_guard(p.prob.shape, identity_corners),
+                        None,
                         self._identity_hold_seen,
                         self._accumulator.threshold,
                     )
@@ -2743,33 +2583,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             )
 
     def _pass_paper_and_page_model(self, p):
-        """Registro da guarda de papel e PageModel, fora do lock."""
-        paper_ok = p.paper_ok_page
-        registration_used = p.last_reg
-        if (
-            paper_ok is not None
-            and registration_used is not None
-            and registration_used[0] is not None
-            and p.used_registered_prob
-        ):
-            # Mesma transformacao da probabilidade; so o que sobrevive
-            # inteiro ao resample (== 1) conta como papel.
-            paper_ok = (
-                registration._register_ink_probability(
-                    paper_ok.astype(np.float32),
-                    registration_used[0],
-                    registration_used[1],
-                    None,
-                )[0]
-                > 0.999
-            )
-            if p.motion_decision == "correct":
-                # A evidencia de papel segue o mesmo modelo afim da
-                # probabilidade e da visibilidade.
-                paper_ok = (
-                    p.motion_fix.warp_back(paper_ok.astype(np.uint8), nearest=True) > 0
-                )
-        p.paper_ok = paper_ok
+        """Registro do gray/bgr e PageModel, fora do lock."""
         last_reg = p.last_reg
         if self._config.page_model and p.pass_voted:
             # Modelo persistente da pagina (draw.ink.page_model):
@@ -2787,7 +2601,10 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 or self._page_model is None
                 or self._page_model.shape != p.prob.shape
             ):
-                self._page_model = page_model.PageModel(p.prob.shape)
+                self._page_model = page_model.PageModel(
+                    p.prob.shape,
+                    novel_ratio=self._config.page_model_novel_ratio,
+                )
                 self._pm_epoch = p.pm_epoch
                 p.next_baseline_ink = np.zeros(p.prob.shape, dtype=bool)
             elif (
@@ -2903,33 +2720,6 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 if p.visible is None
                 else (p.visible if pm_coverage is None else (p.visible & pm_coverage))
             )
-            if self._config.paper_guard and p.warped.dtype == np.uint8:
-                exposed_mask = pm.exposed(
-                    gray,
-                    bgr=reg_bgr,
-                    visible=obs_visible,
-                    hold_passes=self._config.occlusion_hold_passes,
-                )
-                p.pm_recovering_px = pm.recovering_px
-                p.pm_hold_pending_px = int(
-                    np.count_nonzero(
-                        pm.hold_mask
-                        & ~p.confirmed_ink
-                        & (p.prob > self._accumulator.threshold)
-                    )
-                )
-                p.visible = (
-                    exposed_mask if p.visible is None else (p.visible & exposed_mask)
-                )
-                obs_visible = (
-                    exposed_mask
-                    if obs_visible is None
-                    else (obs_visible & exposed_mask)
-                )
-            if p.paper_ok is not None:
-                obs_visible = (
-                    p.paper_ok if obs_visible is None else (obs_visible & p.paper_ok)
-                )
             pm.observe(
                 gray,
                 visible=obs_visible,
@@ -2987,23 +2777,13 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             self._pm_confirm_obs = p.pm_confirm_obs
         if p.next_baseline_ink is not None:
             self._pm_baseline_ink = p.next_baseline_ink
-        guard_corners = (
-            self._anchor_corners if self._anchor_corners is not None else p.corners
-        )
-        guard_mask = self._cached_border_guard(p.prob.shape, guard_corners)
-        # A pegada amostrada entra no dominio valido so com a
-        # guarda ativa: sem ela, a abstencao legada sem mascara
-        # de visibilidade continua valendo (zeros de
-        # preenchimento do registro nao viram evidencia
-        # negativa).
-        valid_mask = guard_mask
-        if valid_mask is not None and p.sampled is not None:
-            valid_mask = valid_mask & p.sampled
+        # A pegada amostrada delimita o dominio inspecionado:
+        # onde a passada nao alcancou (zeros de preenchimento do
+        # registro) nao vira evidencia negativa.
         result = self._accumulator.add(
             p.prob,
             p.visible,
-            valid_mask=valid_mask,
-            paper_ok=p.paper_ok,
+            valid_mask=p.sampled,
             removal_allowed=(
                 not p.identity_owned
                 and not p.arbitration_abstain
@@ -3046,33 +2826,10 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 if (self._config.page_model and not p.pass_voted)
                 else p.pm_seeding_remaining
             )
-            hold_needed = (
-                result["frozen_pending_px"] > 0
-                or result["recovering_px"] >= _RECOVERY_MIN_PX
-                or p.pm_hold_pending_px > 0
-                or p.pm_recovering_px >= _RECOVERY_MIN_PX
-            )
-            max_skips = (
-                2 * max(votes._INK_VOTE_WINDOW, pm_cap)
-                + self._config.occlusion_hold_passes
-                + 1
-            )
+            max_skips = 2 * max(votes._INK_VOTE_WINDOW, pm_cap) + 1
             if self._config.page_model:
                 max_skips = max(max_skips, 2 * pm_cap + votes._INK_VOTE_WINDOW)
             if (
-                hold_needed
-                and self._confirm_passes < self._post_exit_confirm_passes()
-                and self._confirm_masked_skips < max_skips
-            ):
-                # Pos-saida da mao: enquanto a guarda congela tinta nova
-                # detectada pelo modelo (ou remocao elegivel no hold) ou a
-                # sombra esta saindo (recovering_px), as passadas gastas ate
-                # aqui nao deram voto limpo. Re-arma a janela cheia (limitado
-                # pelo teto de devolucoes) para que, solto o hold, haja uma
-                # janela inteira de votos antes do descanso.
-                self._confirm_masked_skips += 1
-                self._confirm_passes = self._post_exit_confirm_passes()
-            elif (
                 self._config.page_model
                 and pm_needed > self._confirm_passes
                 and self._confirm_masked_skips < max_skips

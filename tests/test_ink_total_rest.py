@@ -182,9 +182,7 @@ def test_production_vote_confirms_late_stroke_after_hand_exit_and_then_rests():
 
     now = [1000.0]
     fake = _LateDashInk()
-    cfg = dataclasses.replace(
-        InkConfig.production(), page_model=False, paper_guard=True
-    )
+    cfg = dataclasses.replace(InkConfig.production(), page_model=False)
     worker = worker_mod.PageCleanWorker(fake, clock=lambda: now[0], config=cfg)
     generation = worker.new_generation()
     worker.set_hand_presence(True, moved=True)
@@ -247,7 +245,9 @@ def test_sketch_confirms_stroke_revealed_only_after_hand_exit():
     now = [1000.0]
     fake = _PostExitDashInk()
     worker = worker_mod.PageCleanWorker(
-        fake, clock=lambda: now[0], config=InkConfig.sketch()
+        fake,
+        clock=lambda: now[0],
+        config=dataclasses.replace(InkConfig.sketch(), page_model=False),
     )
     generation = worker.new_generation()
     worker.set_hand_presence(True, moved=True)
@@ -339,7 +339,7 @@ def test_queued_masked_frame_on_exit_legacy_vs_production():
     assert legacy_worker.stats()["resting"] is True
 
     prod_px, prod_worker = _run_case(
-        dataclasses.replace(InkConfig.production(), page_model=False, paper_guard=True)
+        dataclasses.replace(InkConfig.production(), page_model=False)
     )
     assert prod_px == 8 * 15
     assert prod_worker.stats()["resting"] is True

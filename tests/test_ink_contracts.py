@@ -19,8 +19,6 @@ tinta, fraco onde esta cinza como pauta/vinco/lapis/mao), o mesmo
 papel que o page_clean ONNX tem na passada real.
 """
 
-import dataclasses
-
 import numpy as np
 import pytest
 
@@ -220,24 +218,15 @@ def _dilate(mask, px):
     return out
 
 
-# Regimes sob medicao. "production" e o preset do PipelineConfig —
-# desde o PR que promoveu o PageModel, ele ja carrega o modelo
-# persistente com os remendos #129-#132 desligados. "legacy_patches"
-# reconstrui a pilha anterior (pauta por DP, guarda de papel, guarda
-# de borda auto, sem PageModel): os mesmos 8 contratos precisam
-# sustentar-se nos dois regimes para a troca ser segura.
-PRODUCTION = InkConfig.production()
-LEGACY_PATCHES = dataclasses.replace(
-    PRODUCTION,
-    page_model=False,
-    ruling_removal=True,
-    paper_guard=True,
-    border_guard_px=None,
-)
-
+# Regimes sob medicao: os dois perfis de produto que o usuario
+# escolhe por --preset. Ambos carregam o PageModel — production no
+# contraste calibrado 0,30, sketch a 0,20 (o grafite fraco do lapis
+# precisa da razao menor para contar como conteudo novo); os
+# remendos #129-#133 foram removidos do motor e nao ha pilha
+# alternativa para parametrizar.
 REGIMES = {
-    "production": PRODUCTION,
-    "legacy_patches": LEGACY_PATCHES,
+    "production": InkConfig.production(),
+    "sketch": InkConfig.sketch(),
 }
 
 
@@ -516,3 +505,41 @@ def test_stroke_seen_once_before_hand_exit_finishes_confirming(ink):
     assert np.count_nonzero(got & want) >= 0.95 * np.count_nonzero(want)
     extra = got & ~_dilate(want, 2)
     assert np.count_nonzero(extra) <= 0.02 * np.count_nonzero(want)
+
+
+# ------------------------------------------------------------------
+# Contratos 9-11 (F-11): a folha sai e volta — a mesma pagina com a
+# tinta dela deve voltar intacta, e deslizes de pouso de 2 px e 6 px
+# nao a fazem ler como pagina nova nem duplicar o desenho. O quad
+# que retorna deslocado e o caso real: a deteccao pousa quase onde
+# estava, e o registro desfaz o residuo antes da comparacao de
+# identidade.
+# ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("residual", [0, 2, 6])
+def test_returned_sheet_keeps_its_confirmed_ink(ink, residual):
+    worker, clock = ink
+    generation = worker.new_generation()
+    scene = _Scene()
+    _passes(worker, clock, generation, scene, 4, dt=_DT_IDLE)
+    stroke = (60, 110, 100, 180)
+    _write_stroke(worker, clock, generation, scene, stroke)
+    want = _confirmed(worker, generation) > 0
+    assert np.count_nonzero(want) > 0
+
+    # A folha sai e volta: a geracao de recuperacao carrega a copia
+    # do canvas para a comparacao de identidade (preserve_identity).
+    returned = worker.new_generation(preserve_identity=True)
+    scene.jitter(residual, 0)
+    _passes(worker, clock, returned, scene, 6)
+
+    got = _confirmed(worker, returned) > 0
+    assert np.count_nonzero(got) > 0, (
+        f"folha devolvida com residuo de {residual} px perdeu a tinta"
+    )
+    if residual == 0:
+        np.testing.assert_array_equal(got, want)
+    # Qualquer que seja o residuo, a tinta nao pode duplicar: o total
+    # confirmado fica no tamanho do desenho original.
+    assert np.count_nonzero(got) <= 1.5 * np.count_nonzero(want)

@@ -28,9 +28,9 @@ antes de abrir (sha256 + tamanho); --allow-unverified rebaixa a
 recusa para aviso.
 
 A tinta usa por padrao o preset de producao (InkConfig.production):
-ganho digital, voto 0,85, remocao de pauta, histerese, veto por
-movimento, passadas a 0,15 s e Detect-Wake. --no-ink-ruling tira so a
-pauta (pode apagar lapis fino sobre a linha); --legacy-ink volta ao
+ganho digital, voto 0,85, PageModel (pauta, desenho antigo e sombra
+suprimidos pela referencia da pagina), histerese, veto por
+movimento, passadas a 0,15 s e Detect-Wake. --legacy-ink volta ao
 comportamento anterior; --ink-vote e --ink-interval ajustam os numeros.
 
 A fonte via rede (MJPEG/RTSP) e o caminho recomendado no WSL. O WSL nao
@@ -1190,16 +1190,6 @@ def main():
         ),
     )
     parser.add_argument(
-        "--no-ink-ruling",
-        action="store_true",
-        help=(
-            "desliga a remocao de pauta (InkConfig.ruling_removal, hoje so o "
-            "perfil technical a ativa; o preset de producao suprime pauta "
-            "pelo PageModel): ela segue a curvatura da lombada, mas "
-            "pode apagar lapis fino deitado sobre a linha impressa (PR #56)"
-        ),
-    )
-    parser.add_argument(
         "--legacy-ink",
         action="store_true",
         help=(
@@ -1219,7 +1209,7 @@ def main():
             "(caderno pautado — o preset de produção atual) ou technical "
             "(técnico/CAD — voto 0,92, vetores mais limpos para DXF). "
             "--ink-vote não combina (o perfil fixa o nível); --ink-interval "
-            "e --no-ink-ruling seguem como ajustes sobre o perfil"
+            "segue como ajuste sobre o perfil"
         ),
     )
     parser.add_argument(
@@ -1259,7 +1249,6 @@ def main():
     for flag, given in (
         ("--ink-vote", args.ink_vote is not None),
         ("--ink-interval", args.ink_interval is not None),
-        ("--no-ink-ruling", args.no_ink_ruling),
         ("--legacy-ink", args.legacy_ink),
         ("--preset", args.preset is not None),
     ):
@@ -1267,8 +1256,6 @@ def main():
             parser.error(
                 f"{flag} nao combina com --markers (sem tinta no modo marcadores)"
             )
-    if args.legacy_ink and args.no_ink_ruling:
-        parser.error("--no-ink-ruling e redundante com --legacy-ink (ja sem pauta)")
     if args.preset is not None:
         if args.legacy_ink:
             parser.error("--preset nao combina com --legacy-ink")
@@ -1278,11 +1265,9 @@ def main():
             )
     try:
         if legacy_ink:
-            # Comparacao com o legado: sem a guarda de papel (#129), que o
-            # laco legado nao tem.
-            ink_config = InkConfig(paper_guard=False)
+            ink_config = InkConfig()
             if args.ink_vote is not None:
-                ink_config = InkConfig.strict_vote(args.ink_vote, paper_guard=False)
+                ink_config = InkConfig.strict_vote(args.ink_vote)
             if args.ink_interval is not None:
                 ink_config = dataclasses.replace(
                     ink_config, pass_interval_s=args.ink_interval
@@ -1303,8 +1288,6 @@ def main():
                 overrides = {}
                 if args.ink_interval is not None:
                     overrides["pass_interval_s"] = args.ink_interval
-                if args.no_ink_ruling:
-                    overrides["ruling_removal"] = False
                 if overrides:
                     ink_config = dataclasses.replace(ink_config, **overrides)
     except ValueError as error:

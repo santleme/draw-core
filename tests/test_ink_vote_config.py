@@ -202,15 +202,17 @@ def test_main_combines_ink_vote_gain_and_rotation(monkeypatch):
     assert kwargs["rotation"] == 180
 
 
-def test_sketch_profile_keeps_the_legacy_vote_and_drops_ruling_removal():
+def test_sketch_profile_keeps_the_legacy_vote_and_sensitive_page_model():
     """Esboço/lápis: campos de voto idênticos ao legado (fidelidade do
-    grafite fino), com os mecanismos de produção ligados e a remoção de
-    pauta desligada (PR #56: ela pode comer lápis sobre a linha)."""
+    grafite fino), com os mecanismos de produção ligados e o PageModel
+    no contraste mais sensível — o grafite fraco (~20%) ainda conta
+    como conteúdo novo e a pauta segue suprimida pela referência."""
     cfg = InkConfig.sketch()
     legacy = InkConfig()
     for field in ("vote_hit", "vote_score", "vote_score_strong", "seen_threshold"):
         assert getattr(cfg, field) == getattr(legacy, field)
-    assert cfg.ruling_removal is False
+    assert cfg.page_model is True
+    assert cfg.page_model_novel_ratio == 0.20
     # Sem hysteresis: o portão de âncora mata traço de lápis isolado
     # (Devin Review PR #122) — ver teste de acumulador abaixo.
     assert cfg.hysteresis is False
@@ -235,7 +237,7 @@ def test_technical_profile_uses_the_measured_092_vote_level():
     cfg = InkConfig.technical()
     shift = TECHNICAL_VOTE_LEVEL - LEGACY_VOTE_LEVEL
     assert cfg.vote_score_strong == pytest.approx(1.9 + 3 * shift)
-    assert cfg.ruling_removal is True
+    assert cfg.page_model is True
     assert cfg.hysteresis is True
     assert cfg.motion_veto is True
     assert cfg.pass_interval_s == PRODUCTION_PASS_INTERVAL_S

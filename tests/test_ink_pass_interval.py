@@ -269,5 +269,4 @@ def test_default_is_the_full_live_stack(monkeypatch):
     ink = config.ink
     assert config.ink_auto_gain
     assert ink.page_model and ink.hysteresis and ink.motion_veto
-    assert not ink.ruling_removal and not ink.paper_guard
     assert ink.pass_interval_s == 0.15

@@ -268,13 +268,12 @@ or by the migration). Parity runs must account for them.
   quads with a rolled anchor and never rested).
 - Pipeline: the detector's hand mask feeds `seg_hand_occlusion` regardless
   of `coverage` (legacy tied both detection extras to the same flag).
-- Ink worker: photometric occlusion guard (`InkConfig.paper_guard`, issue
-  #129). Regions that do not look like exposed paper (dark/chromatic block
-  versus the p90 paper reference) are frozen like an occlusion: no removal of
-  confirmed ink, no new votes, provisional layer held, for
-  `occlusion_hold_passes` passes after the evidence disappears. Independent of
-  MediaPipe. Limitation: a solid dark fill wider than ~32 px reads as shadow
-  (thin and thick pen strokes do not).
+- Ink worker: the photometric occlusion guard (`InkConfig.paper_guard`,
+  issue #129), the border guard band (`border_guard_px`, #131), the ruling
+  remover (`ruling.py`, #132) and the gain smoother (#133) were superseded by
+  the persistent PageModel (`InkConfig.page_model`) and deleted — the page
+  reference suppresses printed marks, old drawings and border jitter, and
+  blocks vote/removal on regions never seen clean.
 - Pipeline: with `canvas_persist` off, a tracker drop also clears the
   rendered canvas and the provisional layer (legacy cleared only the
   confirmed mask). Neither change alters the production preset.

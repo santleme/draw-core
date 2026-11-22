@@ -322,9 +322,7 @@ def test_run_new_pins_legacy_tier_a_config(monkeypatch, tmp_path):
         hand_model=None,
         verify=None,
     )
-    expected = PipelineConfig(
-        ink=InkConfig(paper_guard=False), ink_auto_gain=False, detect_wake=False
-    )
+    expected = PipelineConfig(ink=InkConfig(), ink_auto_gain=False, detect_wake=False)
     assert seen["pipeline_config"] == expected
     assert seen["worker_config"] == expected.ink
 
