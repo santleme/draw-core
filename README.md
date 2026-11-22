@@ -5,6 +5,9 @@ Clean production repo; the experimental history lives in `santleme/draw`.
 
 See [`docs/MIGRATION_SPEC.md`](docs/MIGRATION_SPEC.md) for structure and plan.
 
+The website (`site/` plus the published research drafts in `docs/research/`)
+lives in its own repository, [`GUZZBR1/-draw-site-`](https://github.com/GUZZBR1/-draw-site-).
+
 ## Run the live app
 
 One command sets up the environment, downloads any missing official model

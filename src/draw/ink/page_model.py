@@ -73,7 +73,8 @@ _UPDATE_RATE = 0.125
 # ser "conteudo novo", em unidades de luminancia. Semente para
 # traco escuro sobre papel claro; a calibracao real sai do corpus.
 # A literatura canonica testa sombra por RAZAO (MOG2 Tau, penumbra e o
-# caso dificil — docs/research/nota-page-model-literatura.md); o delta
+# caso dificil — docs/research/nota-page-model-literatura.md no repo
+# GUZZBR1/-draw-site-); o delta
 # absoluto falha justamente no gradiente de sombra movel do #133. E o
 # erro mais seguro p/ prototipo: falso `novel` cai na pipeline normal
 # (status quo), falso `~novel` suprime traco claro para sempre — mas a

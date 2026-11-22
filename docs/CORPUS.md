@@ -191,5 +191,5 @@ para timing.
 `_NOVEL_DELTA`, `rate`, `block`, `confirm_obs` — quando existir
 massa de clipes rotulados por condição. A nota de literatura que
 fundamenta o modelo e lista o que está pendente de medição está em
-`docs/research/nota-page-model-literatura.md` (branch
-`feat/page-model`).
+`docs/research/nota-page-model-literatura.md` (repo
+`GUZZBR1/-draw-site-`).

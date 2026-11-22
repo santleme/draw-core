@@ -50,10 +50,12 @@ draw-core/
 │   ├── exporters.py            # SVG, DXF (locked scale), CAD bridge
 │   └── pipeline.py             # frame -> events orchestration (threads)
 ├── lab/                        # replay, simulator, judges (not runtime)
-├── site/                       # React site (moved as-is, own CI job)
 ├── bridge/                     # Windows camera helper
 └── tests/
 ```
+
+The React `site/` and the research articles it publishes (`docs/research/`)
+were extracted to a separate repo, `GUZZBR1/-draw-site-` (PR #164).
 
 Separate repo `draw-training` (not created yet): `training/`, dataset
 tools, labeling, Kaggle runner, `draw/selflearn/`, `gpu_augmenter.py`.
@@ -89,7 +91,8 @@ It delivers only approved `.onnx` files + hashes to `assets/manifest.json`.
 | `tools/` dataset, label, kaggle, runner, export/merge | archive | `draw-training` |
 | `tools/replay_reregister*.py` | archive | hash-anchored; bytes must not change |
 | `training/` | archive | `draw-training` |
-| `site/`, `bridge/` | migrate | same names (monorepo) |
+| `bridge/` | migrate | same name (monorepo) |
+| `site/` + `docs/research/` | extracted | own repo `GUZZBR1/-draw-site-` |
 | `docs/` | keep README, SIMULATOR, SETUP_WINDOWS, a trimmed FALHAS | dated pre-registrations stay in legacy |
 
 Tests: ~60 module tests migrate with their module; sim/judge/replay tests go
@@ -187,7 +190,8 @@ dependency shipped grouped — those groupings are marked.
 9. `hand.py` (PR #10).
 10. `lab/` in two PRs: simulator (`lab-sim`, PR #11) and
     metrics/vectorize (`lab-metrics-vectorize`, PR #12).
-11. `site/` (PR #13), `bridge/` (PR #14).
+11. `site/` (PR #13; later extracted to `GUZZBR1/-draw-site-`, PR #164),
+    `bridge/` (PR #14).
 12. `pipeline.py` + CLI (`app.py`, `view.py`): done, evolved through the
     opt-in feature PRs (#45-#57: coverage floor, auto gain, strict vote,
     dense warp, ruling removal, hysteresis). `exporters/` carries
