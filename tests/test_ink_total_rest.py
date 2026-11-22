@@ -15,6 +15,7 @@ tinta falsa contavel:
 3. A mao volta e a cadencia ativa volta junto, na hora.
 """
 
+import dataclasses
 import threading
 import time
 
@@ -181,7 +182,9 @@ def test_production_vote_confirms_late_stroke_after_hand_exit_and_then_rests():
 
     now = [1000.0]
     fake = _LateDashInk()
-    cfg = InkConfig.production()
+    cfg = dataclasses.replace(
+        InkConfig.production(), page_model=False, paper_guard=True
+    )
     worker = worker_mod.PageCleanWorker(fake, clock=lambda: now[0], config=cfg)
     generation = worker.new_generation()
     worker.set_hand_presence(True, moved=True)
@@ -335,6 +338,8 @@ def test_queued_masked_frame_on_exit_legacy_vs_production():
     assert legacy_px == 0
     assert legacy_worker.stats()["resting"] is True
 
-    prod_px, prod_worker = _run_case(InkConfig.production())
+    prod_px, prod_worker = _run_case(
+        dataclasses.replace(InkConfig.production(), page_model=False, paper_guard=True)
+    )
     assert prod_px == 8 * 15
     assert prod_worker.stats()["resting"] is True

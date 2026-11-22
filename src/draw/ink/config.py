@@ -1,5 +1,6 @@
 """Preset de producao do motor de tinta (o que as flags Tier A/B liam do ambiente)."""
 
+import dataclasses
 from dataclasses import dataclass
 
 # Nivel de voto que reproduz o legado: a media das 3 passadas que fecha a
@@ -138,15 +139,14 @@ class InkConfig:
     # MediaPipe. Incerteza congela.
     paper_guard: bool = True
     occlusion_hold_passes: int = 3
-    # Modelo persistente da pagina limpa (draw.ink.page_model, opt-in):
+    # Modelo persistente da pagina limpa (draw.ink.page_model):
     # referencia por pixel na grade da ancora, semeada por blocos que a
     # passada viu limpos. Pixels ainda sem referencia nao entregam
     # evidencia (regiao pendente) e evidencia que nao e conteudo novo
     # contra a referencia e suprimida — pauta impressa, desenho antigo
     # e sombra de vinco deixam de parecer tinta sem depender da regra
-    # de pauta (#132) nem de o modelo ver a mao (#129). O delta de
-    # "novo" ainda nao foi calibrado em corpus real — ligar para
-    # replay/mesa, nao para o preset validado.
+    # de pauta (#132) nem de o modelo ver a mao (#129). Ligado no
+    # preset de producao; InkConfig() puro (legado) segue sem ele.
     page_model: bool = False
 
     def __post_init__(self):
@@ -221,24 +221,38 @@ class InkConfig:
         *,
         vote_level=PRODUCTION_VOTE_LEVEL,
         pass_interval_s=PRODUCTION_PASS_INTERVAL_S,
-        ruling_removal=True,
     ):
-        """Preset de producao do motor de tinta: voto estrito (0,85), remocao
-        de pauta, histerese, veto por movimento e passadas a 0,15 s.
+        """Preset de producao do motor de tinta: voto estrito (0,85),
+        histerese, veto por movimento, passadas a 0,15 s e o PageModel
+        como modelo de fundo persistente.
 
         E o que `PipelineConfig()` usa; `InkConfig()` continua sendo o
-        legado (paridade byte a byte com os campos desligados). Riscos
-        medidos: a pauta pode apagar lapis fino deitado sobre a linha
-        impressa (PR #56, recall do braco 8,6%), e o voto 0,85 afina o
-        traco (-27% a -48%, PR #53) e so funciona com `ink_auto_gain`.
-        `ruling_removal=False` (--no-ink-ruling) deixa so a pauta de fora.
+        legado (paridade byte a byte com os campos desligados). O
+        PageModel subsumiu o removedor de pauta no caminho da
+        evidencia — a referencia da propria pagina suprime a linha
+        impressa, entao `ruling_removal` vai desligado aqui (o perfil
+        `technical` o religa ate o modulo morrer). `paper_guard` e
+        `border_guard_px` PERMANECEM: nao sao redundantes. A guarda
+        fotometrica e a unica rejeicao de oclusao antes da referencia
+        existir (sem ref o PM nao tem com que comparar) e, pos-
+        sementeira, congela via `paper_ok`/`pm.exposed` a regiao que a
+        mascara de mao perdeu — sem ela, um oclusor escuro com prob
+        baixa apaga traco confirmado por voto de remocao (limite
+        documentado: oclusores mais finos que a janela de 32 px seguem
+        invisiveis para ela). O inset automatico da borda e a unica
+        exclusao de pixels nao-papel quando o detector nao entrega
+        mascara de cobertura: sem ele, uma faixa de mesa escura mais
+        escura que a referencia confirma como linha de margem. Risco
+        medido que segue: o voto 0,85 afina o traco (-27% a -48%,
+        PR #53) e so funciona com `ink_auto_gain`.
         """
         return cls.strict_vote(
             vote_level,
-            ruling_removal=ruling_removal,
             hysteresis=True,
             motion_veto=True,
             pass_interval_s=pass_interval_s,
+            page_model=True,
+            ruling_removal=False,
             border_guard_px=None,
         )
 
@@ -280,11 +294,14 @@ class InkConfig:
         """Perfil técnico/CAD: vetores mais limpos para export DXF.
 
         Voto mais estrito (0,92 medido: escrita 109%, pauta 48% — quase
-        zera a pauta residual) + removedor de pauta; o traço mais fino
-        é desejado em linhas de construção.
+        zera a pauta residual); o traço mais fino é desejado em linhas
+        de construção. `ruling_removal` soma o removedor de pauta ao
+        preset de producao ate o modulo ser descontinuado.
         """
-        return cls.production(
-            vote_level=vote_level,
-            pass_interval_s=pass_interval_s,
+        return dataclasses.replace(
+            cls.production(
+                vote_level=vote_level,
+                pass_interval_s=pass_interval_s,
+            ),
             ruling_removal=ruling_removal,
         )

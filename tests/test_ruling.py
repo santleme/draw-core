@@ -147,15 +147,22 @@ def test_default_config_is_off_and_the_worker_builds_the_filter_on_demand():
     assert isinstance(on._ruling, ruling.RulingFilter)
 
 
-def test_main_default_is_on_and_no_ink_ruling_turns_it_off(monkeypatch):
+def test_main_no_ink_ruling_still_toggles_off_technical_ruling(monkeypatch):
     seen = []
     monkeypatch.setattr(app_module, "run", lambda **kw: seen.append(kw))
     monkeypatch.setattr(sys, "argv", ["draw"])
     app_module.main()
     ink = seen[-1]["pipeline_config"].ink
-    assert ink.ruling_removal is True
-    assert ink.vote_score_strong > 1.9  # coexiste com o voto estrito
-    monkeypatch.setattr(sys, "argv", ["draw", "--no-ink-ruling"])
+    # O preset de producao suprime pauta pelo PageModel — sem removedor
+    # DP nele; a flag segue valendo onde a pauta ainda e removida por DP.
+    assert ink.ruling_removal is False
+    assert ink.page_model is True
+    monkeypatch.setattr(sys, "argv", ["draw", "--preset", "technical"])
+    app_module.main()
+    assert seen[-1]["pipeline_config"].ink.ruling_removal is True
+    monkeypatch.setattr(
+        sys, "argv", ["draw", "--preset", "technical", "--no-ink-ruling"]
+    )
     app_module.main()
     assert seen[-1]["pipeline_config"].ink.ruling_removal is False
 

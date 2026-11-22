@@ -1444,7 +1444,7 @@ def test_page_model_adapts_to_sustained_dimming_and_captures_new_stroke(monkeypa
         assert np.count_nonzero(_confirmed(worker, generation)) == 0
 
         # Iluminacao cai de 235 para 170: papel le 170 e marca impressa cai de 95 para 69
-        # (queda bruta de 26 > novel_delta=24, mas proporcionalmente inalterada),
+        # (razao de queda 26/95 = 0,27 < novel_ratio=0,30 — proporcionalmente inalterada),
         # junto de um traco novo a 40 em [50:60, 80:90].
         dimmed = np.full((H, W), 170.0, dtype=np.float32)
         dimmed[14:22, 14:44] = 69.0
@@ -1473,6 +1473,69 @@ def test_page_model_adapts_to_sustained_dimming_and_captures_new_stroke(monkeypa
         confirmed_relit = _confirmed(worker, generation)
         assert np.count_nonzero(confirmed_relit[50:60, 80:90]) == 100
         assert not np.any(confirmed_relit[14:22, 14:44] > 0)
+    finally:
+        worker.stop()
+
+
+def test_page_model_survives_global_chroma_shift(monkeypatch):
+    """Review do #162: deslocamento global de cor congelava o modelo.
+
+    Uma lampada quente reprova a razao B/R na folha inteira de uma
+    vez; a porta de croma fechava `exposed` em tudo, `observe` parava
+    de observar e as referencias de croma nunca adaptavam — a folha
+    ficava "oculta" para sempre e traco novo nao confirmava. A porta
+    agora so se aplica quando a reprovacao e local; a global segue
+    pela luminancia ate os refs de croma convergirem."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    worker = _worker(InkConfig(page_model=True))
+    try:
+        generation = worker.new_generation()
+        page = np.full((H, W), PAPER, dtype=np.float32)
+        for _ in range(7):
+            _drive(worker, generation, page)
+        pm = worker._page_model
+        assert pm.seeded_fraction == pytest.approx(1.0)
+
+        def drive(img):
+            before = worker.stats()["passes_total"]
+            worker.submit(WarpedPage(img, generation, Q0))
+            deadline = time.monotonic() + 5.0
+            while worker.stats()["passes_total"] <= before:
+                if time.monotonic() > deadline:
+                    raise AssertionError("a passada nao executou")
+                time.sleep(0.001)
+
+        # Lampada quente: azul cai para metade (B/R de 1,0 para ~0,5)
+        # com a luminancia quase intacta (gray ~209, ainda papel).
+        warm = np.stack([(page * 0.5), page, page], axis=-1).astype(np.uint8)
+        # Antes da correcao, exposed devolvia tudo-False aqui.
+        exp = pm.exposed(page, bgr=warm)
+        assert np.count_nonzero(exp[40:-40, 40:-40]) > 0.9 * (H - 80) * (W - 80)
+
+        # Com a folha exposta, observe adapta os refs de croma; depois
+        # de convergir a razao volta a valer — um objeto local fora da
+        # nova razao (B/R ~1,0 contra referencia ~0,5) segue mascarado.
+        for _ in range(40):
+            drive(warm)
+        exp = pm.exposed(page, bgr=warm)
+        assert np.all(exp[40:-40, 40:-40])
+        skin = warm.copy().astype(np.float32)
+        skin[90:150, 60:160] = page[90:150, 60:160][..., None] * 0.8
+        exp = pm.exposed(page, bgr=skin.astype(np.uint8))
+        assert not np.any(exp[100:140, 70:150])
+
+        # E o caminho inteiro segue vivo: traco novo confirma sob a
+        # luz quente que congelava a geracao antes da correcao. Tinta
+        # real tambem muda de cor com a lampada — B/R ~0,5 como o resto.
+        stroke = warm.copy().astype(np.float32)
+        stroke[60:66, 80:160, 0] = 20.0
+        stroke[60:66, 80:160, 1:] = 40.0
+        for _ in range(8):
+            drive(stroke.astype(np.uint8))
+        confirmed = _confirmed(worker, generation)
+        # Sob o congelamento o contador ficava em zero; as bordas do
+        # retangulo confirmam mais devagar, entao metade ja discrimina.
+        assert np.count_nonzero(confirmed[60:66, 80:160]) > 0.5 * 6 * 80
     finally:
         worker.stop()
 
@@ -2852,3 +2915,59 @@ def test_identity_recovery_photometric_budget_on_a4_grid():
     # maquina (antes desta revisao: 40-60 ms); o bound pega regressao
     # de ordem de grandeza, nao ruido sob carga.
     assert per_pass_ms < 30.0, per_pass_ms
+
+
+def test_novel_and_returned_stay_disjoint_over_dark_print():
+    """Review #174: pauta escura (ref ~24), traco que a escurece dentro
+    de _RETURN_TOL (|diff| <= 8) mas acima da razao de Weber era lido
+    como tinta nova E como papel devolvido — e a trabalhadora apagava
+    o traco visivel pelo caminho de remocao."""
+    model = pm_mod.PageModel((H, W), confirm_obs=1)
+    dark = _paper()
+    dark[40:44, 20:80] = 24.0  # pauta escura semeada
+    model.observe(dark)
+
+    traced = dark.copy()
+    traced[40:44, 30:60] = 16.0  # traco: 33% de contraste, diff=8
+    novel_mask, returned_mask = model.appearance(traced)
+    assert novel_mask[42, 45]
+    assert not returned_mask[42, 45]
+    assert not model.returned(traced)[42, 45]
+
+    # Restaurar a pauta de verdade continua contando como devolvida.
+    assert model.returned(dark)[42, 45]
+
+
+def test_novel_discriminates_absolute_delta_at_both_ends():
+    """Caso de contraste local (sem dimming global): onde as duas
+    regras divergem. ref 180 -> 150 cai 30 absoluto (delta vazaria)
+    mas so 17% (razao suprime); ref 60 -> 40 cai so 20 absoluto
+    (delta suprimiria) mas 33% (razao detecta)."""
+    model = pm_mod.PageModel((H, W), confirm_obs=1)
+    scene = _paper()
+    scene[40:46, 20:60] = 180.0  # papel acinzentado
+    scene[60:66, 20:60] = 60.0  # pauta escura
+    model.observe(scene)
+
+    obs = scene.copy()
+    obs[40:46, 30:50] = 150.0  # sombra local suave sobre o cinza
+    obs[60:66, 30:50] = 40.0  # traco sobre a pauta escura
+    novel_mask, _ = model.appearance(obs)
+    assert not novel_mask[43, 40], "sombra 17% virou tinta nova"
+    assert novel_mask[63, 40], "traco 33% sobre pauta escura nao foi visto"
+
+
+def test_identity_darker_admits_what_novel_admits():
+    """Review #174: darker_than_reference precisa enxergar o traco que
+    novel() admitiu — senao a reaquisicao segura a recuperacao para
+    sempre com o desenho salvo a vista."""
+    model = pm_mod.PageModel((H, W), confirm_obs=1)
+    dark = _paper()
+    dark[40:44, 20:80] = 60.0
+    model.observe(dark)
+
+    traced = dark.copy()
+    traced[40:44, 30:60] = 40.0  # 33% > 30%; gap absoluto 20 < 24
+    assert model.novel(traced)[42, 45]
+    darker, _ = model.darker_than_reference(traced)
+    assert darker[42, 45]

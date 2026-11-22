@@ -7,6 +7,7 @@ por quadro. Se a folha mexer, o sentinela acorda o detector no proprio
 quadro, sem esperar o timer de 1 s.
 """
 
+import dataclasses
 import sys
 import time
 
@@ -650,6 +651,7 @@ def test_cached_hand_mask_on_hand_exit_still_confirms_final_stroke_under_product
     no momento em que a mao sai e uma passada mascarada ainda roda apos a
     saida antes da limpeza da mascara, as passadas limpas seguintes precisam
     confirmar o traco sem novo movimento da mao e depois entrar em descanso."""
+    from draw.ink.config import InkConfig
     from draw.ink.worker import PageCleanWorker
 
     class _DarkIsInk:
@@ -715,7 +717,14 @@ def test_cached_hand_mask_on_hand_exit_still_confirms_final_stroke_under_product
     now = [100.0]
     det = _ManualDet()
     hand = _ManualHand()
-    cfg = PipelineConfig()
+    # O bloco-base pre-existente vira referencia do PageModel em vez de
+    # tinta confirmada: o cenario e a maquinaria pos-saida/re-entrada,
+    # exercitada na pilha que o teste descreve (guarda de papel ligada).
+    cfg = PipelineConfig(
+        ink=dataclasses.replace(
+            InkConfig.production(), page_model=False, paper_guard=True
+        )
+    )
     ink_worker = PageCleanWorker(_DarkIsInk(), config=cfg.ink, clock=lambda: now[0])
     pipe = pipeline.Pipeline(
         detection_worker=det,

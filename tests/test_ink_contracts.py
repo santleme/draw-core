@@ -249,26 +249,23 @@ def _beyond(got, want, px):
     return np.count_nonzero(got & ~_dilate(want, px))
 
 
-# Regimes sob medicao. "production" e o preset do PipelineConfig.
-# "page_model_guarded" e o candidato PageModel que os contratos 9
-# (oclusor sem mascara) e 4 (faixa de mesa sustentada) mediram como
-# necessario: o modelo subsumiu o removedor de pauta, mas NAO a
-# guarda fotometrica (pm.exposed devolve tudo-True antes da
-# sementeira; sem paper_ok um oclusor escuro de prob baixa apaga
-# traco confirmado por voto de remocao) nem o recuo de borda
-# (sem mascara de cobertura, uma faixa de mesa escura dentro do
-# quad confirma como linha de margem). A variante sem guardas
-# (paper_guard=False, border_guard_px=0) falha nos dois contratos.
+# Regimes sob medicao. "production" e o preset do PipelineConfig —
+# desde a promocao do PageModel, ele ja carrega a referencia
+# persistente (pauta e conteudo pre-existente suprimidos pelo
+# baseline; paper_guard e border_guard permanecem — nao sao
+# redundantes). "legacy_patches" reconstrui a pilha anterior
+# (removedor de pauta por DP, sem PageModel): os mesmos contratos
+# precisam sustentar-se nos dois regimes para a troca ser segura.
 PRODUCTION = InkConfig.production()
-PAGE_MODEL_GUARDED = dataclasses.replace(
+LEGACY_PATCHES = dataclasses.replace(
     PRODUCTION,
-    page_model=True,
-    ruling_removal=False,
+    page_model=False,
+    ruling_removal=True,
 )
 
 REGIMES = {
     "production": PRODUCTION,
-    "page_model_guarded": PAGE_MODEL_GUARDED,
+    "legacy_patches": LEGACY_PATCHES,
 }
 
 
@@ -386,8 +383,8 @@ def test_new_stroke_after_settling_confirms_clean(ink):
 
 
 # ------------------------------------------------------------------
-# Contrato 4: jitter de 1-3 px na borda contra fundo escuro nao gera
-# tinta nas margens.
+# Contrato 4: jitter de 1-3 px e deslize sustentado na borda contra
+# fundo escuro nao geram tinta nas margens.
 # ------------------------------------------------------------------
 
 
@@ -566,6 +563,8 @@ def test_stroke_seen_once_before_hand_exit_finishes_confirming(ink):
     got = _confirmed(worker, generation) > 0
     assert _frac(got, want) >= 0.95
     assert _beyond(got, want, 2) <= 0.02 * np.count_nonzero(want)
+
+
 # Contrato 9: objeto escuro sem mascara sobre traco confirmado nao o
 # apaga — a guarda fotometrica congela a regiao para o voto de
 # remocao, com ou sem deteccao de mao. (O contrato 8, traco visto
