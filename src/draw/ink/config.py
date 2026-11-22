@@ -110,7 +110,10 @@ class InkConfig:
     # Intervalo minimo entre inicios de passadas ativas da tinta (s).
     # None = o piso de draw.ink.worker._PAGE_CLEAN_INTERVAL_SECONDS
     # (0,25 s); substitui apenas esse piso, mantendo sonda ociosa e
-    # descanso. Simulado em 2026-11-20 (Ryzen 7700X, draw_seg a 6 Hz em
+    # descanso. Votos de remocao pendentes furam o intervalo ate o
+    # teto da sonda ociosa (1 s) — urgencia de remocao nao espera um
+    # configurado lento (Devin Review do PR #144). Simulado em
+    # 2026-11-20 (Ryzen 7700X, draw_seg a 6 Hz em
     # quadros reais, tinta INT8 de pagina inteira em 4 threads, sem a mao
     # do MediaPipe): 0,25 s -> 4,0 passadas/s em 2,3 nucleos; 0,15 s ->
     # 6,7/s em 3,1; 0,10 s -> 9,9/s em 4,3 (o fp32 em mosaico de hoje, a
@@ -126,12 +129,24 @@ class InkConfig:
     # grades de pagina inteira (>= 200 px).
     border_guard_px: int | None = 0
     # Retencao da guarda fotometrica do PageModel (pm.exposed): a regiao
-    # que deixa de parecer papel exposto (mao, braco, caneta, sombra —
-    # com ou sem a mascara do MediaPipe) fica congelada e continua por
-    # occlusion_hold_passes passadas depois que a evidencia some — uma
-    # queda curta de deteccao nao pode liberar a regiao cedo. Alimenta
-    # pm.exposed(hold_passes=) e o teto de re-arme da janela pos-saida.
+    # semeada que deixa de parecer papel exposto (mao, braco, caneta,
+    # sombra — com ou sem a mascara do MediaPipe) fica congelada e
+    # continua por occlusion_hold_passes passadas depois que a evidencia
+    # some — uma queda curta de deteccao nao pode liberar a regiao cedo.
+    # Alimenta pm.exposed(hold_passes=) e o teto de re-arme da janela
+    # pos-saida. O pixel ainda SEM referencia tem retencao propria
+    # (unseeded_hold_passes), e o veto/testemunha fotometrico de tiles
+    # mora na PaperExposureGuard (draw.ink.occlusion), permanente como o
+    # modelo — nao ha flag para desligar.
     occlusion_hold_passes: int = 3
+    # Hold de pixel sem referencia negado pela guarda
+    # (PageModel.covered_unseeded): fisicamente a vista mas
+    # fotometricamente negado conta para a prontidao por esta
+    # quantidade de passadas — uma mao que sai antes do prazo ainda
+    # e observada e semeada; impressao escura permanente esgota o
+    # prazo e nao segura o "pronto" para sempre (Devin Review do
+    # PR #144).
+    unseeded_hold_passes: int = 4
     # Modelo persistente da pagina limpa (draw.ink.page_model):
     # referencia por pixel na grade da ancora, semeada por blocos que a
     # passada viu limpos. Pixels ainda sem referencia nao entregam
@@ -164,6 +179,8 @@ class InkConfig:
                 f"page_model_novel_ratio deve estar em (0, 1): "
                 f"{self.page_model_novel_ratio!r}"
             )
+        if not 0 <= self.unseeded_hold_passes <= 10:
+            raise ValueError("unseeded_hold_passes fora de [0, 10]")
         if self.pass_interval_s is not None and not 0.0 < self.pass_interval_s <= 5.0:
             raise ValueError(
                 f"pass_interval_s fora de (0, 5] s: {self.pass_interval_s!r}"

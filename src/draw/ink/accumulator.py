@@ -38,6 +38,7 @@ class LayeredInkAccumulator:
     def reset(self):
         self._window = deque(maxlen=votes._INK_VOTE_WINDOW)
         self._removal_streak = None
+        self._removal_stale_passes = 0
         self._confirmed = None
         self._provisional = None
         self._provisional_ever = None
@@ -62,6 +63,7 @@ class LayeredInkAccumulator:
         confirmed = np.asarray(confirmed, dtype=np.uint8)
         if self._confirmed is None or self._confirmed.shape != confirmed.shape:
             self._removal_streak = None
+            self._removal_stale_passes = 0
             self._confirmed = np.zeros_like(confirmed)
             self._provisional = np.zeros(confirmed.shape, np.uint8)
             self._provisional_ever = np.zeros(confirmed.shape, dtype=bool)
@@ -111,15 +113,26 @@ class LayeredInkAccumulator:
         *,
         removal_allowed=True,
         valid_mask=None,
+        paper_exposed=None,
     ):
         """Uma passada. valid_mask delimita o dominio geometrico
         inspecionado (guarda de borda cruzada com a pegada do
-        registro)."""
+        registro); paper_exposed (bool, forma de prob) e a evidencia
+        fotometrica de papel exposto (draw.ink.occlusion): onde e
+        False a regiao esta sob suspeita de oclusao — a ausencia de
+        tinta ali nao e observavel, e a remocao so anda onde a guarda
+        provou papel. O congelamento da regiao sob oclusao fica com a
+        guarda (PaperExposureGuard), fora desta camada. Nones mantem o
+        comportamento sem guarda."""
         prob = np.asarray(prob, dtype=np.float32)
         if visible is not None:
             visible = np.asarray(visible, dtype=bool)
             if visible.shape != prob.shape:
-                visible = None
+                # Máscara em geometria errada é bug do chamador:
+                # None devolveria a passada aberta (evidência livre sob
+                # oclusão); zeros veta tudo — falha fechada dos dois
+                # lados, como uma passada abstida.
+                visible = np.zeros(prob.shape, dtype=bool)
         if valid_mask is not None:
             valid_mask = np.asarray(valid_mask, dtype=bool)
             if valid_mask.shape != prob.shape:
@@ -133,9 +146,19 @@ class LayeredInkAccumulator:
                 valid_mask = None
         # Sem mascara de visibilidade nao ha evidencia negativa
         # confiavel — a passada nao a inventa.
-        had_visibility = visible is not None
+        if paper_exposed is not None and not isinstance(
+            paper_exposed, (bool, np.bool_)
+        ):
+            paper_exposed = np.asarray(paper_exposed, dtype=bool)
+            if paper_exposed.shape != prob.shape:
+                # Máscara em geometria errada é bug do chamador — o
+                # mesmo caso do visible acima: None devolveria a
+                # passada ao contrato legado (voto sem prova de
+                # papel, fail-open para o dreno), então congela.
+                paper_exposed = False
         if self._confirmed is None or self._confirmed.shape != prob.shape:
             self._removal_streak = None
+            self._removal_stale_passes = 0
             self._confirmed = np.zeros(prob.shape, dtype=np.uint8)
             self._provisional = np.zeros(prob.shape, dtype=np.uint8)
             self._provisional_ever = np.zeros(prob.shape, dtype=bool)
@@ -242,19 +265,32 @@ class LayeredInkAccumulator:
         new_confirmed_px = int(np.count_nonzero(new_confirmed))
         if new_confirmed_px:
             self._confirmed[new_confirmed] = 255
-        witnessed = False
+        removed_px = 0
         if self._removal_streak is None:
             self._removal_streak = np.zeros(prob.shape, dtype=np.uint8)
+        # Assinatura barata do streak antes da atualização: se
+        # nada muda na passada — pixel ocluído ou inspecionado
+        # sem papel provado segura a contagem — o pendurado
+        # envelhece e o worker pode devolver a cadência ao
+        # probe ocioso (Devin Review do PR #144).
+        streak_sig = (
+            int(np.count_nonzero(self._removal_streak)),
+            int(self._removal_streak.sum(dtype=np.uint64)),
+        )
         # Sem dominio inspecionado nao ha evidencia negativa
         # confiavel; com a guarda ativa ela sozinha delimita
         # onde a ausencia foi de fato observada.
+        witnessed = False
         # A testemunha da remocao precisa de evidencia negativa
         # real: a mascara de oclusao do chamador, ou o dominio
-        # geometrico da guarda de borda.
+        # geometrico da guarda. Sem evidencia fotometrica
+        # (paper_exposed=None) a remocao segue o contrato legado
+        # — o chamador que quer "incerteza congela" passa mascara
+        # all-False, nao None.
         if (
             removal_allowed
             and canvas_before
-            and (had_visibility or valid_mask is not None)
+            and (visible is not None or valid_mask is not None)
         ):
             retained = np.count_nonzero(confirmed_before & inspected & mask_now)
             witnessed = (
@@ -267,29 +303,63 @@ class LayeredInkAccumulator:
                 & np.isfinite(prob)
                 & (prob <= registration._REMOVAL_LOW_PROB)
             )
+            if paper_exposed is not None:
+                # Sob suspeita de oclusao a ausencia nao e
+                # observavel: so conta o pixel em papel provado.
+                missing &= paper_exposed
             # O reset NAO depende da testemunha: ela so governa o
-            # que conta como ausencia. Sem ela, pixel fora do
-            # dominio inspecionado (guarda que alargou por cima
-            # de uma contagem em curso, borda que a pegada
-            # deixou) nao pode nem apagar o traco nem segurar a
-            # trabalhadora acordada — a contagem velha zera. O
-            # incremento continua exigindo a testemunha: pixel
-            # inspecionado e não ausente vê o streak zerar
-            # (evidência positiva ou prova inconclusiva); pixel
-            # ausente conta. Ocluído não informa nada — o streak
-            # segura, não zera: a ausência do F-10 segue
+            # que conta como ausencia. Pixel inspecionado e não
+            # ausente vê o streak zerar onde a guarda provou papel
+            # exposto; pixel visível fora do domínio inspecionado
+            # (guarda que alargou por cima de uma contagem em
+            # curso, borda que a pegada deixou) é prova
+            # inconclusiva — não pode nem apagar o traço nem
+            # segurar a trabalhadora acordada, a contagem velha
+            # zera. O incremento de voto novo continua exigindo a
+            # testemunha; o streak já armado é exceção abaixo.
+            # Ocluído (sem visão) ou
+            # inspecionado sem papel provado não informa nada — o
+            # streak segura, não zera: a ausência do F-10 segue
             # precisando ser persistente, mas não precisa ser em
             # passadas consecutivas nem desobstruídas (a
             # testemunha e a mão oscilam em cena real — medido:
             # retained 1,5k~13,9k alternando no sim-hand, streak
             # nunca completava).
-            resettable = ~missing
+            # Streak já armado sob testemunha viva termina de
+            # contar com a própria evidência (missing =
+            # inspecionado + papel provado + prob baixa): apagar
+            # o resto da tinta zera `retained` e a testemunha
+            # nunca mais vive — o voto ficava congelado em 1-5,
+            # a trabalhadora sondava a 1 Hz para sempre e o
+            # fantasma seguia publicado no canvas (Devin Review
+            # do PR #144). Sem guarda avaliada na passada o
+            # caminho segue fail-closed.
+            unwitnessed_votes = (
+                None if paper_exposed is None else missing & (self._removal_streak > 0)
+            )
+            voting = missing if witnessed else unwitnessed_votes
+            exposed = inspected if paper_exposed is None else inspected & paper_exposed
+            # Leitura no nível do voto é evidência positiva por
+            # si mesma e zera o streak mesmo onde a guarda não
+            # provou papel exposto: o veto dark_ink — tinta
+            # forte sobre pixel escuro nunca prova papel —
+            # descreve todo pixel de traço real (prob >=
+            # vote_hit e luma escura), e segurar o streak dele
+            # deixava faltas espalhadas somarem até apagar a
+            # tinta (Devin Review do PR #144). O veto segue
+            # barrando o incremento via paper_exposed; este
+            # braço só restaura o reset. A barra é a mesma do
+            # observe (ink_support_threshold=vote_hit): tudo
+            # que o veto consegue derrubar volta a zerar.
+            seen_ink = evidence >= self._config.vote_hit
+            inconclusive = ~inspected
             if visible is not None:
-                resettable &= visible
+                inconclusive &= visible
+            resettable = ~missing & (exposed | seen_ink | inconclusive)
             self._removal_streak[resettable] = 0
-            if witnessed:
-                self._removal_streak[missing] = np.minimum(
-                    self._removal_streak[missing].astype(np.uint16) + 1,
+            if voting is not None and np.any(voting):
+                self._removal_streak[voting] = np.minimum(
+                    self._removal_streak[voting].astype(np.uint16) + 1,
                     registration._REMOVAL_PASSES,
                 ).astype(np.uint8)
         removed = self._removal_streak >= registration._REMOVAL_PASSES
@@ -304,6 +374,15 @@ class LayeredInkAccumulator:
             seen_as_ink[removed] = False
             score[removed] = 0
             hits[removed] = 0
+        if not np.any(self._removal_streak):
+            self._removal_stale_passes = 0
+        elif streak_sig == (
+            int(np.count_nonzero(self._removal_streak)),
+            int(self._removal_streak.sum(dtype=np.uint64)),
+        ):
+            self._removal_stale_passes += 1
+        else:
+            self._removal_stale_passes = 0
         confirmed_now = self._confirmed > 0
         provisional_now = seen_as_ink & ~confirmed_now
         if self._config.hysteresis:

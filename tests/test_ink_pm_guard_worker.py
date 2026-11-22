@@ -9,11 +9,13 @@ de caneta real, mais fino que a janela de 32 px da guarda, cada janela
 continua vendo papel no pico e o traco e "novel" contra a referencia.
 """
 
+import threading
 import time
 
 import numpy as np
 
 from draw.contracts import WarpedPage
+from draw.ink import occlusion, registration, votes
 from draw.ink import worker as worker_mod
 from draw.ink.config import InkConfig
 
@@ -82,8 +84,13 @@ def _pass(worker, generation, image, visible=None):
         time.sleep(0.001)
 
 
-def _run(monkeypatch, config):
-    """Semeia a referencia na folha limpa e depois confirma os tracos."""
+def _run(monkeypatch, config, *, image=_stroked):
+    """Semeia a referencia na folha limpa e depois confirma os tracos.
+
+    Sem o PageModel os tracos podem existir so na leitura do modelo
+    (`image=_paper`): como no PR #144, a guarda de tiles nao veta o
+    que nao e anomalo — e a pagina madura nao carrega tiles em
+    recuperacao que queimariam a espera da fase medida."""
     monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
     monkeypatch.setattr(worker_mod, "_IDLE_PROBE_SECONDS", 0.02)
     ink = _Scripted()
@@ -93,7 +100,7 @@ def _run(monkeypatch, config):
         _pass(worker, generation, _paper())
     ink.content = _prob()
     for _ in range(6):  # os tracos aparecem e confirmam
-        _pass(worker, generation, _stroked())
+        _pass(worker, generation, image())
     confirmed = worker.poll(generation, 0).confirmed
     assert confirmed[COVERED].all()
     assert confirmed[WITNESS].all()
@@ -164,14 +171,32 @@ def test_dark_occluder_high_prob_neither_confirms_nor_erases(monkeypatch):
         worker.stop()
 
 
-def test_control_without_page_model_erases_under_the_same_occluder(monkeypatch):
-    """Controle: sem PageModel nada congela — a mesma sombra apaga."""
+def test_control_without_page_model_holds_under_the_same_occluder(monkeypatch):
+    """Controle: sem PageModel a guarda de tiles (permanente) segura a
+    remocao sob a mesma sombra — o congelamento fotometrico nao depende
+    do modelo — e a regiao destrava quando o objeto sai."""
     worker, ink, generation = _run(monkeypatch, InkConfig())
     try:
         ink.content = _prob(covered_ink=False)
         for _ in range(14):
             _pass(worker, generation, _hand_image())
-        assert not worker.poll(generation, 0).confirmed[COVERED].any()
+        snap = worker.poll(generation, 0)
+        assert snap.confirmed[COVERED].all()
+        assert snap.confirmed[WITNESS].all()
+        # O objeto sai: a regiao libera e tinta nova confirma —
+        # congelamento, nunca aniquilacao.
+        new = _stripe_mask(slice(224, 240), slice(16, 120))
+        ink.content = _prob(extra=new)
+        image = _stroked()
+        image[new] = INK_TONE
+        _pass_until(
+            worker,
+            generation,
+            image,
+            lambda snap: snap.confirmed[new].all(),
+            16,
+        )
+        assert worker.poll(generation, 0).confirmed[new].all()
     finally:
         worker.stop()
 
@@ -214,13 +239,18 @@ def test_startup_occluder_seeds_then_recovers_after_leaving(monkeypatch):
     occluded = _paper()
     occluded[occl] = HAND_TONE
     try:
-        for _ in range(7):  # semeia com o objeto em cima da folha
+        for _ in range(7):  # o objeto cobre a folha desde a abertura
             _pass(worker, generation, occluded)
-        assert worker._page_model._seeded[occl].all()
+        # A regiao coberta nao semeia: a guarda de tiles a veta antes
+        # do PageModel observar — ela espera como covered_unseeded em
+        # vez de virar referencia (o "fantasma" de inicializacao).
+        assert not worker._page_model._seeded[occl].any()
         assert not worker.poll(generation, 0).confirmed.any()
-        # Saiu: o papel reaparece e o hold de oclusao libera a regiao.
+        # Saiu: o papel reaparece e o hold de oclusao libera a regiao
+        # para o modelo semear.
         for _ in range(config.occlusion_hold_passes + 2):
             _pass(worker, generation, _paper())
+        assert worker._page_model._seeded[occl].all()
         # Traco novo na regiao recuperada confirma.
         mask = _stripe_mask(slice(140, 188), slice(32, 120))
         ink.content = np.zeros((H, W), np.float32)
@@ -235,6 +265,49 @@ def test_startup_occluder_seeds_then_recovers_after_leaving(monkeypatch):
             14,
         )
         assert worker.poll(generation, 0).confirmed[mask].all()
+    finally:
+        worker.stop()
+
+
+def test_armed_streak_holds_while_the_guard_proves_no_paper(monkeypatch):
+    """O caso do review do #144 sem o modo legado: com a guarda sempre
+    ligada, um streak de remocao armado sob testemunha viva nao drena
+    quando a cena escurece por inteiro — nada prova papel exposto, a
+    ausencia nao e observavel e a contagem pendurada segura. Sem a
+    prova fotometrica o opt-out antigo lia "avaliacao aprovada" e
+    completava a remocao no escuro."""
+    worker, ink, generation = _run(monkeypatch, InkConfig())
+    try:
+        # Arma o streak: COVERED some da leitura e a testemunha segue.
+        ink.content = _prob(covered_ink=False)
+        for _ in range(3):
+            _pass(worker, generation, _paper())
+        streak = worker._accumulator._removal_streak
+        armed = int(streak[COVERED].max())
+        assert armed > 0
+        # Escuro total: a guarda nao prova papel, o streak armado
+        # congela em vez de drenar. O pin no valor armado pega dreno
+        # parcial que um teto frouxo deixaria passar.
+        ink.content = np.zeros((H, W), np.float32)
+        dark = np.zeros((H, W, 3), np.uint8)
+        for _ in range(registration._REMOVAL_PASSES + 4):
+            _pass(worker, generation, dark)
+        snap = worker.poll(generation, 0)
+        assert snap.confirmed[COVERED].all()
+        assert snap.confirmed[WITNESS].all()
+        assert int(worker._accumulator._removal_streak[COVERED].max()) == armed
+        # A cena volta limpa com a leitura de tinta intacta: papel
+        # provado em todo pixel e nada ausente — o streak pendurado
+        # zera, nada fica armado esperando a proxima falta (o canvas
+        # intacto sozinho nao prova isso: um streak parado em 1-5
+        # retomaria a contagem na proxima falta).
+        ink.content = _prob()
+        for _ in range(3):
+            _pass(worker, generation, _paper())
+        snap = worker.poll(generation, 0)
+        assert snap.confirmed[COVERED].all()
+        assert snap.confirmed[WITNESS].all()
+        assert not worker._accumulator._removal_streak.any()
     finally:
         worker.stop()
 
@@ -304,10 +377,10 @@ def test_permanent_border_does_not_rearm_the_window(monkeypatch):
         worker.stop()
 
 
-def _mature(monkeypatch, config, *, idle_probe=False):
-    worker, ink, generation = _run(monkeypatch, config)
+def _mature(monkeypatch, config, *, idle_probe=False, image=_stroked):
+    worker, ink, generation = _run(monkeypatch, config, image=image)
     for _ in range(14):  # pagina madura e parada: o descanso esta ao alcance
-        _pass(worker, generation, _stroked())
+        _pass(worker, generation, image())
     if not idle_probe:
         _no_idle_probe(monkeypatch)
     return worker, ink, generation
@@ -336,7 +409,7 @@ def test_stroke_hidden_on_the_first_post_exit_pass_still_confirms(monkeypatch):
             generation,
             revealed,
             lambda snap: snap.confirmed[late].all(),
-            config.occlusion_hold_passes + 8,
+            occlusion._FILL_RECOVERY_PASSES + 8,
         )
         assert worker.poll(generation, 0).confirmed[late].all()
     finally:
@@ -357,12 +430,15 @@ def test_stroke_erased_under_a_shadow_is_removed_after_hand_exit(monkeypatch):
         # Sombra ainda persiste em parte da janela pos-saida antes de limpar.
         for _ in range(2):
             _pass(worker, generation, _hand_image())
+        # O papel revelado e limpo (o traco foi apagado sob a sombra):
+        # so papel provado drena o streak — com traco fotometrico na
+        # imagem a prova de papel falha na faixa e nada sai.
         _pass_until(
             worker,
             generation,
-            _stroked(),
+            _paper(),
             lambda snap: not snap.confirmed[COVERED].any(),
-            config.occlusion_hold_passes + 12,
+            occlusion._FILL_RECOVERY_PASSES + 12,
         )
         snap = worker.poll(generation, 0)
         assert not snap.confirmed[COVERED].any()
@@ -370,7 +446,7 @@ def test_stroke_erased_under_a_shadow_is_removed_after_hand_exit(monkeypatch):
         _pass_until(
             worker,
             generation,
-            _stroked(),
+            _paper(),
             lambda _snap: worker.stats()["resting"],
             6,
         )
@@ -383,34 +459,40 @@ def test_lingering_shadow_across_all_post_exit_passes_still_confirms_and_border_
     monkeypatch,
 ):
     """Sombra nao mascarada persiste por todas as passadas pos-saida
-    enquanto o modelo detecta o traco: sob o oclusor o modelo se abstem
-    (nada elegivel — o descanso e permitido), mas na liberacao o
-    recovering re-arma a janela cheia e o traco confirma; uma borda
-    escura permanente ainda deixa o worker descansar."""
+    enquanto o modelo detecta o traco: o orcamento congelado (hold do
+    PageModel sobre o traco em suspenso mais a espera de recuperacao
+    da guarda de tiles) mantem o worker acordado ate a sombra limpar
+    e o traco confirmar; uma borda escura permanente ainda deixa o
+    worker descansar."""
     config = InkConfig.production()
     worker, ink, generation = _mature(monkeypatch, config, idle_probe=True)
     try:
-        late = (slice(224, 240), slice(16, 120))
+        # O traço tardio precisa estar DESENHADO na imagem: com o
+        # PageModel ativo, tinta so na leitura do modelo (sem
+        # novidade fotometrica) e suprimida antes do voto.
         border = _stroked()
         border[:, 336:] = HAND_TONE  # borda escura permanente
+        late = (slice(224, 240), slice(16, 120))
         shadow = border.copy()
-        shadow[(slice(208, 256), slice(0, 160))] = HAND_TONE
+        # >= 3 linhas de tile (~24px): abaixo disso a guarda trata a sombra
+        # como traco fino e nao veta adicoes.
+        shadow[(slice(176, 256), slice(0, 160))] = HAND_TONE
 
         worker.set_hand_presence(True)
-        ink.content = _prob(extra=late)
         for _ in range(2):
             _pass(worker, generation, shadow)
 
         worker.set_hand_presence(False)
+        # O modelo so ve o traco nas passadas pos-saida: 3 leituras sob a
+        # sombra ainda nao chegam a _FILL_RECOVERY_PASSES, entao o bloco
+        # nao e adotado e o traco continua sem confirmar.
+        ink.content = _prob(extra=late)
         for _ in range(worker._post_exit_confirm_passes()):
             _pass(worker, generation, shadow)
 
         assert not worker.poll(generation, 0).confirmed[late].any()
+        assert not worker.stats()["resting"]
 
-        # A sombra saiu junto com um evento real (a mao passa de novo):
-        # acordado, o recovering re-arma a janela e o traco confirma.
-        worker.set_hand_presence(True)
-        worker.set_hand_presence(False)
         revealed = border.copy()
         revealed[late] = INK_TONE
         _pass_until(
@@ -418,7 +500,10 @@ def test_lingering_shadow_across_all_post_exit_passes_still_confirms_and_border_
             generation,
             revealed,
             lambda snap: snap.confirmed[late].all(),
-            config.occlusion_hold_passes + worker._post_exit_confirm_passes() + 8,
+            occlusion._FILL_RECOVERY_PASSES
+            + config.occlusion_hold_passes
+            + worker._post_exit_confirm_passes()
+            + 8,
         )
         assert worker.poll(generation, 0).confirmed[late].all()
 
@@ -427,8 +512,252 @@ def test_lingering_shadow_across_all_post_exit_passes_still_confirms_and_border_
             generation,
             border,
             lambda _snap: worker.stats()["resting"],
+            occlusion._RECOVERY_WAIT_PASSES + worker._post_exit_confirm_passes() + 8,
+        )
+        assert worker.stats()["resting"] is True
+    finally:
+        worker.stop()
+
+
+def test_stationary_hand_samples_do_not_cancel_the_adopted_fill_vote(
+    monkeypatch,
+):
+    """Regressao (Devin Review do PR #144): saida e volta da mao, que
+    fica parada segurando a folha. O laco entrega uma amostra de
+    presenca por quadro — nao so nas transicoes — e cada amostra True
+    repetida zerava o _confirm_passes rearmado pela adocao do
+    preenchimento: a trabalhadora descansava no meio do voto e o bloco
+    adotado nunca confirmava. So a transicao que encerra o episodio de
+    mao fora pode cancelar a janela. Sem o PageModel: sob ele o bloco
+    adotado segue vetado como oclusor pelo pm.exposed (o contrato do
+    modelo manda no fim) — a adocao que vota ate confirmar e a do
+    caminho sem o modelo, na mesma janela de voto estrito do
+    production onde a regressao foi medida."""
+    monkeypatch.setattr(worker_mod, "_IDLE_PROBE_SECONDS", 3600.0)
+    monkeypatch.setattr(worker_mod, "_HAND_REST_STILL_SECONDS", 0.3)
+    now = [1000.0]
+    ink = _Scripted()
+    config = InkConfig.strict_vote(
+        0.85,
+        hysteresis=True,
+        motion_veto=True,
+        pass_interval_s=0.1,
+        border_guard_px=None,
+    )
+    worker = worker_mod.PageCleanWorker(ink, config=config, clock=lambda: now[0])
+    generation = worker.new_generation()
+    visible = np.ones((H, W), bool)
+
+    def _tick(image):
+        """Um quadro do laco: submit + pump na cadencia configurada."""
+        worker.submit(WarpedPage(image, generation, Q0, visible, captured_at=now[0]))
+        now[0] += 0.11
+        return worker.pump()
+
+    # Pagina madura sem sinal de mao: so a testemunha confirma — o
+    # COVERED nasce depois, sob o bloco escuro.
+    ink.content = _prob(covered_ink=False)
+    for _ in range(6):
+        assert _tick(_paper())
+    assert worker.poll(generation, 0).confirmed[WITNESS].all()
+
+    # A sequencia completa de saida: a mao entra, sai (armando a
+    # janela pos-saida) e volta ja parada — a transicao de volta
+    # cancela a janela pos-saida, como antes.
+    worker.set_hand_presence(True)
+    assert _tick(_paper())
+    worker.set_hand_presence(False)
+    assert _tick(_paper())
+    worker.set_hand_presence(True)
+
+    # Bloco escuro lido como tinta (a sombra que o MediaPipe perdeu):
+    # _FILL_RECOVERY_PASSES de suporte adotam o preenchimento e a
+    # borda de adocao rearma a janela de confirmacao — com a mao
+    # presente o tempo todo, repetida a cada tick como no laco.
+    ink.content = _prob()
+    for _ in range(occlusion._FILL_RECOVERY_PASSES):
+        worker.set_hand_presence(True)
+        assert _tick(_hand_image())
+        worker.set_hand_presence(True)
+    assert worker._paper_exposure._fill_adopted.any()
+    assert not worker.poll(generation, 0).confirmed[COVERED].all()
+
+    # A amostra repetida com a mao parada nao pode zerar o orcamento
+    # rearmado pela adocao.
+    worker.set_hand_presence(True)
+    assert worker._confirm_passes == votes._INK_VOTE_WINDOW
+
+    # As passadas seguintes votam o preenchimento adotado ate ele
+    # confirmar; o descanso com a mao quieta so pode entrar depois —
+    # pump() devolver False antes disso e o bug dormindo no voto.
+    confirmed = False
+    limit = occlusion._FILL_RECOVERY_PASSES + votes._INK_VOTE_WINDOW + 2
+    for _ in range(limit):
+        worker.set_hand_presence(True)
+        ran = _tick(_hand_image())
+        worker.set_hand_presence(True)
+        confirmed = worker.poll(generation, 0).confirmed[COVERED].all()
+        if confirmed:
+            break
+        assert ran, "descansou antes do preenchimento adotado confirmar"
+    assert confirmed, "o preenchimento adotado nao confirmou"
+
+    # Confirmado, o descanso com a mao parada segue valendo: a janela
+    # gasta nao segura a trabalhadora acordada para sempre.
+    for _ in range(worker_mod._REST_QUIET_PASSES + 2):
+        _tick(_hand_image())
+    assert worker.stats()["resting"]
+
+
+def test_fill_streak_born_as_another_dies_still_reaches_adoption(monkeypatch):
+    """Regressão (Devin Review do PR #144): a sombra gasta 3
+    passadas de streak pós-saída e morre; o preenchimento que só
+    então fica à vista herdava a espera dos dois — a porta
+    fechava na 4a passada do novo e a trabalhadora dormia antes
+    da leitura que adota o bloco. A carência por idade deixa o
+    streak tardio completar o horizonte dele. Sem o PageModel: sob
+    ele o bloco adotado segue vetado como oclusor pelo pm.exposed.
+    A janela pos-saida precisa ser a de voto estrito (3), a mesma
+    do production onde a regressao foi medida."""
+    config = InkConfig.strict_vote(
+        0.85,
+        hysteresis=True,
+        motion_veto=True,
+        pass_interval_s=0.02,
+        border_guard_px=None,
+    )
+    worker, ink, generation = _mature(
+        monkeypatch, config, idle_probe=True, image=_paper
+    )
+    try:
+        # Blocos 3x4+ tiles, longe da testemunha e do traco base.
+        fill = (slice(144, 216), slice(24, 120))  # tiles 6-8 x 1-4
+        shadow = (slice(24, 96), slice(240, 336))  # tiles 1-3 x 10-13
+        scene = _paper()
+        scene[fill] = (60, 62, 64)
+        scene[shadow] = (60, 62, 64)
+        masked = np.ones((H, W), bool)
+        masked[fill] = False  # a mão ainda cobre o preenchimento
+
+        worker.set_hand_presence(True)
+        for _ in range(2):
+            _pass(worker, generation, scene, masked)
+        worker.set_hand_presence(False)
+
+        # Pós-saída 1-3: a sombra lê como tinta enquanto a máscara
+        # segue sobre o preenchimento — os três skips se vão sem
+        # que o streak dele comece a contar.
+        prob = _prob()
+        prob[shadow] = 0.95
+        prob[fill] = 0.95
+        ink.content = prob
+        for _ in range(3):
+            _pass(worker, generation, scene, masked)
+
+        # Passada 4: a sombra perde o suporte e o preenchimento fica
+        # limpo — o streak dele nasce com a espera já gasta.
+        prob = _prob()
+        prob[fill] = 0.95
+        ink.content = prob
+        for _ in range(3):
+            _pass(worker, generation, scene)
+
+        # Sob o teto global antigo a porta já teria fechado: sem a
+        # carência a trabalhadora descansa aqui e o preenchimento
+        # nunca chega à 4a leitura.
+        assert not worker.stats()["resting"]
+        assert not worker.poll(generation, 0).confirmed[fill].any()
+
+        _pass_until(
+            worker,
+            generation,
+            scene,
+            lambda snap: snap.confirmed[fill].all(),
+            occlusion._FILL_RECOVERY_PASSES + 8,
+        )
+        assert worker.poll(generation, 0).confirmed[fill].all()
+
+        # Adotado e confirmado, o pendente some e o descanso volta a
+        # fechar normalmente.
+        _pass_until(
+            worker,
+            generation,
+            scene,
+            lambda _snap: worker.stats()["resting"],
             6,
         )
         assert worker.stats()["resting"] is True
+    finally:
+        worker.stop()
+
+
+def test_alternating_fill_support_still_hits_the_wait_bound(monkeypatch):
+    """Vaivém sem adoção continua limitado: o suporte alternando
+    entre dois blocos mantém o pendente aceso sem borda de adoção;
+    a espera tem que fechar e a trabalhadora descansar. Sem o
+    PageModel: a espera medida aqui e a da guarda de tiles, na
+    mesma janela de voto estrito do production onde foi medida."""
+    config = InkConfig.strict_vote(
+        0.85,
+        hysteresis=True,
+        motion_veto=True,
+        pass_interval_s=0.02,
+        border_guard_px=None,
+    )
+    worker, ink, generation = _mature(
+        monkeypatch, config, idle_probe=True, image=_paper
+    )
+    try:
+        shadow_a = (slice(24, 96), slice(240, 336))  # tiles 1-3 x 10-13
+        shadow_b = (slice(168, 240), slice(144, 216))  # tiles 7-9 x 6-8
+        scene = _paper()
+        scene[shadow_a] = (60, 62, 64)
+        scene[shadow_b] = (60, 62, 64)
+        prob_a = _prob()
+        prob_a[shadow_a] = 0.95
+        prob_b = _prob()
+        prob_b[shadow_b] = 0.95
+
+        worker.set_hand_presence(True)
+        _pass(worker, generation, scene)
+        worker.set_hand_presence(False)
+        for index in range(occlusion._RECOVERY_WAIT_PASSES * 3):
+            if worker.stats()["resting"]:
+                break
+            ink.content = prob_a if index % 2 == 0 else prob_b
+            _pass(worker, generation, scene)
+        # O suporte nunca sustenta um streak até a adoção, mas a
+        # espera estendida pela carência tem teto: descansa.
+        assert worker.stats()["resting"] is True
+        assert worker._fill_recovery_waited >= occlusion._RECOVERY_WAIT_PASSES
+        snap = worker.poll(generation, 0)
+        assert not snap.confirmed[shadow_a].any()
+        assert not snap.confirmed[shadow_b].any()
+    finally:
+        worker.stop()
+
+
+def test_mid_pass_generation_swap_writes_to_the_orphan_guard(monkeypatch):
+    """new_generation durante a inferência troca a guarda; o observe
+    da passada velha escreve na instância órfã — estado de página
+    velha não semeia referência na página nova."""
+    worker, ink, generation = _run(monkeypatch, InkConfig())
+    observed = threading.Event()
+    try:
+        old_guard = worker._paper_exposure
+        real_observe = old_guard.observe
+
+        def poisoned(*args, **kwargs):
+            try:
+                return real_observe(*args, **kwargs)
+            finally:
+                worker.new_generation()
+                observed.set()
+
+        old_guard.observe = poisoned
+        worker.submit(WarpedPage(_paper(), generation, Q0, np.ones((H, W), bool)))
+        assert observed.wait(5.0)
+        assert worker._paper_exposure is not old_guard
+        assert worker._paper_exposure._reference is None
     finally:
         worker.stop()

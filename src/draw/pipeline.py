@@ -470,7 +470,10 @@ class Pipeline:
             ):
                 visible = ~camera_mask
         elif self.hand_masker is not None:
-            camera_mask = self.hand_masker.mask(frame)
+            camera_mask = self.hand_masker.mask(
+                frame,
+                timestamp_ms=packet.captured_at * 1000.0,
+            )
             if camera_mask is not None:
                 visible = camera_mask == 0
         if (

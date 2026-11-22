@@ -522,3 +522,44 @@ class HandOcclusion:
         a, b = self.occlusion_mask, self.orientation_mask
         if a is not None and b is not None and a.shape != b.shape:
             raise ValueError("as máscaras precisam usar a mesma grade de câmera")
+
+
+@dataclass(frozen=True, slots=True)
+class ExposureAssessment:
+    """Veredito fotométrico de uma passada da trabalhadora de tinta.
+
+    Produzido pelo guarda de exposição do warp (ink/occlusion) e
+    consumido pelo voto: máscaras independentes porque adicionar e
+    remover tinta pedem provas diferentes. visible é máscara 2D
+    bool/uint8 na grade do warp — True onde a imagem sustenta
+    evidência — ou None quando a guarda não encontrou região
+    bloqueada (não é "evidência indisponível": imagem sem fotometria
+    confiável devolve None no observe inteiro). paper_exposed é
+    bool (página inteira verificada) ou máscara 2D — True onde a
+    imagem prova papel exposto, o requisito separado da remoção de
+    tinta confirmada.
+    """
+
+    visible: np.ndarray | None
+    paper_exposed: np.ndarray | bool
+
+    def __post_init__(self):
+        # O tipo declarado de paper_exposed não admite None: uma
+        # avaliação emitida sem veredito de papel não é "sem avaliação"
+        # (None no acumulador reabriria o contrato legado — Devin
+        # Review do PR #144), é "nada prova papel" — False congela.
+        if self.paper_exposed is None:
+            object.__setattr__(self, "paper_exposed", False)
+        for name in ("visible", "paper_exposed"):
+            mask = getattr(self, name)
+            if mask is None:
+                continue
+            # Escalar só vale para paper_exposed (veredito da página
+            # inteira); visible é sempre máscara ou None.
+            if isinstance(mask, (bool, np.bool_)):
+                if name == "visible":
+                    raise ValueError(
+                        "visible precisa ser None ou máscara 2D bool/uint8"
+                    )
+                continue
+            _mask_2d(self, name, dtypes=(bool, np.uint8))

@@ -1238,7 +1238,9 @@ def main():
         help=(
             "intervalo minimo entre passadas ativas da tinta "
             "(InkConfig.pass_interval_s; substitui o piso de 0,25 s, mantendo "
-            "sonda ociosa e descanso). Com o page_clean INT8, 0,15 mediu 6,7 "
+            "sonda ociosa e descanso). Votos de remocao pendentes furam o "
+            "intervalo ate o teto da sonda ociosa (1 s) — acima disso nao "
+            "adiantam a cadencia. Com o page_clean INT8, 0,15 mediu 6,7 "
             "passadas/s em ~3 nucleos (simulado, sem a mao)"
         ),
     )

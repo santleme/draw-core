@@ -1482,10 +1482,17 @@ def test_page_model_survives_global_chroma_shift(monkeypatch):
             drive(warm)
         exp = pm.exposed(page, bgr=warm)
         assert np.all(exp[40:-40, 40:-40])
+        # Objeto local fora da razao nova: o patch fica dentro da grade
+        # (96x128) — os indices antigos ([90:150] sobre 96 linhas e a
+        # leitura em [100:140]) nao cortavam nem liam pixel nenhum e a
+        # verificacao passava vazia. No canto para a mascara erodida
+        # (~35 px de halo) nao engolir o controle do outro lado.
         skin = warm.copy().astype(np.float32)
-        skin[90:150, 60:160] = page[90:150, 60:160][..., None] * 0.8
+        skin[64:96, 88:128] = page[64:96, 88:128][..., None] * 0.8
         exp = pm.exposed(page, bgr=skin.astype(np.uint8))
-        assert not np.any(exp[100:140, 70:150])
+        assert not np.any(exp[72:92, 96:120])
+        # O papel longe do objeto, na razao nova, segue exposto.
+        assert np.all(exp[0:24, 0:48])
 
         # E o caminho inteiro segue vivo: traco novo confirma sob a
         # luz quente que congelava a geracao antes da correcao. Tinta
@@ -1501,6 +1508,111 @@ def test_page_model_survives_global_chroma_shift(monkeypatch):
         assert np.count_nonzero(confirmed[60:66, 80:160]) > 0.5 * 6 * 80
     finally:
         worker.stop()
+
+
+def test_page_model_bright_occluder_dominating_cells_stays_masked():
+    """Review do #175: obstrucao CLARA dominante nao simula lampada.
+
+    Uma manga clara (B/R ~0,77, luminancia de papel) sobre 3/4 das
+    janelas referenciadas reprova o teste B/R nelas; a regra antiga
+    ("<30% das celulas referenciadas casando") lia a reprovacao como
+    deslocamento global e suspendia a porta de croma na folha inteira
+    — o papel sob a manga passava a contar como exposto e os tracos
+    cobertos eram dados como removidos. Um deslocamento global de
+    verdade nao poupa testemunhas: o 1/4 descoberto confirmando a
+    razao antiga ja veta a hipotese, e a janela da manga — fora das
+    DUAS razoes — segue mascarada e nao arrasta os refs.
+    """
+    # Bloco de 8 px: a janela do pico dilatado e +-4 px, entao a manga
+    # cobre >70% das CELULAS referenciadas e ainda sobra papel limpo
+    # fora do halo da erosao para o controle.
+    model = pm_mod.PageModel((H, W), confirm_obs=1, block=8, rate=0.5)
+    model.observe(_paper(), paper=np.ones((H, W), dtype=bool), bgr=_bgr(_paper()))
+
+    sleeve_gray = _paper()
+    sleeve_gray[:, :100] = 205.0  # clara o bastante para o termo de luminancia
+    sleeve_bgr = _bgr(sleeve_gray)
+    sleeve_bgr[:, :100] = (165, 195, 215)  # B/R ~0,77 — fora do papel neutro
+    for _ in range(4):
+        exp = model.exposed(sleeve_gray, bgr=sleeve_bgr)
+        # obs_visible do trabalhador = mascara de mao & exposed.
+        model.observe(sleeve_gray, visible=exp, paper=exp, bgr=sleeve_bgr)
+    # A manga segue mascarada; o papel descoberto segue exposto.
+    assert not np.any(exp[8:88, 8:80])
+    assert np.all(exp[8:88, 108:120])
+    # E os refs de croma sob a manga nao foram arrastados para a razao dela.
+    assert float(model._blue_ref[40, 40]) == pytest.approx(235.0, abs=8.0)
+
+
+def test_page_model_region_hidden_during_chroma_shift_recovers_after_reveal():
+    """Review do #175: regiao sob a mao na troca de lampada nao congela.
+
+    A suspensao e global: quando as celulas visiveis convergem para a
+    razao nova a porta religa para a folha INTEIRA — mas a regiao que
+    a mao cobria nunca adaptou os refs e reprovava croma para sempre
+    (observe() so atualiza _blue_ref/_red_ref onde obs_visible & paper,
+    e obs_visible e AND com a saida de exposed()). A porta agora aceita
+    a razao dominante do quadro: a regiao revelada, sob a mesma luz
+    nova, casa com ela — volta a ser exposta e a adaptar ate os refs
+    convergirem.
+    """
+    model = pm_mod.PageModel((H, W), confirm_obs=1, rate=0.5)
+    model.observe(_paper(), paper=np.ones((H, W), dtype=bool), bgr=_bgr(_paper()))
+
+    warm = _bgr(_paper())
+    warm[..., 0] = np.uint8(PAPER * 0.5)  # lampada quente: B/R 1,0 -> ~0,5
+    cover = np.ones((H, W), dtype=bool)
+    cover[48:88, 16:80] = False  # mao sobre a regiao durante a troca
+    for _ in range(6):
+        exp = model.exposed(_paper(), bgr=warm, visible=cover)
+        obs = cover & exp  # obs_visible do trabalhador
+        model.observe(_paper(), visible=obs, paper=obs, bgr=warm)
+
+    # Mao sai: a regiao revelada esta sob a mesma luz nova — a porta
+    # nao pode fecha-la para sempre atras dos refs velhos.
+    exp = model.exposed(_paper(), bgr=warm)
+    assert np.all(exp[56:80, 24:72])
+
+    # E os refs de croma dela convergem como os do resto da folha.
+    for _ in range(8):
+        exp = model.exposed(_paper(), bgr=warm)
+        model.observe(_paper(), visible=exp, paper=exp, bgr=warm)
+    exp = model.exposed(_paper(), bgr=warm)
+    assert np.all(exp[56:80, 24:72])
+    ratio = float(model._blue_ref[64, 48] / model._red_ref[64, 48])
+    assert ratio == pytest.approx(0.5, abs=0.05)
+
+
+def test_page_model_global_dim_plus_chroma_shift_keeps_luminance_gain():
+    """Review do #175: mudanca global cor+escurecimento nao descarta o ganho.
+
+    O veto de croma em _estimate_gain existe para oclusor LOCAL
+    dominando a amostra. Sob deslocamento global coerente a estimativa
+    de luminancia segue valida — sem ela, papel a 187 (acima de
+    0.78*235 ~= 183) mantem a folha visivel mas o impresso
+    pre-existente 91->66 cruza o novel_delta sem normalizar e confirma
+    como tinta; e a 170 (abaixo de 183) a folha inteira congela.
+    """
+    model = pm_mod.PageModel((H, W), confirm_obs=1, rate=0.5)
+    printed = _paper()
+    printed[40:48, 40:60] = 91.0  # impresso pre-existente semeado
+    model.observe(printed, paper=np.ones((H, W), dtype=bool), bgr=_bgr(printed))
+
+    # Lampada mais quente e mais fraca: 235->187 no papel, 91->66 no impresso.
+    dim = np.full((H, W), 187.0, dtype=np.float32)
+    dim[40:48, 40:60] = 66.0
+    dim_bgr = np.stack([dim * 0.5, dim, dim], axis=-1).astype(np.uint8)
+    assert np.all(model.exposed(dim, bgr=dim_bgr)[8:88, 8:120])
+    # Normalizado (gain ~0.8) o impresso rele ~83: nao e tinta nova.
+    # Sem o ganho ele leria 66 contra referencia 91 (> novel_delta).
+    assert not np.any(model.novel(dim)[40:48, 40:60])
+
+    # Abaixo do cutoff nao escalado (235->170 = 0.72 < 0.78): sem o
+    # ganho a folha congela inteira; com ele o cutoff segue a luz.
+    darker = np.full((H, W), 170.0, dtype=np.float32)
+    darker_bgr = np.stack([darker * 0.5, darker, darker], axis=-1).astype(np.uint8)
+    exp = model.exposed(darker, bgr=darker_bgr)
+    assert np.all(exp[8:32, 8:120])
 
 
 def test_page_model_hand_exit_holds_until_uncovered_stroke_confirms_before_rest(

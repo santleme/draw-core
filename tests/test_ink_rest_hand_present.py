@@ -203,7 +203,7 @@ class _SettableMasker:
     def __init__(self):
         self.current = None
 
-    def mask(self, _frame):
+    def mask(self, _frame, timestamp_ms=None):
         return self.current
 
 

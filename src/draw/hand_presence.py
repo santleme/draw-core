@@ -31,6 +31,7 @@ _HAND_MOVE_CENTROID_PX = 12.0
 
 
 _HAND_MOVE_AREA_FRACTION = 0.03
+_PRESENCE_HOLD_SAMPLES = 3
 
 
 def _as_hand_signature(signature):
@@ -67,6 +68,7 @@ class MediaPipeHandPresence:
         self._masker = masker
         self._signature = None
         self._source_id = None
+        self._missed_samples = 0
 
     def close(self):
         close = getattr(self._masker, "close", None)
@@ -84,6 +86,7 @@ class MediaPipeHandPresence:
         if source_id != self._source_id:
             self._source_id = source_id
             self._signature = None
+            self._missed_samples = 0
             # Marcos retidos pertencem a vista anterior.
             reset = getattr(self._masker, "reset_retention", None)
             if callable(reset):
@@ -111,26 +114,23 @@ class MediaPipeHandPresence:
                 signature = signature_fn(frame)
             signature = _as_hand_signature(signature)
             if signature is None:
-                self._signature = None
-                return HandSample(None, False)
+                return self._missing_sample(unavailable=True)
             if signature.area == 0:
-                self._signature = None
-                return HandSample(False, False)
+                return self._missing_sample(unavailable=False)
             if getattr(self._masker, "last_detection_held", False):
                 # Deteccao perdida e mao retida: a pose repetida nao e
                 # quietude. Conta como movimento para o descanso nao
                 # acumular em cima de uma leitura que falhou.
                 self._signature = signature
+                self._missed_samples = 0
                 return HandSample(True, True)
             return self._update_signature(signature)
         mask = self._masker.mask(frame)
         if mask is None:
-            self._signature = None
-            return HandSample(None, False)
+            return self._missing_sample(unavailable=True)
         area = int(np.count_nonzero(mask))
         if area == 0:
-            self._signature = None
-            return HandSample(False, False)
+            return self._missing_sample(unavailable=False)
         ys, xs = np.nonzero(mask)
         signature = HandSignature(float(area), float(xs.mean()), float(ys.mean()))
         return self._update_signature(signature)
@@ -138,6 +138,7 @@ class MediaPipeHandPresence:
     def _update_signature(self, signature):
         previous = self._signature
         self._signature = signature
+        self._missed_samples = 0
         if previous is None:
             # A mao apareceu: a transicao de presenca ja acorda
             # por set_hand_presence, e marcar movimento aqui so
@@ -155,6 +156,18 @@ class MediaPipeHandPresence:
             or area_step > _HAND_MOVE_AREA_FRACTION
         )
         return HandSample(True, moved)
+
+    def _missing_sample(self, *, unavailable):
+        """Mantém presença curta durante misses consecutivos do landmarker."""
+        if (
+            self._signature is not None
+            and self._missed_samples < _PRESENCE_HOLD_SAMPLES
+        ):
+            self._missed_samples += 1
+            return HandSample(True, False)
+        self._signature = None
+        self._missed_samples = 0
+        return HandSample(None if unavailable else False, False)
 
 
 def make_hand_presence(model_path, *, verify):

@@ -70,6 +70,11 @@ _DARK_SAMPLE_STRIDE = 8
 # a ultima mao vista (queda curta do detector nao libera a folha). So vale
 # para o mesmo tamanho de frame; "indisponivel" nunca e retido.
 _HOLD_FRAMES = 3
+# A partial detection (for example, only one of two hands found) keeps
+# the missing hand's last mask briefly. Full misses are already retained
+# at landmark level by _retain.
+_MASK_HOLD_FRAMES = 3
+_MASK_HOLD_GROW_PX = 10
 
 
 def _resolve_model_path(model_path):
@@ -178,6 +183,9 @@ class HandMasker:
         self._held_misses = 0
         self.last_detection_held = False
         self._observed_source_id = None
+        self._last_hand_mask = None
+        self._last_hand_count = 0
+        self._mask_misses = 0
         self._warned = False
         self._closed = False
         self._lock = threading.RLock()
@@ -368,6 +376,9 @@ class HandMasker:
             self._held_shape = None
             self._held_misses = 0
             self.last_detection_held = False
+            self._last_hand_mask = None
+            self._last_hand_count = 0
+            self._mask_misses = 0
 
     def _retain(self, hands, frame):
         """Histerese de presenca: sem mao por ate _HOLD_FRAMES deteccoes
@@ -408,8 +419,8 @@ class HandMasker:
         image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
         result = None
         if use_video:
-            timestamp = max(int(timestamp_ms), self._last_video_ts + 1)
             try:
+                timestamp = max(int(timestamp_ms), self._last_video_ts + 1)
                 result = self._video_landmarker.detect_for_video(image, timestamp)
                 self._last_video_ts = timestamp
             except Exception:
@@ -430,7 +441,10 @@ class HandMasker:
         if result is None:
             if not self._ensure():
                 return None
-            result = self._landmarker.detect(image)
+            try:
+                result = self._landmarker.detect(image)
+            except Exception:
+                return None
         frame_h, frame_w = frame.shape[:2]
         hands = []
         for hand in result.hand_landmarks or []:
@@ -442,30 +456,85 @@ class HandMasker:
             )
         return hands
 
-    def mask(self, frame):
-        """A máscara de mão do frame, ou None se indisponível."""
-        hands = self._landmarks(frame)
-        if hands is None:
-            return None
-        mask = np.zeros(frame.shape[:2], dtype=np.uint8)
-        for points in hands:
-            for polygon in _hand_polygons(points, frame.shape):
-                cv2.fillPoly(mask, [polygon], 255)
-        if not hands:
+    def mask(self, frame, timestamp_ms=None):
+        """Máscara de mão atual, com retenção de quedas breves do detector.
+
+        Full misses are held at landmark level. If only one of multiple
+        hands remains detected, retain the previous union mask briefly so
+        the missing hand cannot expose ink during flicker.
+        """
+        with self._lock:
+            hands = self._landmarks(
+                frame,
+                max_width=_PRESENCE_MAX_WIDTH,
+                timestamp_ms=timestamp_ms,
+            )
+            if hands is None:
+                return None
+            if not hands:
+                # Ausência real (hold de marcos expirado): a pegada
+                # retida é antiga demais para valer — reatá-la numa
+                # detecção parcial futura vetaria uma região que a
+                # mão já deixou.
+                self._last_hand_mask = None
+                self._last_hand_count = 0
+                self._mask_misses = 0
+                return np.zeros(frame.shape[:2], dtype=np.uint8)
+
+            mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+            for points in hands:
+                for polygon in _hand_polygons(points, frame.shape):
+                    cv2.fillPoly(mask, [polygon], 255)
+            kernel = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE, (2 * _DILATE_PX + 1, 2 * _DILATE_PX + 1)
+            )
+            mask = cv2.dilate(mask, kernel)
+            if self.last_detection_held:
+                # Falha total: a histerese entregou os marcos
+                # retidos e a pegada REAL cresce a cada miss — a
+                # mão segue se movendo sob uma leitura que não se
+                # atualiza; o footprint fixo exporia a borda dela
+                # como papel à vista (Devin Review do PR #144).
+                self._mask_misses += 1
+                if (
+                    self._last_hand_mask is not None
+                    and self._last_hand_mask.shape == mask.shape
+                ):
+                    mask = self._merge_held(mask)
+                return mask
+            if (
+                self._last_hand_mask is not None
+                and self._last_hand_mask.shape == mask.shape
+                and len(hands) < self._last_hand_count
+                and self._mask_misses < _MASK_HOLD_FRAMES
+            ):
+                self._mask_misses += 1
+                mask = self._merge_held(mask)
+            else:
+                self._last_hand_mask = mask.copy()
+                self._last_hand_count = len(hands)
+                self._mask_misses = 0
             return mask
-        kernel = cv2.getStructuringElement(
-            cv2.MORPH_ELLIPSE, (2 * _DILATE_PX + 1, 2 * _DILATE_PX + 1)
+
+    def _merge_held(self, mask):
+        """Une a pegada retida (dilatada pelos misses) à máscara."""
+        grow = _MASK_HOLD_GROW_PX * self._mask_misses
+        hold_kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (2 * grow + 1, 2 * grow + 1)
         )
-        return cv2.dilate(mask, kernel)
+        return cv2.bitwise_or(mask, cv2.dilate(self._last_hand_mask, hold_kernel))
 
     def observe(self, packet: FramePacket, *, source_id: int) -> HandOcclusion:
-        """Publica a máscara IMAGE com a identidade da captura."""
+        """Publica a máscara da captura com identidade e timestamp."""
         if source_id != self._observed_source_id:
             # Outra fonte/vista: marcos retidos da anterior nao valem.
             if self._observed_source_id is not None:
                 self.reset_retention()
             self._observed_source_id = source_id
-        mask = self.mask(packet.image)
+        mask = self.mask(
+            packet.image,
+            timestamp_ms=packet.captured_at * 1000.0,
+        )
         return HandOcclusion(
             frame_sequence=packet.sequence,
             captured_at=packet.captured_at,
