@@ -188,7 +188,7 @@ para timing.
 ## Papel de calibração
 
 É este harness que vai calibrar os limiares do `PageModel` —
-`_NOVEL_DELTA`, `rate`, `block`, `confirm_obs` — quando existir
+`_NOVEL_RATIO`, `rate`, `block`, `confirm_obs` — quando existir
 massa de clipes rotulados por condição. A nota de literatura que
 fundamenta o modelo e lista o que está pendente de medição está em
 `docs/research/nota-page-model-literatura.md` (repo

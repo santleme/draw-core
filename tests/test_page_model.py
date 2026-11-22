@@ -1444,7 +1444,7 @@ def test_page_model_adapts_to_sustained_dimming_and_captures_new_stroke(monkeypa
         assert np.count_nonzero(_confirmed(worker, generation)) == 0
 
         # Iluminacao cai de 235 para 170: papel le 170 e marca impressa cai de 95 para 69
-        # (queda bruta de 26 > novel_delta=24, mas proporcionalmente inalterada),
+        # (razao de queda 26/95 = 0,27 < novel_ratio=0,30 — proporcionalmente inalterada),
         # junto de um traco novo a 40 em [50:60, 80:90].
         dimmed = np.full((H, W), 170.0, dtype=np.float32)
         dimmed[14:22, 14:44] = 69.0
@@ -2852,3 +2852,59 @@ def test_identity_recovery_photometric_budget_on_a4_grid():
     # maquina (antes desta revisao: 40-60 ms); o bound pega regressao
     # de ordem de grandeza, nao ruido sob carga.
     assert per_pass_ms < 30.0, per_pass_ms
+
+
+def test_novel_and_returned_stay_disjoint_over_dark_print():
+    """Review #174: pauta escura (ref ~24), traco que a escurece dentro
+    de _RETURN_TOL (|diff| <= 8) mas acima da razao de Weber era lido
+    como tinta nova E como papel devolvido — e a trabalhadora apagava
+    o traco visivel pelo caminho de remocao."""
+    model = pm_mod.PageModel((H, W), confirm_obs=1)
+    dark = _paper()
+    dark[40:44, 20:80] = 24.0  # pauta escura semeada
+    model.observe(dark)
+
+    traced = dark.copy()
+    traced[40:44, 30:60] = 16.0  # traco: 33% de contraste, diff=8
+    novel_mask, returned_mask = model.appearance(traced)
+    assert novel_mask[42, 45]
+    assert not returned_mask[42, 45]
+    assert not model.returned(traced)[42, 45]
+
+    # Restaurar a pauta de verdade continua contando como devolvida.
+    assert model.returned(dark)[42, 45]
+
+
+def test_novel_discriminates_absolute_delta_at_both_ends():
+    """Caso de contraste local (sem dimming global): onde as duas
+    regras divergem. ref 180 -> 150 cai 30 absoluto (delta vazaria)
+    mas so 17% (razao suprime); ref 60 -> 40 cai so 20 absoluto
+    (delta suprimiria) mas 33% (razao detecta)."""
+    model = pm_mod.PageModel((H, W), confirm_obs=1)
+    scene = _paper()
+    scene[40:46, 20:60] = 180.0  # papel acinzentado
+    scene[60:66, 20:60] = 60.0  # pauta escura
+    model.observe(scene)
+
+    obs = scene.copy()
+    obs[40:46, 30:50] = 150.0  # sombra local suave sobre o cinza
+    obs[60:66, 30:50] = 40.0  # traco sobre a pauta escura
+    novel_mask, _ = model.appearance(obs)
+    assert not novel_mask[43, 40], "sombra 17% virou tinta nova"
+    assert novel_mask[63, 40], "traco 33% sobre pauta escura nao foi visto"
+
+
+def test_identity_darker_admits_what_novel_admits():
+    """Review #174: darker_than_reference precisa enxergar o traco que
+    novel() admitiu — senao a reaquisicao segura a recuperacao para
+    sempre com o desenho salvo a vista."""
+    model = pm_mod.PageModel((H, W), confirm_obs=1)
+    dark = _paper()
+    dark[40:44, 20:80] = 60.0
+    model.observe(dark)
+
+    traced = dark.copy()
+    traced[40:44, 30:60] = 40.0  # 33% > 30%; gap absoluto 20 < 24
+    assert model.novel(traced)[42, 45]
+    darker, _ = model.darker_than_reference(traced)
+    assert darker[42, 45]
