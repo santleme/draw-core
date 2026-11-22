@@ -362,6 +362,10 @@ class InkPublication:
     full (descontinuidade: tinta removida/migrada ou âncora movida) vêm do
     InkDelta da mesma passada; None/False quando não se pediu a metadados ou
     a publicação não trouxe tinta nova.
+
+    Este é o tipo concreto canônico; `draw_dral.stream.InkPublication` é a
+    vista estrutural (Protocol) do mesmo contrato, para o fio não importar
+    o core. Mesmo nome, papéis diferentes — não é duplicata acidental.
     """
 
     generation: int
