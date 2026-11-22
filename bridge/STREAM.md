@@ -3,7 +3,8 @@
 Saída ao vivo da tinta confirmada: o Draw publica o canvas confirmado para
 um consumidor externo (o `drawlink`). É a **tomada** que isola a ponte do
 laço de captura: se o consumidor cair, travar ou nunca existir, o Draw segue
-digitalizando igual. Implementação: `src/draw/stream.py`.
+digitalizando igual. Implementação: `packages/draw-dral/src/draw_dral/stream.py`
+(reexportada como `draw.stream`).
 
 Não confundir com o [PROTOCOL.md](PROTOCOL.md): aquele leva JPEG da câmera
 (helper Windows -> WSL). Este leva tinta (Draw -> consumidor).

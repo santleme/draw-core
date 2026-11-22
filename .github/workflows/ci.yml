@@ -20,6 +20,9 @@ concurrency:
 jobs:
   fast:
     runs-on: ubuntu-latest
+    env:
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v10.4.0
@@ -31,10 +34,8 @@ jobs:
       - run: uv pip install -e ".[dev]"
       - run: ruff check .
       - run: ruff format --check .
-      - run: pytest -q -n auto --dist worksteal -m "not slow"
-        env:
-          OMP_NUM_THREADS: "1"
-          OPENBLAS_NUM_THREADS: "1"
+      - run: pytest -q -n auto --dist worksteal -m "not slow and not timing"
+      - run: pytest -q -m timing
 
   slow:
     runs-on: ubuntu-latest

@@ -75,7 +75,11 @@ def launcher(tmp_path):
         "        if not Path('hand-available').exists():\n"
         "            sys.exit(7)\n"
         "        (prefix / 'hand-installed').touch()\n"
-        "    elif sys.argv[-1] != 'pip' and not Path('gui-available').exists():\n"
+        "    elif (\n"
+        "        sys.argv[-1] != 'pip'\n"
+        "        and sys.argv[-1] != './packages/draw-dral'\n"
+        "        and not Path('gui-available').exists()\n"
+        "    ):\n"
         "        sys.exit(7)\n"
         "    if '-e' in sys.argv:\n"
         "        for pkg in ('opencv-contrib-python-headless', 'opencv-contrib-python'):\n"
@@ -118,11 +122,17 @@ def test_failed_setup_never_uninstalls_opencv(tmp_path, launcher, use_uv):
     )
     commands = (tmp_path / "commands").read_text().splitlines()
     assert all("uninstall" not in command for command in commands)
-    assert commands[-2:] == (
-        [_INSTALL_SYNC_HAND, _INSTALL_SYNC_GUI]
-        if use_uv
-        else ["-m pip install -e .[gui,hand]", "-m pip install -e .[gui]"]
-    )
+    dral = "-m pip install -e ./packages/draw-dral"
+    if use_uv:
+        assert commands[-2:] == [_INSTALL_SYNC_HAND, _INSTALL_SYNC_GUI]
+    else:
+        # pip nao le tool.uv.sources: o membro entra antes de cada -e.
+        assert commands[-4:] == [
+            dral,
+            "-m pip install -e .[gui,hand]",
+            dral,
+            "-m pip install -e .[gui]",
+        ]
     assert result.returncode == 7
     assert not (tmp_path / ".venv" / ".no_hand").exists()
 

@@ -163,7 +163,7 @@ def test_shape_mismatch_raises():
         model.observe(np.zeros((H + 1, W), dtype=np.float32))
 
 
-@pytest.mark.slow
+@pytest.mark.timing
 def test_observe_budget_on_a4_grid():
     model = pm_mod.PageModel((1200, 850), confirm_obs=3)
     gray = _paper((1200, 850))
@@ -585,7 +585,7 @@ def test_page_model_reacquires_partially_covered_stroke_crossing_printed_rule(
         worker.stop()
 
 
-@pytest.mark.slow
+@pytest.mark.timing
 def test_identity_recovery_budget_on_a4_grid(monkeypatch):
     """worker.py:236 & test_page_model.py:575: avaliacao de identidade A4 com marcas em cantos opostos < 10 ms e fora do lock do worker."""
     shape = (1200, 850)
