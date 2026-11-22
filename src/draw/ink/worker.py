@@ -662,6 +662,7 @@ class _Pass:
     confirmed_ink: object = None
     pm_baseline_ink: object = None
     next_baseline_ink: object = None
+    page_consistent: object = None
     reg_coverage: object = None
     coverage_matches_last_reg: bool = False
     pm_seeding_remaining: int = 0
@@ -2720,13 +2721,20 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 if p.visible is None
                 else (p.visible if pm_coverage is None else (p.visible & pm_coverage))
             )
+            # Pixel escurecido contra a referencia nao e papel limpo:
+            # nao arrasta `ref` para baixo (mao/sombra nao mascarada
+            # nao envenena o modelo) nem testemunha remocao de tinta.
+            novel_mask = pm.novel(gray)
+            page_consistent = pm.seeded & ~novel_mask
             pm.observe(
                 gray,
                 visible=obs_visible,
                 paper=(
-                    p.prob <= registration._REMOVAL_LOW_PROB
+                    page_consistent & (p.prob <= registration._REMOVAL_LOW_PROB)
                     if obs_visible is None
-                    else obs_visible & (p.prob <= registration._REMOVAL_LOW_PROB)
+                    else obs_visible
+                    & page_consistent
+                    & (p.prob <= registration._REMOVAL_LOW_PROB)
                 ),
                 bgr=(
                     reg_bgr
@@ -2734,12 +2742,12 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     else None
                 ),
             )
+            p.page_consistent = page_consistent
             p.pm_seeding_remaining = pm.seeding_remaining
             p.visible = pm.admissible(p.visible)
             obs_admissible = pm.admissible(obs_visible)
             confirmed_ink = p.confirmed_ink
-            novel_mask = pm.novel(gray)
-            suppress = pm.seeded & ~novel_mask & ~confirmed_ink
+            suppress = page_consistent & ~confirmed_ink
             voting_px = p.visible & (p.prob > self._accumulator.threshold)
             p.reg_info["pm_seeded_frac"] = pm.seeded_fraction
             p.reg_info["pm_novel_px"] = int(
@@ -2784,6 +2792,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             p.prob,
             p.visible,
             valid_mask=p.sampled,
+            removal_domain=p.page_consistent,
             removal_allowed=(
                 not p.identity_owned
                 and not p.arbitration_abstain

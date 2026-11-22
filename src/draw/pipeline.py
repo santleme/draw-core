@@ -538,7 +538,11 @@ class Pipeline:
                     gain_mask &= coverage
                 if visible is not None:
                     gain_mask &= visible
-                frame, self.last_ink_gain = exposure.apply_paper_gain(frame, gain_mask)
+                frame, gain = exposure.apply_paper_gain(frame, gain_mask)
+                if gain is not None:
+                    # Mascara de papel vazia nao mede nada: segura o
+                    # ultimo ganho valido em vez de zerar a escala.
+                    self.last_ink_gain = gain
             fill_color = None
             if coverage is not None and coverage.any():
                 # Fora da folha o warp é preto: a transição

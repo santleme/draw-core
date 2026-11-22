@@ -61,10 +61,13 @@ def test_bright_desk_does_not_cancel_the_paper_gain():
     assert out[800, 400, 0] == pytest.approx(200, abs=2)
 
 
-def test_empty_mask_falls_back_to_the_whole_image():
+def test_sparse_mask_still_restricts_to_paper():
     img = np.full((120, 90, 3), 80, np.uint8)
-    nothing = np.zeros((120, 90), bool)
-    assert exposure.paper_gain(img, nothing) == pytest.approx(2.5, rel=0.01)
+    # Mesa clara fora, folha escura dentro: so a folha mede.
+    img[:, :30] = 220
+    paper_only = np.zeros((120, 90), bool)
+    paper_only[:, 30:] = True
+    assert exposure.paper_gain(img, paper_only) == pytest.approx(2.5, rel=0.01)
 
 
 def test_lut_gain_matches_the_naive_per_pixel_result():
@@ -123,3 +126,18 @@ def test_sparse_estimate_tracks_the_full_resolution_gain_on_ruled_pages(period):
             full = float(np.clip(200.0 / p90, 1.0, 3.0))
             sampled = exposure.paper_gain(img)
             assert sampled == pytest.approx(full, rel=0.02), (period, offset, paper)
+
+
+def test_empty_paper_mask_measures_nothing_and_keeps_last_gain():
+    """Guarda minima do #133: quad sem papel dentro nao tem o que medir.
+    A mascara explicitamente vazia devolve None — medir o quadro
+    inteiro leria a mesa como folha; o pipeline segura o ultimo
+    ganho valido quando isso acontece."""
+    img = _page(80)
+    empty = np.zeros(img.shape[:2], dtype=bool)
+    assert exposure.paper_gain(img, empty) is None
+    out, gain = exposure.apply_paper_gain(img, empty)
+    assert gain is None
+    assert out is img
+    # Mascara None (sem cobertura) segue medindo o quadro inteiro.
+    assert exposure.paper_gain(img, None) == pytest.approx(200 / 80)

@@ -68,6 +68,11 @@ _SEEN_FRACTION = 0.5
 # passadas a 0,15-0,25 s = 0,45-0,75 s: cabe no periodo de
 # estabilizacao que a folha ja exige e cobre uma mao parada breve.
 _CONFIRM_OBS = 3
+# Razao de clareamento que faz a referencia subir direto ate a
+# observacao em vez de derivar: papel a 222 semeado sob mao a 130
+# mede 1,7 — muito acima de 1,25; relampagos e nuvens reais ficam
+# na deriva lenta.
+_REF_UP_RATIO = 1.25
 # Passo do rastreio lento da referencia onde ha papel: ~1/rate
 # passadas para absorver uma deriva (~20 a 0,15 s = ~3 s) — lento
 # demais para apagar jitter de exposicao entre passadas, rapido o
@@ -265,12 +270,21 @@ class PageModel:
             if has_update:
                 diff = self._diff_buf
                 rate = np.float32(self.rate)
+                # Observacao muito mais clara que a referencia e um
+                # oclusor que saiu (mao nao mascarada semeada como
+                # papel, sombra que abriu): a deriva lenta levaria
+                # dezenas de passadas para reexpor o papel — a
+                # referencia sobe direto ate a observacao.
+                brighter = update & (norm_gray > self._norm_ref * _REF_UP_RATIO)
                 np.subtract(gray, self._ref, out=diff, where=update)
                 np.multiply(diff, rate, out=diff, where=update)
                 np.add(self._ref, diff, out=self._ref, where=update)
                 np.subtract(norm_gray, self._norm_ref, out=diff, where=update)
                 np.multiply(diff, rate, out=diff, where=update)
                 np.add(self._norm_ref, diff, out=self._norm_ref, where=update)
+                if np.any(brighter):
+                    self._ref[brighter] = gray[brighter]
+                    self._norm_ref[brighter] = norm_gray[brighter]
         if (
             (has_seed_now or has_update)
             and bgr is not None

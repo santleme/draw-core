@@ -111,10 +111,14 @@ class LayeredInkAccumulator:
         *,
         removal_allowed=True,
         valid_mask=None,
+        removal_domain=None,
     ):
         """Uma passada. valid_mask delimita o dominio geometrico
         inspecionado (a pegada que o registro de fato cobriu):
-        fora dela a passada nao entrega evidencia negativa."""
+        fora dela a passada nao entrega evidencia negativa.
+        removal_domain (opcional, o PageModel consistente) restringe
+        o que conta como ausencia: pixel escurecido contra a
+        referencia nao prova papel limpo e nao apaga tinta."""
         prob = np.asarray(prob, dtype=np.float32)
         if visible is not None:
             visible = np.asarray(visible, dtype=bool)
@@ -266,6 +270,8 @@ class LayeredInkAccumulator:
                     & np.isfinite(prob)
                     & (prob <= registration._REMOVAL_LOW_PROB)
                 )
+                if removal_domain is not None:
+                    missing &= np.asarray(removal_domain, dtype=bool)
                 # O reset NAO depende da testemunha: ela so governa o
                 # que conta como ausencia. Sem ela, pixel fora do
                 # dominio inspecionado (guarda que alargou por cima

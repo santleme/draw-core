@@ -531,7 +531,10 @@ def test_returned_sheet_keeps_its_confirmed_ink(ink, residual):
     # A folha sai e volta: a geracao de recuperacao carrega a copia
     # do canvas para a comparacao de identidade (preserve_identity).
     returned = worker.new_generation(preserve_identity=True)
-    scene.jitter(residual, 0)
+    # O quad retorna residual px fora: o conteudo retificado chega
+    # deslocado de verdade (a imagem devolvida pelo jitter, bandas
+    # de mesa inclusas), nao a pagina original sob o quad errado.
+    scene.page = scene.jitter(residual, 0)
     _passes(worker, clock, returned, scene, 6)
 
     got = _confirmed(worker, returned) > 0
@@ -543,3 +546,91 @@ def test_returned_sheet_keeps_its_confirmed_ink(ink, residual):
     # Qualquer que seja o residuo, a tinta nao pode duplicar: o total
     # confirmado fica no tamanho do desenho original.
     assert np.count_nonzero(got) <= 1.5 * np.count_nonzero(want)
+
+
+# ------------------------------------------------------------------
+# Contrato 12: mao NAO mascarada sobre tinta confirmada — a mascara
+# falha, o oclusor escuro sobe no warp com visible=True. Antes da
+# referencia de pagina, a ausencia lida (prob baixa) apagava o
+# desenho: o oclusor nao e papel limpo contra o ref, entao nao pode
+# testemunhar remocao (#129 reescrito dentro do PageModel).
+# ------------------------------------------------------------------
+
+
+class _StrictInk:
+    """Modelo adversarial: traco escuro vira 0,95; todo o resto —
+    inclusive a pele cinza da mao — vira "definitivamente nao tinta"
+    (0,05, abaixo do piso de remocao). E o pior caso do #129: o
+    modelo ativamente declara papel limpo onde a mao esta."""
+
+    def ink_prob(self, warped):
+        gray = warped if warped.ndim == 2 else warped.mean(axis=2)
+        prob = np.full(gray.shape, 0.05, dtype=np.float32)
+        prob[gray < 100] = 0.95
+        return prob
+
+
+def _strict_worker(config):
+    clock = _Clock()
+    return clock, PageCleanWorker(_StrictInk(), clock=clock, config=config)
+
+
+@pytest.fixture(params=list(REGIMES), ids=list(REGIMES))
+def strict_ink(regime):
+    clock, worker = _strict_worker(REGIMES[regime])
+    yield worker, clock
+    try:
+        worker.stop()
+    except RuntimeError:
+        pass
+
+
+def test_unmasked_hand_over_confirmed_ink_cannot_erase_it(strict_ink):
+    worker, clock = strict_ink
+    generation = worker.new_generation()
+    scene = _Scene()
+    _passes(worker, clock, generation, scene, 4, dt=_DT_IDLE)
+    stroke = (60, 66, 100, 260)
+    _write_stroke(worker, clock, generation, scene, stroke)
+    want = _rect_mask(stroke)
+    before = _confirmed(worker, generation) > 0
+    assert np.count_nonzero(before & want) >= 0.95 * np.count_nonzero(want)
+
+    # A mascara falha: a mao escura (130, novel contra ref=222) sobe
+    # no warp com visible=True; o modelo adversarial le 0,05 — a
+    # "ausencia" que apagava o traco.
+    scene.draw((50, 120, 80, 280), HAND_GRAY)
+    _passes(worker, clock, generation, scene, 10)
+
+    got = _confirmed(worker, generation) > 0
+    np.testing.assert_array_equal(got & want, before & want)
+
+
+# ------------------------------------------------------------------
+# Contrato 13: a folha abre com a mao NAO mascarada parada em cima —
+# a mascara falha, o bloco semeia com o oclusor como referencia.
+# Quando ela sai, o papel real se estabiliza na hora e a regiao
+# recuperada comporta traco novo como o resto da pagina.
+# ------------------------------------------------------------------
+
+
+def test_unmasked_hand_at_init_recovers_paper_after_it_leaves(ink):
+    worker, clock = ink
+    generation = worker.new_generation()
+    scene = _Scene()
+    cover = (80, 240, 60, 220)
+    scene.draw(cover, HAND_GRAY)  # mao no warp, visible=True: mascara falhou
+    _passes(worker, clock, generation, scene, 4, dt=_DT_IDLE)
+
+    # A mao sai e expoe o papel real sob o bloco escuro.
+    scene = _Scene()
+    _passes(worker, clock, generation, scene, 4, dt=_DT_IDLE)
+
+    # Papel estabilizado: traco novo na regiao recuperada confirma
+    # como em qualquer outro lugar, e a folha nao gera tinta falsa.
+    stroke = (120, 126, 90, 210)
+    _write_stroke(worker, clock, generation, scene, stroke)
+    want = _rect_mask(stroke)
+    got = _confirmed(worker, generation) > 0
+    assert np.count_nonzero(got & want) >= 0.95 * np.count_nonzero(want)
+    assert np.count_nonzero(got & ~_dilate(want, 2)) == 0

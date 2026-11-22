@@ -32,15 +32,18 @@ _SAMPLE_STRIDE = 8
 def paper_gain(image, mask=None):
     """Ganho que levaria o p90 do papel a _TARGET_P90, em [1, _MAX_GAIN].
 
-    mask (bool, forma da imagem): pixels da folha. Vazia ou None, vale a
-    imagem inteira.
+    mask (bool, forma da imagem): pixels da folha. None, vale a imagem
+    inteira; explicitamente vazia (quad sem papel dentro) nao ha papel
+    a medir — devolve None e o chamador decide o que fazer; medir o
+    quadro inteiro confundiria a mesa com a folha (#133).
     """
     sample = image[::_SAMPLE_STRIDE, ::_SAMPLE_STRIDE]
     gray = sample.mean(axis=2) if sample.ndim == 3 else sample
     if mask is not None:
         sampled = np.asarray(mask)[::_SAMPLE_STRIDE, ::_SAMPLE_STRIDE] > 0
-        if sampled.any():
-            gray = gray[sampled]
+        if not sampled.any():
+            return None
+        gray = gray[sampled]
     p90 = float(np.percentile(gray, 90))
     if p90 <= 0:
         return _MAX_GAIN
@@ -48,9 +51,10 @@ def paper_gain(image, mask=None):
 
 
 def apply_paper_gain(image, mask=None):
-    """(imagem uint8 com ganho aplicado, ganho usado)."""
+    """(imagem uint8 com ganho aplicado, ganho usado — None se a
+    mascara de papel veio vazia: sem medicao, sem ganho novo)."""
     gain = paper_gain(image, mask)
-    if gain == 1.0:
+    if gain is None or gain == 1.0:
         return image, gain
     table = np.clip(np.arange(256, dtype=np.float32) * gain, 0, 255).astype(np.uint8)
     return cv2.LUT(image, table), gain

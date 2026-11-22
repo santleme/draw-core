@@ -69,6 +69,43 @@ def test_occluded_block_never_seeds_and_revealed_content_is_not_novel():
     assert not np.any(model.pending())
 
 
+def test_unmasked_hand_seeds_dark_but_reference_rises_on_exit():
+    """A mascara falha e a mao para em cima da folha na abertura:
+    `visible=True` a semeia como parte da pagina (a referencia sai
+    escura). Quando ela sai e o papel real aparece muito mais claro
+    que a referencia, e um oclusor saindo — nao uma deriva: a
+    referencia sobe direto ate a observacao, na mesma passada, em
+    vez de escoar ~1/rate passadas corrompendo o dominio."""
+    model = pm_mod.PageModel((H, W), confirm_obs=2, novel_ratio=0.30)
+    gray = _paper()
+    gray[32:64, 32:64] = 130.0  # mao nao mascarada parada sobre a folha
+    paper = np.ones((H, W), dtype=bool)
+    for _ in range(3):
+        model.observe(gray, paper=paper)
+    assert np.all(model.seeded)
+    np.testing.assert_array_less(
+        model.reference[32:64, 32:64], np.full((32, 32), 200.0)
+    )
+
+    # A mao sai: papel a 235 contra referencia 130 (razao 1,8 > 1,25)
+    # — clareamento de oclusor, nao de lampada. Uma observacao limpa
+    # e a regiao inteira ja e papel de novo.
+    model.observe(_paper(), paper=paper)
+    np.testing.assert_allclose(model.reference[32:64, 32:64], PAPER, atol=1.0)
+    assert not np.any(model.novel(_paper()))
+
+    # Pagina recuperada: um grafite medio na regiao volta a ser
+    # conteudo novo (contra 130 ele mediria "papel"), e um traco
+    # escuro tambem — a leitura de referencia voltou ao normal.
+    penciled = _paper()
+    penciled[40:46, 40:60] = 140.0
+    novel = model.novel(penciled)
+    assert np.count_nonzero(novel[40:46, 40:60]) == 6 * 20
+    stroked = _paper()
+    stroked[36:40, 36:60] = INK
+    assert np.count_nonzero(model.novel(stroked)[36:40, 36:60]) == 4 * 24
+
+
 def test_seeded_content_stays_not_novel_but_new_stroke_is():
     model = pm_mod.PageModel((H, W), confirm_obs=2)
     gray = _paper()
