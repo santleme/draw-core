@@ -50,8 +50,6 @@ calibracao nas capturas reais esta registrada na constante.
 import cv2
 import numpy as np
 
-from . import paper_evidence
-
 # Bloco da grade de semeadura: a mesma ordem do 32 px medido na
 # guarda fotometrica (#129). Fino o bastante para a mao nao
 # contaminar a pagina inteira; grosso o bastante para a fracao por
@@ -99,6 +97,20 @@ _NOVEL_DELTA = 24.0
 # e o fundo de volta, e entre os dois e incerto e nao decide nada. Sem
 # isso um traco que perdeu contraste (reflexo) pareceria apagado.
 _RETURN_TOL = 8.0
+
+# Constantes da guarda fotometrica da issue #129, inlinadas quando o
+# modulo dela morreu: `exposed` e `_estimate_gain` leem daqui. A
+# estatistica e o MAXIMO por janela de `block` px — traco de caneta
+# cobre poucos % da janela; mao, braco e sombra derrubam ate o pixel
+# mais claro dela.
+_SAMPLE_STRIDE = 8
+_MIN_SAMPLES = 64
+_MIN_RATIO = 0.78
+# Reducao previa por area (px por lado) antes do maximo por bloco.
+_REDUCE_PX = 4
+# Cor: pele tem B/R bem abaixo do papel (que e quase neutro). Tolera
+# desvio relativo do B/R do bloco contra a referencia.
+_CHROMA_TOL = 0.18
 
 
 def _block_fraction(mask, block, raw=False):
@@ -383,12 +395,12 @@ class PageModel:
         *,
         bgr=None,
         visible=None,
-        chroma_tol=paper_evidence._CHROMA_TOL,
+        chroma_tol=_CHROMA_TOL,
     ):
         """Estima (gain, chroma_valid) da iluminacao global contra _norm_ref."""
         if not self._has_seeded:
             return 1.0, True
-        stride = paper_evidence._SAMPLE_STRIDE
+        stride = _SAMPLE_STRIDE
         seeded_s = self._seeded[::stride, ::stride]
         ref_s = self._norm_ref[::stride, ::stride]
         gray_s = gray_f[::stride, ::stride]
@@ -398,7 +410,7 @@ class PageModel:
             seeded_vis_grid = seeded_s & visible[::stride, ::stride] & (ref_s > 1.0)
         seeded_total = int(np.count_nonzero(seeded_s))
         min_samples = min(
-            paper_evidence._MIN_SAMPLES,
+            _MIN_SAMPLES,
             max(8, seeded_total // 2),
         )
         if int(np.count_nonzero(seeded_vis_grid)) < min_samples:
@@ -447,8 +459,8 @@ class PageModel:
         bgr=None,
         *,
         visible=None,
-        min_ratio=paper_evidence._MIN_RATIO,
-        chroma_tol=paper_evidence._CHROMA_TOL,
+        min_ratio=_MIN_RATIO,
+        chroma_tol=_CHROMA_TOL,
         hold_passes=0,
     ):
         """Mascara bool HxW: True onde a regiao semeada parece papel exposto.
@@ -475,7 +487,7 @@ class PageModel:
             self._hold_mask.fill(False)
             return np.ones(self.shape, dtype=bool)
         height, width = self.shape
-        step = paper_evidence._REDUCE_PX
+        step = _REDUCE_PX
         cells = max(1, self.block // step)
         kernel = np.ones((cells, cells), np.uint8)
         ref_grid = np.where(
