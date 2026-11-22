@@ -1686,7 +1686,11 @@ class _BaselineInk(_FakeInkWorker):
 
 
 def test_baseline_state_and_rezero_need_page_model_and_active_sheet():
-    off, _, off_ink = _make_loop([], ink=_BaselineInk())
+    # O default de PipelineConfig.ink e o preset de producao, que ja
+    # tem page_model — o caso "desligado" precisa da config legada.
+    off, _, off_ink = _make_loop(
+        [], ink=_BaselineInk(), config=PipelineConfig(ink=InkConfig(), **_BASE)
+    )
     assert off.ink_baseline_state().phase == "disabled"
     assert off.rezero_ink_baseline() is False
     assert off_ink.rezero_calls == 0
