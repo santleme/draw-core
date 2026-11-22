@@ -98,7 +98,7 @@ def run_new(
     # ganho, sem Detect-Wake e com voto/cadência legados): fixa a mesma base
     # em Pipeline e PageCleanWorker para não misturar o preset de produção.
     legacy_config = PipelineConfig(
-        ink=InkConfig(paper_guard=False), ink_auto_gain=False, detect_wake=False
+        ink=InkConfig(), ink_auto_gain=False, detect_wake=False
     )
     worker = PageCleanWorker(
         page_clean,
