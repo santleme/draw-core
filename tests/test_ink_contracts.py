@@ -668,3 +668,119 @@ def test_startup_occluder_never_seeds_nor_inks(ink, regime):
     want = _stroke_mask(scene)
     got = _confirmed(worker, generation) > 0
     assert _frac(got, want) >= 0.9
+
+
+# Contratos 8-9 (F-11): a mesma folha devolvida depois de uma queda do
+# tracker. O erro de cantos entre geracoes chega ao motor como residuo
+# de registro: o conteudo da pagina retificada volta deslocado na
+# grade. O produto deve (a) reconhecer a mesma folha, (b) devolver o
+# desenho confirmado e (c) nao engrossar nem duplicar os tracos.
+#
+# Nenhum atributo privado: new_generation(preserve_identity=True),
+# submit/pump e poll.
+# ------------------------------------------------------------------
+
+_F11_STROKES = ((50, 56, 40, 280), (90, 96, 40, 280), (130, 136, 40, 280))
+
+
+def _f11_draw_session(worker, clock, residual):
+    """Escreve tres tracos, derruba, devolve a folha deslocada de
+    `residual` px. Devolve (gen2, mascara esperada, confirmado antes)."""
+    generation = worker.new_generation()
+    scene = _Scene()
+    _passes(worker, clock, generation, scene, 4, dt=_DT_IDLE)
+    for stroke in _F11_STROKES:
+        _write_stroke(worker, clock, generation, scene, stroke)
+    before = _confirmed(worker, generation) > 0
+
+    returned = _Scene()
+    for y0, y1, x0, x1 in _F11_STROKES:
+        returned.draw((y0 + residual, y1 + residual, x0, x1))
+    gen2 = worker.new_generation(preserve_identity=True)
+    _passes(worker, clock, gen2, returned, 6, dt=_DT_IDLE)
+    return gen2, before
+
+
+@pytest.mark.parametrize("residual", [0, 2, 6])
+def test_sheet_returned_after_drop_keeps_the_drawing(ink, residual):
+    worker, clock = ink
+    gen2, before = _f11_draw_session(worker, clock, residual)
+    assert np.count_nonzero(before) > 0
+    got = _confirmed(worker, gen2) > 0
+    # (b) o desenho confirmado volta
+    assert np.count_nonzero(got & before) >= 0.95 * np.count_nonzero(before)
+    # (c) sem engrossar nem duplicar: nada alem de 1 px do que ja existia
+    assert np.count_nonzero(got & ~_dilate(before, 1)) == 0
+
+
+# ------------------------------------------------------------------
+# Contrato 9 (F-11): a folha devolvida com erro de rastreio E cobertura
+# parcial. O conteudo do warp anda `residual` px, a faixa que o quad nao
+# cobre vira mesa escura (o modelo a le como tinta se a cobertura nao
+# acompanhar a evidencia) e parte da folha segue descoberta. O desenho
+# confirmado — inclusive o traco escondido na regiao descoberta e o
+# encostado nela — volta intacto, sem fantasma e sem tinta de mesa.
+# ------------------------------------------------------------------
+
+_F11_EDGE_STROKES = (
+    (30, 36, 40, 280),
+    (90, 96, 40, 280),
+    (188, 194, 40, 280),  # encostado na regiao descoberta
+    (210, 216, 40, 280),  # escondido nela
+)
+_F11_UNCOVERED_FROM = 200  # linha da pagina onde a cobertura acaba
+
+
+@pytest.mark.parametrize("residual", [2, 6])
+def test_sheet_returned_with_tracking_error_and_partial_coverage(ink, residual):
+    worker, clock = ink
+    generation = worker.new_generation()
+    scene = _Scene()
+    _passes(worker, clock, generation, scene, 4, dt=_DT_IDLE)
+    for stroke in _F11_EDGE_STROKES:
+        _write_stroke(worker, clock, generation, scene, stroke)
+    before = _confirmed(worker, generation) > 0
+    assert np.count_nonzero(before) > 0
+
+    returned = _Scene()
+    for stroke in _F11_EDGE_STROKES:
+        returned.draw(stroke)
+    img = returned.shifted((0, 0), (0, -residual))
+    # Faixa descoberta (oclusao/sombra): mesa escura e sem cobertura.
+    uncovered = np.zeros(img.shape, dtype=bool)
+    uncovered[_F11_UNCOVERED_FROM - residual :, :] = True
+    img[uncovered] = TABLE_GRAY
+    returned.table = returned.table | uncovered
+    gen2 = worker.new_generation(preserve_identity=True)
+    for _ in range(6):
+        _feed(worker, clock, returned.frame(gen2, img), dt=_DT_IDLE, must=False)
+
+    got = _confirmed(worker, gen2) > 0
+    assert np.count_nonzero(got & before) >= 0.95 * np.count_nonzero(before)
+    assert np.count_nonzero(got & ~_dilate(before, 1)) == 0
+
+
+def test_slide_after_a_return_with_residual_keeps_the_drawing(ink):
+    """O residuo corrigido persiste na geracao: um deslize posterior (o
+    tracker acompanha, o conteudo do warp nao anda) segue limpo, como no
+    caso sem residuo. Cobre a arbitragem/follow de ancora ligadas."""
+    worker, clock = ink
+    generation = worker.new_generation()
+    scene = _Scene()
+    _passes(worker, clock, generation, scene, 4, dt=_DT_IDLE)
+    for stroke in _F11_STROKES:
+        _write_stroke(worker, clock, generation, scene, stroke)
+    before = _confirmed(worker, generation) > 0
+
+    returned = _Scene()
+    for y0, y1, x0, x1 in _F11_STROKES:
+        returned.draw((y0 + 6, y1 + 6, x0, x1))
+    gen2 = worker.new_generation(preserve_identity=True)
+    _passes(worker, clock, gen2, returned, 6, dt=_DT_IDLE)
+    returned.corners = Q0 + np.float32([5, 3])
+    for _ in range(10):
+        _feed(worker, clock, returned.frame(gen2), dt=_DT_IDLE, must=False)
+
+    got = _confirmed(worker, gen2) > 0
+    assert np.count_nonzero(got & before) >= 0.95 * np.count_nonzero(before)
+    assert np.count_nonzero(got & ~_dilate(before, 1)) == 0

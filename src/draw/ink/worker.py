@@ -501,6 +501,126 @@ def _align_identity_baseline(identity_baseline, seen, prior, radius, kernel):
     return _shift_bool_mask(identity_baseline, best_dy, best_dx), best_dy, best_dx
 
 
+# Residuo de registro entre geracoes (F-11): a folha devolvida chega com
+# erro de cantos que o registro nao absorve, e a evidencia aparece
+# deslocada na grade da ancora. Estima-se uma translacao INTEIRA contra a
+# referencia de identidade; na duvida o resultado e (0, 0).
+_RESIDUAL_MAX_PX = 12  # busca restrita: pico de alias fora dela nao vale
+_RESIDUAL_MIN_PX = 200  # tinta minima (referencia e evidencia) para estimar
+_RESIDUAL_MIN_PEAK = 0.05  # correlacao normalizada minima na janela
+_RESIDUAL_MIN_GAIN = 0.10  # ganho minimo de recall exato sobre (0, 0)
+_RESIDUAL_MIN_RECALL = 0.5  # recall exato minimo apos o deslocamento
+_RESIDUAL_CROP_PAD = 16
+_RESIDUAL_RIVAL_GUARD = 3  # px (meia resolucao) em volta do melhor pico
+_RESIDUAL_RIVAL_PEAK = 0.9  # pico rival relevante: >= 90% do melhor
+
+
+def _exact_recall(prior, seen, dx, dy, prior_px):
+    """Fracao da referencia coberta pela evidencia deslocada, sem tolerancia."""
+    h, w = prior.shape
+    y0, y1 = max(0, dy), min(h, h + dy)
+    x0, x1 = max(0, dx), min(w, w + dx)
+    if y1 <= y0 or x1 <= x0:
+        return 0.0
+    hit = np.count_nonzero(
+        prior[y0:y1, x0:x1] & seen[y0 - dy : y1 - dy, x0 - dx : x1 - dx]
+    )
+    return hit / prior_px
+
+
+def _estimate_identity_residual(
+    reference, baseline, evidence, visible, sampled, threshold
+):
+    """(dx, dy) inteiro que alinha a evidencia da passada a referencia.
+
+    Funcao pura. Falha com seguranca: devolve (0, 0) quando a estimativa
+    e ambigua (pouca tinta, correlacao fraca, ganho pequeno). A metrica
+    de aceite e o recall EXATO da referencia, que traco novo na evidencia
+    nao derruba; o deslocamento so e aplicado se melhorar o recall de
+    forma clara. Cobre translacao; rotacao nao.
+    """
+    prior = reference > 0
+    seen = evidence > threshold
+    if prior.shape != seen.shape:
+        return 0, 0
+    if baseline is not None and baseline.shape == seen.shape and baseline.any():
+        kernel = np.ones((identity._IDENTITY_DILATION_KERNEL,) * 2, np.uint8)
+        excluded = cv2.dilate(baseline.astype(np.uint8), kernel) > 0
+        prior = prior & ~excluded
+        seen = seen & ~excluded
+    for domain in (visible, sampled):
+        if domain is not None:
+            prior = prior & domain
+            seen = seen & domain
+    if (
+        np.count_nonzero(prior) < _RESIDUAL_MIN_PX
+        or np.count_nonzero(seen) < _RESIDUAL_MIN_PX
+    ):
+        return 0, 0
+    ys, xs = np.nonzero(prior)
+    pad = _RESIDUAL_CROP_PAD
+    y0, y1 = max(0, ys.min() - pad), ys.max() + pad + 1
+    x0, x1 = max(0, xs.min() - pad), xs.max() + pad + 1
+    prior_c, seen_c = prior[y0:y1, x0:x1], seen[y0:y1, x0:x1]
+    # Correlacao em meia resolucao, restrita a +-R px: nao ha como
+    # escolher o pico de alias de uma pauta periodica fora da janela.
+    half = (max(8, prior_c.shape[1] // 2), max(8, prior_c.shape[0] // 2))
+
+    def blur(mask):
+        small = cv2.resize(mask.astype(np.float32), half, interpolation=cv2.INTER_AREA)
+        return cv2.GaussianBlur(small, (0, 0), 1.5)
+
+    reach = _RESIDUAL_MAX_PX // 2
+    padded = cv2.copyMakeBorder(
+        blur(seen_c), reach, reach, reach, reach, cv2.BORDER_CONSTANT, value=0
+    )
+    corr = cv2.matchTemplate(padded, blur(prior_c), cv2.TM_CCORR_NORMED)
+    _, peak, _, loc = cv2.minMaxLoc(corr)
+    if not peak > _RESIDUAL_MIN_PEAK:
+        return 0, 0
+
+    def ambiguous(profile, at):
+        """Outro MAXIMO LOCAL distante, quase tao bom: o eixo nao e
+        determinado. Um pico largo e suave nao conta (nao ha vale entre
+        o melhor ponto e os vizinhos); um alias periodico ou um patamar
+        plano (eixo inobservavel) contam."""
+        left = np.concatenate(([-np.inf], profile[:-1]))
+        right = np.concatenate((profile[1:], [-np.inf]))
+        local_max = (profile >= left) & (profile >= right)
+        far = np.abs(np.arange(profile.size) - at) > _RESIDUAL_RIVAL_GUARD
+        rivals = local_max & far
+        return bool(
+            rivals.any() and profile[rivals].max() >= _RESIDUAL_RIVAL_PEAK * peak
+        )
+
+    # Ambiguidade por eixo (pauta e outros padroes repetidos). Linhas
+    # retas nao determinam x: o eixo fica em 0 e y ainda e corrigido. Se
+    # o eixo ambiguo e y (pauta mais curta que a janela), nao desloca.
+    amb_x = ambiguous(corr.max(axis=0), loc[0])
+    amb_y = ambiguous(corr.max(axis=1), loc[1])
+    if amb_y:
+        return 0, 0
+    cx = 0 if amb_x else -(loc[0] - reach) * 2
+    cy = -(loc[1] - reach) * 2
+    prior_px = float(np.count_nonzero(prior_c))
+    base_recall = _exact_recall(prior_c, seen_c, 0, 0, prior_px)
+    best = None
+    for ddy in range(-2, 3):
+        for ddx in range(0, 1) if amb_x else range(-2, 3):
+            dx, dy = cx + ddx, cy + ddy
+            if (dx or dy) and max(abs(dx), abs(dy)) <= _RESIDUAL_MAX_PX:
+                recall = _exact_recall(prior_c, seen_c, dx, dy, prior_px)
+                key = (-recall, abs(dx) + abs(dy))  # empate: menor deslocamento
+                if best is None or key < best[0]:
+                    best = (key, dx, dy, recall)
+    if best is None:
+        return 0, 0
+    _, dx, dy, recall = best
+    if recall >= base_recall + _RESIDUAL_MIN_GAIN and recall >= _RESIDUAL_MIN_RECALL:
+        return int(dx), int(dy)
+    return 0, 0
+
+
 def _evaluate_page_identity(
     identity_reference,
     identity_baseline,
@@ -1221,6 +1341,7 @@ class _Pass:
     identity_corners_snap: object = None
     identity_hold_seen_snap: bool = False
     identity_precomputed: object = None
+    identity_residual: tuple = (0, 0)
     identity_decision: object = None
     identity_recall: object = None
     identity_containment: object = None
@@ -1451,6 +1572,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         self._identity_reference = None
         self._identity_reference_corners = None
         self._identity_gray_ref = None
+        self._identity_residual = (0, 0)
         self._identity_recovery_requested = False
         self._identity_defer_count = 0
         self._identity_switch_votes = 0
@@ -1553,6 +1675,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         """
         with self._pm_gate, self._condition:
             self._identity_recovery_requested = bool(preserve_identity)
+            self._identity_residual = (0, 0)
             self._identity_defer_count = 0
             self._identity_switch_votes = 0
             self._identity_hold_seen = False
@@ -2891,6 +3014,47 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             )
         return None
 
+    def _pass_identity_residual(self, p):
+        """Residuo de registro da folha devolvida (F-11).
+
+        Com a identidade pendente estima-o contra a referencia, numa
+        pre-registracao so para medir; fora dela reaplica o confirmado.
+        O deslocamento entra na ANCORA efetiva da passada (T @ A): tudo
+        que e registrado a partir dela — prob, visibilidade, pegada,
+        cobertura, cinza/BGR do PageModel, papel e os fallbacks de
+        pegada — chega na mesma grade, por construcao.
+        """
+        if p.anchor is None or p.registration_corners is None:
+            return
+        if p.identity_reference_snap is not None:
+            sampled = self._pass_sampled(
+                p.anchor, p.registration_corners, p.prob.shape, live_corners=p.corners
+            )
+            prob, visible = registration._register_ink_probability(
+                p.prob,
+                p.anchor,
+                p.registration_corners,
+                p.visible,
+                visible_cam=p.visible_cam,
+                pass_corners=p.corners,
+                sampled=sampled,
+            )
+            p.identity_residual = _estimate_identity_residual(
+                p.identity_reference_snap,
+                p.identity_baseline_snap,
+                prob,
+                visible,
+                sampled,
+                self._accumulator.threshold,
+            )
+        else:
+            p.identity_residual = self._identity_residual
+        dx, dy = p.identity_residual
+        if dx or dy:
+            p.anchor = registration._shift_anchor_corners(
+                p.anchor, dx, dy, p.prob.shape
+            )
+
     def _pass_register_motion_coverage(self, p):
         """Registro -> portao de movimento -> portao de cobertura:
         a evidencia sai na grade da ancora, fora do lock."""
@@ -2901,6 +3065,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         # mascara de visibilidade — entra no dominio valido la no
         # voto, e o registro a reusa no clipe de visibilidade em
         # vez de rasterizar a dela de novo.
+        self._pass_identity_residual(p)
         p.sampled = self._pass_sampled(
             p.anchor, p.registration_corners, p.prob.shape, live_corners=p.corners
         )
@@ -3412,6 +3577,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             else:
                 if p.identity_timed_out:
                     # Perda de lock, nao voto de pagina nova.
+                    self._identity_residual = (0, 0)
                     # A proxima passada estabelece outra ancora.
                     self._accumulator.reset()
                     self._pm_rezero_requested = False
@@ -3437,6 +3603,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     self._quiet_passes = 0
                     self._still_passes = 0
                 elif not p.keep_page:
+                    self._identity_residual = (0, 0)
                     self._accumulator.reset()
                     self._pm_rezero_requested = False
                     self._pm_rezero_seeding = False
@@ -3457,6 +3624,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     # que votaram — e sai no publish desta
                     # resolucao.
                     self._accumulator.restore_confirmed(identity_reference)
+                    self._identity_residual = p.identity_residual
                 # Keep the old anchor when identity matched: all future
                 # observations remain registered into the same canvas.
                 self._identity_hold_seen = False
@@ -3558,15 +3726,19 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         cima do estado INTOCADO, e a decisao de movimento medida
         contra a ancora velha morre com ela."""
         p.motion_decision = None
+        anchor = self._anchor_corners
+        dx, dy = p.identity_residual
+        if anchor is not None and (dx or dy):
+            anchor = registration._shift_anchor_corners(anchor, dx, dy, p.prob.shape)
         p.registered_prob, p.registered_visible, p.sampled = self._register_into(
-            self._anchor_corners,
+            anchor,
             registration_corners,
             p.prob,
             p.visible,
             p.visible_cam,
             pass_corners=p.corners,
         )
-        p.last_reg = _reg_triple(self._anchor_corners, registration_corners, p.corners)
+        p.last_reg = _reg_triple(anchor, registration_corners, p.corners)
         p.coverage_matches_last_reg = False
 
     def _pass_prepare_vote(self, p):

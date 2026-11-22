@@ -19,6 +19,7 @@ cinco falhas da fila de robustez de 2026-11-21:
 import threading
 import time
 
+import cv2
 import numpy as np
 import pytest
 
@@ -3092,3 +3093,213 @@ def test_identity_darker_admits_what_novel_admits():
     assert model.novel(traced)[42, 45]
     darker, _ = model.darker_than_reference(traced)
     assert darker[42, 45]
+
+
+# --- Identidade: mesma folha devolvida com deslocamento residual ----------
+# A folha devolvida chega com erro de cantos que o registro entre
+# geracoes nao absorve: a evidencia aparece deslocada na grade da ancora.
+# Sem estimar esse residuo, a comparacao tinta-vs-referencia tolera so a
+# dilatacao do comparador (+-3 px) e o desenho confirmado se perde (>~5 px)
+# ou a linha engrossa (acumulo na ancora antiga). _estimate_identity_residual
+# cobre translacao; rotacao e movimento fracionario nao.
+
+
+def _identity_strokes(shape=(240, 320)):
+    img = np.zeros(shape, np.uint8)
+    for k, y0 in enumerate((50, 95, 140, 185)):
+        xs = np.arange(30, 290)
+        ys = y0 + 6 * np.sin(xs / 23.0 + k)
+        pts = np.stack([xs, ys], 1).round().astype(np.int32)
+        cv2.polylines(img, [pts], False, 255, 3)
+    return img
+
+
+def _identity_verdict(dy):
+    ref = _identity_strokes()
+    # Os tracos ficam a >= 44 px da borda: o roll nao embrulha tinta.
+    seen = np.roll(ref, dy, axis=0)
+    candidate = (seen > 0).astype(np.float32) * 0.95
+    return worker_mod._evaluate_page_identity(
+        identity_reference=ref,
+        identity_baseline=None,
+        candidate=candidate,
+        identity_visible=None,
+        identity_sampled=None,
+        identity_guard=None,
+        hold_seen=False,
+        threshold=0.5,
+    )
+
+
+@pytest.mark.parametrize("dy", [0, 2, 3])
+def test_identity_same_sheet_within_tolerance_is_same_page(dy):
+    keep_page, recall, containment, *_ = _identity_verdict(dy)
+    assert keep_page
+    assert recall == pytest.approx(1.0)
+    assert containment == pytest.approx(1.0)
+
+
+def _shifted_evidence(dy):
+    ref = _identity_strokes()
+    return ref, (np.roll(ref, dy, axis=0) > 0).astype(np.float32) * 0.95
+
+
+@pytest.mark.parametrize("dy", [2, 6, 8, -6])
+def test_identity_residual_estimate_recovers_a_vertical_shift(dy):
+    ref, candidate = _shifted_evidence(dy)
+    dx_est, dy_est = worker_mod._estimate_identity_residual(
+        ref, None, candidate, None, None, 0.5
+    )
+    assert (dx_est, dy_est) == (0, -dy)
+    aligned = np.roll(candidate, (dy_est, dx_est), axis=(0, 1))
+    keep_page, recall, containment, *_ = worker_mod._evaluate_page_identity(
+        identity_reference=ref,
+        identity_baseline=None,
+        candidate=aligned,
+        identity_visible=None,
+        identity_sampled=None,
+        identity_guard=None,
+        hold_seen=False,
+        threshold=0.5,
+    )
+    assert keep_page
+    assert recall == pytest.approx(1.0)
+    assert containment == pytest.approx(1.0)
+
+
+def test_identity_residual_is_zero_when_the_evidence_is_aligned():
+    ref, candidate = _shifted_evidence(0)
+    assert worker_mod._estimate_identity_residual(
+        ref, None, candidate, None, None, 0.5
+    ) == (0, 0)
+
+
+def test_identity_residual_ignores_new_strokes_when_already_aligned():
+    ref = _identity_strokes()
+    extra = ref.copy()
+    extra[200:215, 40:280] = 255  # traco novo: nao e referencia
+    candidate = (extra > 0).astype(np.float32) * 0.95
+    assert worker_mod._estimate_identity_residual(
+        ref, None, candidate, None, None, 0.5
+    ) == (0, 0)
+
+
+def test_identity_residual_recovers_a_horizontal_shift_on_curved_strokes():
+    ref = _identity_strokes()  # linhas onduladas: x e observavel
+    candidate = (np.roll(ref, 5, axis=1) > 0).astype(np.float32) * 0.95
+    assert worker_mod._estimate_identity_residual(
+        ref, None, candidate, None, None, 0.5
+    ) == (-5, 0)
+
+
+def test_identity_residual_abstains_when_the_shift_is_not_observable():
+    # Barras horizontais retas: um deslocamento em x nao muda nada.
+    ref = np.zeros((240, 320), np.uint8)
+    for y in (50, 95, 140, 185):
+        ref[y : y + 3, 30:290] = 255
+    candidate = (np.roll(ref, 5, axis=1) > 0).astype(np.float32) * 0.95
+    assert worker_mod._estimate_identity_residual(
+        ref, None, candidate, None, None, 0.5
+    ) == (0, 0)
+
+
+def _ruled(period, marks=False):
+    img = np.zeros((240, 320), np.uint8)
+    for y in range(20, 220, period):
+        img[y : y + 3, 20:300] = 255
+    if marks:  # marcas nao periodicas quebram a simetria
+        img[100:130, 60:70] = 255
+        img[160:175, 200:260] = 255
+    return img
+
+
+def _residual_of(ref, dy):
+    candidate = (np.roll(ref, dy, axis=0) > 0).astype(np.float32) * 0.95
+    return worker_mod._estimate_identity_residual(ref, None, candidate, None, None, 0.5)
+
+
+@pytest.mark.parametrize("dy", [5, -6])
+def test_identity_residual_resolves_ruling_with_a_realistic_period(dy):
+    # Pauta de ~40 px (A4 pautada): o alias fica fora da janela de +-12 px.
+    assert _residual_of(_ruled(40), dy) == (0, -dy)
+
+
+@pytest.mark.parametrize("dy", [5, -6])
+def test_identity_residual_abstains_on_aliasing_ruling(dy):
+    # Pauta uniforme mais curta que a janela: +5 e -11 explicam igualmente.
+    assert _residual_of(_ruled(16), dy) == (0, 0)
+
+
+@pytest.mark.parametrize("dy", [5, -6])
+def test_identity_residual_resolves_aliasing_ruling_with_distinguishing_marks(dy):
+    assert _residual_of(_ruled(16, marks=True), dy) == (0, -dy)
+
+
+@pytest.mark.parametrize("empty", ["reference", "evidence"])
+def test_identity_residual_fails_safe_without_ink(empty):
+    ref, candidate = _shifted_evidence(6)
+    if empty == "reference":
+        ref = np.zeros_like(ref)
+    else:
+        candidate = np.zeros_like(candidate)
+    assert worker_mod._estimate_identity_residual(
+        ref, None, candidate, None, None, 0.5
+    ) == (0, 0)
+
+
+_RETURN_ROWS = (14, 34, 54, 74)
+_RETURN_THICK = 3
+_RETURN_COLS = slice(12, 116)
+_RETURN_INK_PX = (
+    len(_RETURN_ROWS) * _RETURN_THICK * (_RETURN_COLS.stop - _RETURN_COLS.start)
+)
+
+
+def _return_with_residual(dy):
+    """Queda e retorno da mesma folha com residuo de registro de dy px.
+
+    Devolve (decisao, px confirmado antes da queda, px confirmado depois).
+    O residuo entra como conteudo da pagina retificada deslocado na
+    grade: o erro de cantos que o registro entre geracoes nao absorve.
+    """
+
+    def lines(shift=0):
+        img = np.full((H, W), PAPER, dtype=np.float32)
+        for y in _RETURN_ROWS:
+            img[y + shift : y + shift + _RETURN_THICK, _RETURN_COLS] = INK
+        return img
+
+    worker = _worker(InkConfig(page_model=True))
+    try:
+        gen1 = worker.new_generation()
+        for _ in range(3):
+            _drive(worker, gen1, np.full((H, W), PAPER, dtype=np.float32))
+        for _ in range(4):
+            _drive(worker, gen1, lines())
+        before = int(np.count_nonzero(_confirmed(worker, gen1)))
+        gen2 = worker.new_generation(preserve_identity=True)
+        # 3 passadas bastam para o veredito (consenso de troca de pagina);
+        # a 4a deixa margem. Passadas alem disso esperam ~1 s cada.
+        for _ in range(4):
+            _drive(worker, gen2, lines(dy))
+        events = worker.telemetry_snapshot()["page_identity_events"]
+        after = int(np.count_nonzero(_confirmed(worker, gen2)))
+        return events[-1]["decision"], before, after
+    finally:
+        worker.stop()
+
+
+def test_return_without_residual_restores_the_canvas_unchanged(monkeypatch):
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    decision, before, after = _return_with_residual(0)
+    assert decision == "same_page"
+    assert before == _RETURN_INK_PX
+    assert after == before
+
+
+@pytest.mark.parametrize("dy", [2, 6])
+def test_return_with_residual_keeps_the_canvas_without_ghosting(dy, monkeypatch):
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    decision, before, after = _return_with_residual(dy)
+    assert decision == "same_page"
+    assert after == pytest.approx(before, rel=0.1)

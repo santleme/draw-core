@@ -552,3 +552,19 @@ def test_reused_sampled_footprint_clips_like_the_internal_one():
         sampled=np.zeros(shape, bool),
     )
     assert not blanked.any()
+
+
+@pytest.mark.parametrize("dx,dy", [(0, 0), (3, -5), (-7, 2)])
+def test_shift_anchor_corners_is_a_translation_of_the_registration(dx, dy):
+    """T @ M == M' para a ancora deslocada: toda evidencia registrada por
+    ela (prob, cobertura, cinza, papel, pegada) acompanha o residuo."""
+    anchor = np.float32([[20, 20], [340, 25], [345, 265], [15, 260]])
+    corners = np.float32([[22, 18], [338, 30], [340, 262], [18, 257]])
+    shape = (240, 320)
+    moved = registration_mod._shift_anchor_corners(anchor, dx, dy, shape)
+    translation = np.array([[1, 0, dx], [0, 1, dy], [0, 0, 1]], dtype=np.float64)
+    expected = translation @ registration_mod._registration_matrix(
+        anchor, corners, shape
+    )
+    got = registration_mod._registration_matrix(moved, corners, shape)
+    assert np.allclose(got, expected, atol=1e-4)

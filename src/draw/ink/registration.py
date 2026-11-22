@@ -81,6 +81,24 @@ def _registration_matrix(anchor_corners, corners, shape):
     return anchor @ np.linalg.inv(current)
 
 
+def _shift_anchor_corners(anchor_corners, dx, dy, shape):
+    """Quad de ancora equivalente a deslocar a grade em (dx, dy) px.
+
+    Devolve cantos Q' tais que _registration_matrix(Q', c, shape) ==
+    T(dx, dy) @ _registration_matrix(anchor_corners, c, shape): toda
+    evidencia registrada por esta ancora (prob, visibilidade, pegada,
+    cobertura, cinza/BGR, papel) chega na grade ja deslocada, sem que
+    cada consumidor precise saber do residuo.
+    """
+    height, width = shape
+    page = _corners_page_matrix(anchor_corners, width, height)
+    rect = np.array(
+        [(0, 0), (width, 0), (width, height), (0, height)], dtype=np.float32
+    ) - np.float32([dx, dy])
+    moved = cv2.perspectiveTransform(rect[None], np.linalg.inv(page))[0]
+    return moved.astype(np.float32)
+
+
 def _registration_is_identity(matrix):
     """True se a matriz nao move pixel nenhum (tol sub-pixel)."""
     return bool(
