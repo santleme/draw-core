@@ -9,6 +9,7 @@ de caneta real, mais fino que a janela de 32 px da guarda, cada janela
 continua vendo papel no pico e o traco e "novel" contra a referencia.
 """
 
+import dataclasses
 import threading
 import time
 
@@ -761,3 +762,77 @@ def test_mid_pass_generation_swap_writes_to_the_orphan_guard(monkeypatch):
         assert worker._paper_exposure._reference is None
     finally:
         worker.stop()
+
+
+def test_startup_small_shadow_does_not_seed_and_hide_later_stroke(monkeypatch):
+    """Regressao PR #189: sombra parada 48x48 (2x2 tiles) na abertura
+    nao dispara o veto de bloco (3x3), mas a guarda fotometrica do
+    PageModel barra a semeadura do interior escuro para nao esconder
+    o traco desenhado logo apos revelar o papel."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(worker_mod, "_IDLE_PROBE_SECONDS", 0.02)
+    ink = _Scripted()
+    config = dataclasses.replace(InkConfig.production(), pass_interval_s=0.02)
+    worker = worker_mod.PageCleanWorker(ink, config=config).start()
+    generation = worker.new_generation()
+    try:
+        shadow = (slice(48, 96), slice(48, 96))  # 2x2 tiles (24 px/tile)
+        shadowed = _paper()
+        shadowed[shadow] = (70, 70, 70)
+        for _ in range(3):
+            _pass(worker, generation, shadowed)
+        assert not worker._page_model.seeded[64:80, 64:80].any()
+
+        # Sombra sai: papel limpo semeia no tom real, e traco a luma 90 confirma.
+        clean = _paper()
+        for _ in range(3):
+            _pass(worker, generation, clean)
+        assert worker._page_model.seeded[shadow].all()
+
+        stroke = (slice(64, 72), slice(60, 84))
+        scene = clean.copy()
+        scene[stroke] = (90, 90, 90)
+        prob = _prob()
+        prob[stroke] = 0.95
+        ink.content = prob
+        _pass_until(
+            worker,
+            generation,
+            scene,
+            lambda snap: snap.confirmed[stroke].all(),
+            6,
+        )
+        assert worker.poll(generation, 0).confirmed[stroke].all()
+    finally:
+        worker.stop()
+
+
+def test_sketch_worker_confirms_faint_graphite_between_20_and_30_contrast(monkeypatch):
+    """Regressao PR #189: na trabalhadora completa, sketch()
+    (page_model_novel_ratio=0.20) confirma grafite com ~25% de
+    contraste de Weber enquanto razao 0.30 o suprime."""
+    stroke = (slice(120, 128), slice(60, 140))
+
+    def _run_contrast(novel_ratio):
+        cfg = dataclasses.replace(
+            InkConfig.sketch(),
+            pass_interval_s=0.02,
+            page_model_novel_ratio=novel_ratio,
+        )
+        worker, ink, generation = _mature(monkeypatch, cfg)
+        try:
+            worker.set_hand_presence(True)
+            scene = _stroked()
+            # ~25% abaixo do papel (~205 -> ~154): entre 20% e 30% de contraste.
+            scene[stroke] = (154, 154, 154)
+            prob = _prob()
+            prob[stroke] = 0.95
+            ink.content = prob
+            for _ in range(4):
+                _pass(worker, generation, scene)
+            return worker.poll(generation, 0).confirmed[stroke].copy()
+        finally:
+            worker.stop()
+
+    assert _run_contrast(0.20).all()
+    assert not _run_contrast(0.30).any()

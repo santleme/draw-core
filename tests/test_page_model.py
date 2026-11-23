@@ -3046,3 +3046,37 @@ def test_identity_darker_admits_what_novel_admits():
     assert model.novel(traced)[42, 45]
     darker, _ = model.darker_than_reference(traced)
     assert darker[42, 45]
+
+
+def test_dimming_and_chroma_shift_under_partial_mask_does_not_freeze_on_reveal():
+    """Regressao PR #189: parte visivel adapta para lampada mais fraca e
+    mais quente enquanto a mao cobre a maioria da pagina; ao revelar,
+    _estimate_gain precisa aceitar o ganho das testemunhas em vez de
+    devolver 1.0 e congelar a folha inteira abaixo do cutoff."""
+    model = pm_mod.PageModel((H, W), confirm_obs=1)
+    bright_neutral = np.full((H, W, 3), 230, dtype=np.uint8)
+    model.observe(
+        np.full((H, W), 230, dtype=np.uint8),
+        bgr=bright_neutral,
+    )
+
+    # Troca para lampada mais fraca (luma ~161) e quente (B/R ~0.48) com 60% coberto.
+    dim_warm = np.zeros((H, W, 3), dtype=np.uint8)
+    dim_warm[..., 0] = 108  # B
+    dim_warm[..., 1] = 152  # G
+    dim_warm[..., 2] = 225  # R -> B/R = 0.48, gray ~161
+    dim_gray = np.full((H, W), 161, dtype=np.uint8)
+    vis_40 = np.zeros((H, W), dtype=bool)
+    vis_40[:, : int(W * 0.4)] = True
+    for _ in range(12):
+        exp = model.exposed(dim_gray, bgr=dim_warm, visible=vis_40)
+        assert exp[:, : int(W * 0.4)].all()
+        model.observe(dim_gray, visible=exp & vis_40, bgr=dim_warm)
+
+    # Mao sai: os 60% revelados nao podem congelar o estimador de ganho.
+    exp_all = model.exposed(dim_gray, bgr=dim_warm)
+    assert exp_all.all()
+    model.observe(dim_gray, visible=exp_all, bgr=dim_warm)
+    stroke = dim_gray.copy()
+    stroke[40:44, int(W * 0.6) : int(W * 0.8)] = 95
+    assert model.novel(stroke)[42, int(W * 0.7)]
