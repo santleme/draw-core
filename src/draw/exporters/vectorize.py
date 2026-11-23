@@ -817,19 +817,25 @@ def classify_primitive(polyline):
                 opp1 = abs(lengths_mm[1] - lengths_mm[3]) / max(
                     lengths_mm[1], lengths_mm[3]
                 )
-                # Garante também que o contorno real segue os 4 lados do retângulo.
+                # Garante também que o contorno real segue os 4 lados do
+                # retângulo — o desvio é medido no mesmo espaço escalado:
+                # sob anisotropia um arcoamento aceitável em px pode
+                # exceder a tolerância em mm e achatar a borda no export.
+                scale = _mm_scale_vec()
+                corners_mm = corners * scale
+                dense_mm = dense * scale
                 rect_dev = []
-                for p in dense:
+                for p in dense_mm:
                     d_min = min(
                         abs(
                             float(
-                                (corners[(i + 1) % 4, 0] - corners[i, 0])
-                                * (corners[i, 1] - p[1])
-                                - (corners[(i + 1) % 4, 1] - corners[i, 1])
-                                * (corners[i, 0] - p[0])
+                                (corners_mm[(i + 1) % 4, 0] - corners_mm[i, 0])
+                                * (corners_mm[i, 1] - p[1])
+                                - (corners_mm[(i + 1) % 4, 1] - corners_mm[i, 1])
+                                * (corners_mm[i, 0] - p[0])
                             )
                         )
-                        / lengths[i]
+                        / lengths_mm[i]
                         for i in range(4)
                     )
                     rect_dev.append(d_min)
@@ -837,7 +843,7 @@ def classify_primitive(polyline):
                     angles_ok
                     and opp0 <= 0.12
                     and opp1 <= 0.12
-                    and max(rect_dev) <= max(4.0, 0.05 * max(lengths))
+                    and max(rect_dev) <= max(4.0 * MM_PER_PX, 0.05 * max(lengths_mm))
                 ):
                     w_mm = 0.5 * (lengths_mm[0] + lengths_mm[2])
                     h_mm = 0.5 * (lengths_mm[1] + lengths_mm[3])
