@@ -287,3 +287,21 @@ def test_rotated_landing_with_an_active_residual(fast, k, residual):
     inter = np.count_nonzero(confirmed & truth)
     union = np.count_nonzero(confirmed | truth)
     assert inter / union >= 0.85
+
+
+def test_total_after_clip_discounts_only_what_the_translation_cut():
+    """Review do #180: o escore da hipotese 'pagina' dividia por um raw_total que
+    inclui a tinta cortada pela translacao do residuo (que nunca poderia casar),
+    enquanto o da camera so conta o que sobra. O denominador desconta so a
+    massa cortada; sem corte e exatamente raw_total."""
+    from draw.ink.anchor import _total_after_clip
+
+    before = np.zeros((10, 10), dtype=np.float32)
+    before[:, 8:] = 1.0  # 20 de massa na borda direita
+    kept = registration_mod._translate_grid(before, 0, 0)
+    assert _total_after_clip(25.0, before, kept) == 25.0  # sem corte
+    moved = registration_mod._translate_grid(before, 1, 0)  # empurra 1 col para fora
+    assert float(moved.sum()) == 10.0
+    assert _total_after_clip(25.0, before, moved) == 15.0  # 25 - 10 cortados
+    # Nunca devolve <= 0: cai para raw_total.
+    assert _total_after_clip(5.0, before, np.zeros_like(before)) == 5.0

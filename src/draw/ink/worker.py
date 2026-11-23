@@ -514,27 +514,42 @@ _RESIDUAL_CROP_PAD = 16
 _RESIDUAL_MIN_SUPPORT = 0.3  # fracao minima da referencia observavel por candidato
 _RESIDUAL_RIVAL_GUARD = 3  # px (meia resolucao) em volta do melhor pico
 _RESIDUAL_RIVAL_PEAK = 0.9  # pico rival relevante: >= 90% do melhor
+# Escolha entre candidatos: escore = casados - peso * (observaveis nao casados);
+# a menos de `_RESIDUAL_TIE_FRACTION` da referencia do melhor vence o menor
+# deslocamento.
+_RESIDUAL_MISS_WEIGHT = 0.1
+_RESIDUAL_TIE_FRACTION = 0.005
 
 
 def _exact_recall(prior, seen, dx, dy, prior_px, coverage=None):
     """Fracao da referencia coberta pela evidencia deslocada, sem tolerancia.
 
-    Com `coverage`, o denominador e so a parte da referencia cujo destino
-    esta sobre a folha (por candidato); sem suporte suficiente o candidato
-    vale 0: nao se estima por cima do que a cobertura esconde."""
+    Devolve (recall, hit, observavel). Com `coverage`, o denominador do recall
+    e so a parte da referencia cujo destino esta sobre a folha (por
+    candidato); sem suporte suficiente o candidato vale 0: nao se estima por
+    cima do que a cobertura esconde. Sem `coverage` o observavel e a
+    referencia inteira.
+
+    O recall serve para ACEITAR um deslocamento. Para ESCOLHER entre
+    candidatos ele nao basta: como o denominador muda por candidato, um
+    deslocamento lateral ganhava so por esconder pixels nao casados atras da
+    borda da cobertura (236/236 contra 236/240 sem casar nada a mais — review
+    do #180). A escolha usa um escore de pixels (ver o chamador)."""
     h, w = prior.shape
     y0, y1 = max(0, dy), min(h, h + dy)
     x0, x1 = max(0, dx), min(w, w + dx)
     if y1 <= y0 or x1 <= x0:
-        return 0.0
+        return 0.0, 0, 0
     ref = prior[y0:y1, x0:x1]
-    hit = np.count_nonzero(ref & seen[y0 - dy : y1 - dy, x0 - dx : x1 - dx])
+    hit = int(np.count_nonzero(ref & seen[y0 - dy : y1 - dy, x0 - dx : x1 - dx]))
     if coverage is None:
-        return hit / prior_px
-    observable = np.count_nonzero(ref & coverage[y0 - dy : y1 - dy, x0 - dx : x1 - dx])
+        return hit / prior_px, hit, int(prior_px)
+    observable = int(
+        np.count_nonzero(ref & coverage[y0 - dy : y1 - dy, x0 - dx : x1 - dx])
+    )
     if observable < max(_RESIDUAL_MIN_PX, _RESIDUAL_MIN_SUPPORT * prior_px):
-        return 0.0
-    return hit / observable
+        return 0.0, hit, observable
+    return hit / observable, hit, observable
 
 
 def _estimate_identity_residual(
@@ -622,8 +637,9 @@ def _estimate_identity_residual(
     cx = 0 if amb_x else -(loc[0] - reach) * 2
     cy = -(loc[1] - reach) * 2
     prior_px = float(np.count_nonzero(prior_c))
-    base_recall = _exact_recall(prior_c, seen_c, 0, 0, prior_px, cover_c)
-    best = None
+    base_recall, _base_hit, _base_obs = _exact_recall(
+        prior_c, seen_c, 0, 0, prior_px, cover_c
+    )
     near_x = range(0, 1) if amb_x else range(-2, 3)
     # Candidatos em volta do pico E com um eixo em zero: a correlacao aponta
     # um pico mesmo quando so um eixo e determinado pela evidencia (tinta
@@ -633,15 +649,27 @@ def _estimate_identity_residual(
     candidates = {(cx + ddx, cy + ddy) for ddy in range(-2, 3) for ddx in near_x}
     candidates |= {(0, cy + ddy) for ddy in range(-2, 3)}
     candidates |= {(cx + ddx, 0) for ddx in near_x}
+    scored = []
     for dx, dy in sorted(candidates):
         if (dx or dy) and max(abs(dx), abs(dy)) <= _RESIDUAL_MAX_PX:
-            recall = _exact_recall(prior_c, seen_c, dx, dy, prior_px, cover_c)
-            key = (-recall, abs(dx) + abs(dy))  # empate: menor deslocamento
-            if best is None or key < best[0]:
-                best = (key, dx, dy, recall)
-    if best is None:
+            recall, hit, observable = _exact_recall(
+                prior_c, seen_c, dx, dy, prior_px, cover_c
+            )
+            # Pixels casados, menos uma fracao dos observaveis NAO casados: o
+            # denominador por candidato informa (na cena da mesa escura o
+            # certo deixa ~2.900 px observaveis a menos sem casar), mas um
+            # deslocamento lateral que so esconde 4 px nao casados atras da
+            # borda da cobertura nao pode vencer por isso.
+            score = hit - _RESIDUAL_MISS_WEIGHT * (observable - hit)
+            scored.append((score, dx, dy, recall))
+    if not scored:
         return 0, 0
-    _, dx, dy, recall = best
+    top = max(item[0] for item in scored)
+    tol = max(2.0, _RESIDUAL_TIE_FRACTION * prior_px)
+    near = [item for item in scored if item[0] >= top - tol]
+    # Equivalentes: vence o de MENOR deslocamento. Um eixo extra de movimento
+    # so e aceito se explicar mais tinta, nao se esconder a que sobra.
+    _score, dx, dy, recall = min(near, key=lambda i: (abs(i[1]) + abs(i[2]), -i[0]))
     if recall >= base_recall + _RESIDUAL_MIN_GAIN and recall >= _RESIDUAL_MIN_RECALL:
         return int(dx), int(dy)
     return 0, 0

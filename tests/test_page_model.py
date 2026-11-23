@@ -3314,6 +3314,54 @@ def test_identity_residual_when_the_shift_cuts_ink_at_the_grid_edge(dy, strokes)
         assert got == (0, -dy), (cov is not None, got)
 
 
+def _bars_with_coverage_edge(cover_start, missing_cols, down=6):
+    """Tres barras salvas (cols 40-279); no retorno elas descem `down` px, a
+    cobertura comeca em `cover_start` e as ultimas `missing_cols` colunas de
+    cada barra nao passam do limiar (a evidencia termina antes da referencia)."""
+    ref = np.zeros((240, 320), np.uint8)
+    evidence = np.zeros((240, 320), np.float32)
+    for y0, y1 in ((50, 56), (90, 96), (130, 136)):
+        ref[y0:y1, 40:280] = 255
+        evidence[y0 + down : y1 + down, 40 : 280 - missing_cols] = 0.95
+    coverage = np.zeros((240, 320), bool)
+    coverage[:, cover_start:] = True
+    return ref, evidence, coverage
+
+
+@pytest.mark.parametrize(
+    ("cover_start", "missing_cols"),
+    [(40, 4), (44, 4), (36, 4), (40, 10), (40, 0)],
+)
+def test_identity_residual_does_not_shift_sideways_at_an_asymmetric_coverage_edge(
+    cover_start, missing_cols
+):
+    """Review do #180: o recall por candidato tem denominador proprio, entao um
+    deslocamento lateral ganhava so por esconder pixels nao casados atras da
+    borda da cobertura. Com a borda em x = 40 e 4 colunas faltando, (4, -6)
+    marcava 236/236 contra 236/240 do (0, -6) certo SEM casar tinta a mais, e
+    o residuo falso era salvo e reaplicado aos tracos seguintes. A escolha
+    agora pesa pixels casados e o menor deslocamento desempata."""
+    ref, evidence, coverage = _bars_with_coverage_edge(cover_start, missing_cols)
+    got = worker_mod._estimate_identity_residual(
+        ref, None, evidence, None, None, 0.5, coverage
+    )
+    assert got == (0, -6)
+
+
+def test_identity_residual_abstains_when_the_shift_clips_nearly_all_the_ink():
+    """Corte de borda sem sobra: so 3 linhas de 50 colunas (150 px < o minimo)
+    permanecem na grade depois que a translacao empurra o resto para fora; o
+    estimador se abstem em vez de escolher um deslocamento por quase nada."""
+    ref = np.zeros((240, 320), np.uint8)
+    evidence = np.zeros((240, 320), np.float32)
+    ref[4:10, 40:90] = 255
+    evidence[0:2, 40:90] = 0.95  # o que a evidencia tem apos subir 8 px
+    coverage = np.ones((240, 320), bool)
+    assert worker_mod._estimate_identity_residual(
+        ref, None, evidence, None, None, 0.5, coverage
+    ) == (0, 0)
+
+
 def test_identity_residual_abstains_without_observable_support():
     ref, evidence, _ = _ruled_with_table(20)
     nothing_covered = np.zeros(ref.shape, dtype=bool)

@@ -82,6 +82,16 @@ def _matrix_grid_displacement(matrix, shape):
     return float(np.mean(np.linalg.norm(moved - grid, axis=-1)))
 
 
+def _total_after_clip(raw_total, before, after):
+    """`raw_total` menos a massa que a translacao do residuo cortou da grade.
+
+    Sem corte (sem residuo, ou nada na borda) `before == after` e o retorno
+    e exatamente `raw_total`. Nunca devolve <= 0: cai para `raw_total`."""
+    clipped = float(np.sum(before)) - float(np.sum(after))
+    total = raw_total - max(clipped, 0.0)
+    return total if total > 0.0 else raw_total
+
+
 class _AnchorSteps:
     """Passos de ancora do worker: migracao, arbitragem, follow."""
 
@@ -197,8 +207,14 @@ class _AnchorSteps:
             # O residuo de registro (grade da ancora) vem DEPOIS da permutacao:
             # T . Pi_k(P). A camera ja o recebe pela ancora efetiva (T . M . P).
             dx, dy = grid_shift
-            page_prob = registration._translate_grid(page_prob, dx, dy)
-            score_page = float(np.sum(page_prob * snapshot) / raw_total)
+            translated = registration._translate_grid(page_prob, dx, dy)
+            # A translacao corta a tinta que sai da grade; ela continua no
+            # raw_total mas nunca poderia casar, e a camera so conta o que
+            # sobra depois do registro: o denominador desconta so a massa
+            # cortada (sem residuo, nada muda).
+            page_total = _total_after_clip(raw_total, page_prob, translated)
+            page_prob = translated
+            score_page = float(np.sum(page_prob * snapshot) / page_total)
             score_camera = float(np.sum(registered_prob * snapshot) / registered_total)
             # Colocacoes ciclicas (frentes 23/24): a hipotese "a
             # folha assentou rodada de k x 90 graus" pontuada como a
@@ -212,18 +228,17 @@ class _AnchorSteps:
             if self._anchor_roll != 0:
                 cyclic = (0.0, 0.0, 0.0)
             else:
-                cyclic = tuple(
-                    float(
-                        np.sum(
-                            registration._translate_grid(
-                                registration._permute_prob(raw_prob, -k), dx, dy
-                            )
-                            * snapshot
+                cyclic = []
+                for k in (1, 2, 3):
+                    permuted = registration._permute_prob(raw_prob, -k)
+                    moved = registration._translate_grid(permuted, dx, dy)
+                    cyclic.append(
+                        float(
+                            np.sum(moved * snapshot)
+                            / _total_after_clip(raw_total, permuted, moved)
                         )
-                        / raw_total
                     )
-                    for k in (1, 2, 3)
-                )
+                cyclic = tuple(cyclic)
         pass_mass = int(np.count_nonzero(raw_prob > 0.5))
         self._arb_scores.append(
             (score_page, score_camera, cyclic[0], cyclic[1], cyclic[2], pass_mass)
