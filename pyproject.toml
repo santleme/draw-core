@@ -8,9 +8,12 @@ version = "0.1.0"
 description = "Draw: webcam + paper -> real-time digital ink. Runtime engine."
 requires-python = ">=3.11"
 dependencies = [
+    # np.bitwise_count (worker.py) existe desde o NumPy 2.0; os pisos de
+    # OpenCV e ONNX Runtime sao os menores que IMPORTAM com NumPy 2 (as
+    # rodas anteriores foram compiladas contra a ABI 1.x e falham no import).
     "numpy>=2.0",
-    "opencv-contrib-python-headless>=4.8,<5.1",
-    "onnxruntime>=1.17",
+    "opencv-contrib-python-headless>=4.10.0.84,<5.1",
+    "onnxruntime>=1.19",
     # Fio DRAL + handshake compartilhado, extraido para consumidores que
     # nao precisam do runtime de inferencia (packages/draw-dral).
     # Versao exata: o membro e versionado junto com o draw-core (mesmo
@@ -22,7 +25,7 @@ dependencies = [
 [project.optional-dependencies]
 hand = ["mediapipe>=0.10"]
 # Janela na tela (cv2.imshow): a roda com GUI substitui a headless.
-gui = ["opencv-contrib-python>=4.8,<5.1"]
+gui = ["opencv-contrib-python>=4.10.0.84,<5.1"]
 dev = [
     "pytest>=8",
     "pytest-testmon>=2.3.1",
