@@ -37,7 +37,7 @@ def test_untrusted_edge_does_not_carry_the_previous_sheet_line(monkeypatch):
     monkeypatch.setattr(
         _geometry,
         "_fit_quad_impl",
-        lambda mask, frame, fallback, sx, sy: (None, lines_a, [True] * 4),
+        lambda mask, frame, fallback, sx, sy, **kw: (None, lines_a, [True] * 4),
     )
     detector._fit(_mask_with_rect(5, 35))
     assert detector._edge_lines == lines_a
@@ -47,7 +47,7 @@ def test_untrusted_edge_does_not_carry_the_previous_sheet_line(monkeypatch):
     monkeypatch.setattr(
         _geometry,
         "_fit_quad_impl",
-        lambda mask, frame, fallback, sx, sy: (
+        lambda mask, frame, fallback, sx, sy, **kw: (
             None,
             lines_b,
             [True, True, True, False],
