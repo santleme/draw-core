@@ -119,6 +119,9 @@ class _Scene:
         self.hand = np.zeros((H, W), dtype=bool)
         self.table = np.zeros((H, W), dtype=bool)
         self.send_coverage = True
+        # Luz da cena: None (neutra) ou (ganho, B/R). A lampada que esquenta e
+        # enfraquece muda a cor E a luminancia do que a camera ve.
+        self.light = None
 
     def draw(self, rect, gray=INK):
         y0, y1, x0, x1 = rect
@@ -171,7 +174,13 @@ class _Scene:
             coverage = (
                 self.cam_mask(~self.table, fill=False) if self.send_coverage else None
             )
-        return WarpedPage(_bgr(img), generation, self.corners, visible, coverage)
+        if self.light is None:
+            bgr = _bgr(img)
+        else:
+            gain, blue_over_red = self.light
+            lit = np.asarray(img, dtype=np.float32) * np.float32(gain)
+            bgr = np.stack([lit * blue_over_red, lit, lit], axis=-1).astype(np.uint8)
+        return WarpedPage(bgr, generation, self.corners, visible, coverage)
 
 
 # ------------------------------------------------------------------
@@ -669,21 +678,16 @@ def test_startup_occluder_never_seeds_nor_inks(ink, regime):
 
 
 @pytest.mark.parametrize("thick", [20, 34, 50])
-def test_thick_solid_fill_is_confirmed_by_votes_but_not_by_the_page_model(
-    regime, thick
-):
-    """LIMITE CONHECIDO do flip (nao e a politica desejada, e o estado medido).
+def test_thick_solid_fill_is_confirmed_in_every_regime(regime, thick):
+    """Preenchimento solido escuro novo e confirmado, qualquer espessura.
 
-    Um bloco solido escuro novo e confirmado pelo caminho de votos (a guarda
-    fotometrica adota o preenchimento depois de varias passadas). Com o
-    PageModel ligado, `pm.exposed` mede o MAXIMO por janela de 32 px: um
-    bloco mais grosso que a janela nao deixa papel na janela e le como
-    sombra, e nada o adota. Medido (grade 64x112 destes contratos): 20 px
-    confirma nos tres regimes; 34 e 50 px confirmam so em
-    `production_votes` (1,00 contra 0,00 nos regimes com PageModel).
-
-    Se o PageModel passar a adotar preenchimento (sem abrir a protecao de
-    oclusor), este teste deve passar a exigir a confirmacao nos tres."""
+    `pm.exposed` mede o MAXIMO por janela de 32 px: um bloco mais grosso que
+    a janela nao deixa papel nela e le como sombra, entao com o PageModel o
+    preenchimento NAO era confirmado (34 e 50 px: 0,00 contra 1,00 nos votos).
+    A guarda fotometrica ja adota o preenchimento que o modelo le como tinta
+    por varias passadas; a votacao agora aceita os pixels adotados. A
+    referencia do PageModel nao os aprende como pagina limpa. O controle
+    `test_thick_dark_non_ink_occluder_is_never_adopted` cobre o outro lado."""
     clock, worker = _worker(REGIMES[regime])
     try:
         generation = worker.new_generation()
@@ -693,14 +697,78 @@ def test_thick_solid_fill_is_confirmed_by_votes_but_not_by_the_page_model(
         _write_stroke(worker, clock, generation, scene, rect)
         truth = _Scene()
         truth.draw(rect)
-        confirmed = _frac(_confirmed(worker, generation) > 0, _stroke_mask(truth))
+        want = _stroke_mask(truth)
+        got = _confirmed(worker, generation) > 0
     finally:
         try:
             worker.stop()
         except RuntimeError:
             pass
-    page_model_on = REGIMES[regime].page_model
-    if thick <= 20 or not page_model_on:
-        assert confirmed >= 0.95
-    else:
-        assert confirmed <= 0.05
+    assert _frac(got, want) >= 0.95
+    assert _beyond(got, want, 2) == 0
+
+
+def test_thick_dark_non_ink_occluder_is_never_adopted(ink):
+    """Controle da adocao: bloco escuro grosso (>= 34 px) que o modelo NAO le
+    como tinta (objeto/manga, mascara de mao errando) nao e adotado como
+    preenchimento: nada vira tinta, em nenhum regime."""
+    worker, clock = ink
+    generation = worker.new_generation()
+    scene = _Scene()
+    _passes(worker, clock, generation, scene, 6, dt=_DT_IDLE, must=True)
+    occluded = scene.page.copy()
+    occluded[100:160, 60:200] = OCCLUDER_GRAY
+    for _ in range(16):
+        worker.set_hand_presence(True, moved=True)
+        _feed(worker, clock, scene.frame(generation, img=occluded))
+    worker.set_hand_presence(False)
+    _passes(worker, clock, generation, scene, 4, dt=_DT_IDLE)
+    got = _confirmed(worker, generation) > 0
+    assert np.count_nonzero(got) == 0
+
+
+def test_new_stroke_confirms_after_a_partial_cover_during_a_light_change(ink):
+    """Sequencia do achado de iluminacao parcial, pela trabalhadora inteira.
+
+    A lampada esquenta e enfraquece a luz (ganho 0,744, B/R 0,5) enquanto a
+    maior parte da folha esta coberta pela mao; so a parte visivel adapta a
+    referencia. Na revelacao a regiao coberta ficava congelada para sempre
+    com o PageModel (ganho 1,0): o traco novo escrito ali nunca confirmava.
+    Exige: traco antigo preservado, traco novo na regiao revelada confirmado,
+    nada fora dos tracos.
+
+    LIMITE DESTE TESTE: ele NAO reproduz o defeito do `_estimate_gain`. Medido
+    com o `page_model.py` da main (sem a correcao) e de 10 a 120 passadas
+    cobertas, a trabalhadora confirma o traco novo do mesmo jeito: as demais
+    protecoes do worker mascaram o defeito nesta harness. A prova da correcao e
+    `test_page_model_partial_cover_during_dim_and_warm_shift_keeps_the_gain`
+    (nivel do modelo, falha sem a correcao). Este contrato guarda a sequencia
+    inteira contra regressao, nao demonstra o defeito."""
+    worker, clock = ink
+    generation = worker.new_generation()
+    scene = _Scene()
+    _passes(worker, clock, generation, scene, 4, dt=_DT_IDLE, must=True)
+    old = (50, 56, 40, 280)
+    _write_stroke(worker, clock, generation, scene, old)
+    want_old = _stroke_mask(scene)
+    assert _frac(_confirmed(worker, generation) > 0, want_old) >= 0.95
+
+    scene.light = (0.744, 0.5)
+    scene.hand_on((60, H, 0, W))  # mais da metade da folha coberta
+    for _ in range(10):
+        worker.set_hand_presence(True, moved=True)
+        _feed(worker, clock, scene.frame(generation), dt=_DT_ACTIVE, must=False)
+    scene.hand_off()
+    worker.set_hand_presence(False)
+    _passes(worker, clock, generation, scene, 6, dt=_DT_IDLE)
+
+    new = (150, 156, 40, 280)
+    _write_stroke(worker, clock, generation, scene, new)
+    truth = _Scene()
+    truth.draw(old)
+    truth.draw(new)
+    want = _stroke_mask(truth)
+    got = _confirmed(worker, generation) > 0
+    assert _frac(got, want_old) >= 0.95
+    assert _frac(got, want) >= 0.9
+    assert _beyond(got, want, 2) == 0

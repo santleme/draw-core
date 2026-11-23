@@ -263,17 +263,10 @@ class InkConfig:
         que mostre que o PageModel as substitui sem perda, entao nenhuma
         protecao sai neste preset.
 
-        Custo medido do PageModel: um bloco solido escuro mais grosso que a
-        janela de 32 px (34 px ou mais na grade dos contratos) le como
-        sombra em `pm.exposed` e nao e confirmado; o caminho de votos
-        (`page_model=False`, `--legacy-ink`) o confirma.
-
-        E o que `PipelineConfig()` usa; `InkConfig()` continua sendo o
-        legado (paridade byte a byte com os campos desligados). Riscos
-        medidos: a pauta pode apagar lapis fino deitado sobre a linha
-        impressa (PR #56, recall do braco 8,6%), e o voto 0,85 afina o
-        traco (-27% a -48%, PR #53) e so funciona com `ink_auto_gain`.
-        `ruling_removal=False` (--no-ink-ruling) deixa so a pauta de fora.
+        Bloco solido escuro mais grosso que a janela de 32 px de
+        `pm.exposed` le como sombra ali; a votacao aceita os pixels que a
+        guarda fotometrica ja ADOTOU como preenchimento, entao ele confirma
+        (34 e 50 px: 1,00 nos tres regimes dos contratos).
         """
         return cls.strict_vote(
             vote_level,

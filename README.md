@@ -50,8 +50,7 @@ removal, hysteresis, motion veto, the PageModel (persistent page background), `0
 `--ink-interval` tune the numbers. Known trade-offs: the strict vote thins
 strokes (it relies on the gain), and ruling removal can suppress fine pencil
 laid over printed lines (`--no-ink-ruling` turns just that off and keeps the
-PageModel). The PageModel does not confirm a solid dark fill thicker than about
-32 px (it reads as shadow); `--legacy-ink` does.
+PageModel).
 `--legacy-ink` restores the pre-preset behaviour for comparison. Streaming
 still requires an explicit port and token file; model verification stays on.
 

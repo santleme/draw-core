@@ -10,7 +10,13 @@ import numpy as np
 
 from .. import config as paper_config
 from .. import photometry
-from ..contracts import InkBaselineState, InkDelta, InkDisplaySnapshot, InkSnapshot
+from ..contracts import (
+    ExposureAssessment,
+    InkBaselineState,
+    InkDelta,
+    InkDisplaySnapshot,
+    InkSnapshot,
+)
 from . import (
     accumulator,
     identity,
@@ -3947,8 +3953,31 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                         & (p.prob > self._accumulator.threshold)
                     )
                 )
+                # Preenchimento que a guarda fotometrica ja ADOTOU (tinta
+                # lida como tinta por varias passadas) tambem pode votar:
+                # `pm.exposed` mede o maximo por janela e le o bloco solido
+                # mais grosso que ela como sombra. A adocao vale so para a
+                # VOTACAO (p.visible); a referencia do PageModel
+                # (obs_visible) continua so com o que e papel, para o
+                # preenchimento nao ser aprendido como pagina limpa.
+                vote_exposed = exposed_mask
+                adopted_px = p.exposure_guard.adopted_pixels
+                if adopted_px is not None and np.any(adopted_px):
+                    adopted_grid, _unused = _exposure_masks_in_geometry(
+                        ExposureAssessment(visible=adopted_px, paper_exposed=True),
+                        None if registration_used is None else registration_used[0],
+                        None if registration_used is None else registration_used[1],
+                        p.prob.shape,
+                        (
+                            p.motion_fix
+                            if p.motion_decision == "correct" and p.used_registered_prob
+                            else None
+                        ),
+                    )
+                    if adopted_grid is not None:
+                        vote_exposed = exposed_mask | adopted_grid
                 p.visible = (
-                    exposed_mask if p.visible is None else (p.visible & exposed_mask)
+                    vote_exposed if p.visible is None else (p.visible & vote_exposed)
                 )
                 obs_visible = (
                     exposed_mask
