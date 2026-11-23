@@ -244,6 +244,53 @@ def test_anisotropic_paper_measures_geometry_in_mm():
         )
 
 
+def test_anisotropic_paper_decides_rectangle_in_mm():
+    # 200x200 mm sobre 850x1200 px: um quadrado a 45° em mm chega
+    # cisalhado como paralelogramo em px (~70° nos vértices) — a
+    # decisão de forma em mm o aceita como retângulo. O caso simétrico
+    # (losango ortogonal em px = paralelogramo em mm) é recusado.
+    vectorize._set_paper_mm(200.0, 200.0, 850, 1200)
+    try:
+        sx, sy = 200.0 / 850.0, 200.0 / 1200.0
+        half_diag = 30.0 * np.sqrt(2.0)
+        diamond_mm = np.array(
+            [
+                [0.0, half_diag],
+                [-half_diag, 0.0],
+                [0.0, -half_diag],
+                [half_diag, 0.0],
+            ]
+        ) + np.array([100.0, 100.0])
+        diamond_px = np.empty_like(diamond_mm)
+        diamond_px[:, 0] = diamond_mm[:, 0] / sx
+        diamond_px[:, 1] = diamond_mm[:, 1] / sy
+        prim = vectorize.classify_primitive({"points": diamond_px, "closed": True})
+        assert prim["type"] == "rectangle"
+        assert prim["width_mm"] == pytest.approx(60.0, rel=0.05)
+        assert prim["height_mm"] == pytest.approx(60.0, rel=0.05)
+        for got in prim["corners_mm"]:
+            assert any(
+                abs(got[0] - want[0]) < 0.5 and abs(got[1] - want[1]) < 0.5
+                for want in diamond_mm
+            )
+
+        radius = 200.0
+        px_diamond = np.array(
+            [
+                [425.0, 600.0 + radius],
+                [425.0 - radius, 600.0],
+                [425.0, 600.0 - radius],
+                [425.0 + radius, 600.0],
+            ]
+        )
+        prim = vectorize.classify_primitive({"points": px_diamond, "closed": True})
+        assert prim["type"] == "polygon"
+    finally:
+        vectorize._set_paper_mm(
+            210.0, 297.0, vectorize.PAPER_W_PX, vectorize.PAPER_H_PX
+        )
+
+
 def test_isotropic_paper_still_classifies_circle():
     # A4 legado já é ~0,2% anisotrópico (210/850 vs 297/1200) e sempre
     # classificou círculo com r_mm médio — o comportamento se mantém.
@@ -271,6 +318,7 @@ def main():
     test_paper_mm_flags_repoint_scale_and_restore_defaults()
     test_paper_mm_flags_must_come_in_pairs_and_be_finite()
     test_anisotropic_paper_measures_geometry_in_mm()
+    test_anisotropic_paper_decides_rectangle_in_mm()
     test_isotropic_paper_still_classifies_circle()
     print("TESTES DE VECTORIZE V2 E CAMADA 2 OK.")
     return 0

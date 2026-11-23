@@ -742,18 +742,27 @@ def classify_primitive(polyline):
             sides = [corners[(i + 1) % 4] - corners[i] for i in range(4)]
             lengths = [float(np.hypot(s[0], s[1])) for s in sides]
             if min(lengths) >= 10.0:
+                # A forma é decidida em mm: com escala anisotrópica um
+                # retângulo rotacionado cisalha em px (ângulos != 90°) e
+                # um paralelogramo em px pode parecer retângulo.
+                sides_mm = [s * np.array([MM_PER_PX_X, MM_PER_PX_Y]) for s in sides]
+                lengths_mm = [float(np.hypot(s[0], s[1])) for s in sides_mm]
                 angles_ok = True
                 for i in range(4):
-                    u = -sides[(i - 1) % 4] / lengths[(i - 1) % 4]
-                    v = sides[i] / lengths[i]
+                    u = -sides_mm[(i - 1) % 4] / lengths_mm[(i - 1) % 4]
+                    v = sides_mm[i] / lengths_mm[i]
                     ang = math.degrees(
                         math.acos(min(1.0, max(-1.0, float(np.dot(u, v)))))
                     )
                     if abs(ang - 90.0) > 12.0:
                         angles_ok = False
                         break
-                opp0 = abs(lengths[0] - lengths[2]) / max(lengths[0], lengths[2])
-                opp1 = abs(lengths[1] - lengths[3]) / max(lengths[1], lengths[3])
+                opp0 = abs(lengths_mm[0] - lengths_mm[2]) / max(
+                    lengths_mm[0], lengths_mm[2]
+                )
+                opp1 = abs(lengths_mm[1] - lengths_mm[3]) / max(
+                    lengths_mm[1], lengths_mm[3]
+                )
                 # Garante também que o contorno real segue os 4 lados do retângulo.
                 rect_dev = []
                 for p in dense:
@@ -776,17 +785,10 @@ def classify_primitive(polyline):
                     and opp1 <= 0.12
                     and max(rect_dev) <= max(4.0, 0.05 * max(lengths))
                 ):
-                    # Lados/ângulo medidos já em mm: com escala
-                    # anisotrópica os comprimentos px não se convertem
-                    # por uma média única e o ângulo também muda.
-                    sides_mm = [_mm_dist(float(s[0]), float(s[1])) for s in sides]
-                    w_mm = 0.5 * (sides_mm[0] + sides_mm[2])
-                    h_mm = 0.5 * (sides_mm[1] + sides_mm[3])
+                    w_mm = 0.5 * (lengths_mm[0] + lengths_mm[2])
+                    h_mm = 0.5 * (lengths_mm[1] + lengths_mm[3])
                     ang_deg = math.degrees(
-                        math.atan2(
-                            float(sides[0][1]) * MM_PER_PX_Y,
-                            float(sides[0][0]) * MM_PER_PX_X,
-                        )
+                        math.atan2(float(sides_mm[0][1]), float(sides_mm[0][0]))
                     )
                     center = corners.mean(axis=0)
                     return {
