@@ -15,6 +15,7 @@ import pytest
 
 from draw.camera import open_capture
 from draw.protocol import (
+    ACCEPT,
     DEFAULT_PORT,
     AuthenticationError,
     HelperCapture,
@@ -373,6 +374,212 @@ def test_tools_record_rejeita_max_frames_antes_do_token(tmp_path, monkeypatch):
     monkeypatch.delenv(rx.TOKEN_ENV, raising=False)
     with pytest.raises(ValueError, match="max_frames"):
         rx.record("127.0.0.1", 1, tmp_path / "x.drawcap", max_frames=0)
+
+
+class _SilentSocket:
+    """Socket falso: responde ACCEPT no handshake e cala para sempre."""
+
+    def __init__(self):
+        self.timeouts = []
+        self.closed = False
+        self._accepted = False
+
+    def sendall(self, _data):
+        pass
+
+    def recv(self, _size):
+        if not self._accepted:
+            self._accepted = True
+            return ACCEPT
+        raise socket.timeout("emissor calado")
+
+    def settimeout(self, value):
+        self.timeouts.append(value)
+
+    def gettimeout(self):
+        return self.timeouts[-1] if self.timeouts else None
+
+    def close(self):
+        self.closed = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        self.close()
+        return False
+
+
+def test_tools_frames_from_socket_timeout_padrao_no_recv(monkeypatch):
+    """O default deixa de ser recv bloqueante: o silêncio pós-handshake
+    sobe como TimeoutError e o socket sai com o teto novo."""
+    from tools import helper_receiver as rx
+
+    fake = _SilentSocket()
+    monkeypatch.setattr(socket, "create_connection", lambda *_a, **_k: fake)
+    monkeypatch.setenv(rx.TOKEN_ENV, TOKEN)
+    with pytest.raises(TimeoutError):
+        list(rx.frames_from_socket("127.0.0.1", 1))
+    assert fake.timeouts[-1] == rx.DEFAULT_RECV_TIMEOUT_S
+
+
+def _serve_silent(token, release, results):
+    """Servidor que autentica e nunca envia registro: o recv do
+    cliente só destrava pelo timeout do socket."""
+    server = socket.socket()
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+
+    def run():
+        conn, _addr = server.accept()
+        with conn:
+            results.append(server_handshake(conn, token, timeout=2))
+            release.wait(5)
+        server.close()
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    return server.getsockname()[1], thread
+
+
+def test_tools_record_timeout_emissor_morto(tmp_path):
+    """Servidor autentica e cala: o record sai por TimeoutError, não
+    fica pendurado no recv."""
+    from tools import helper_receiver as rx
+
+    release = threading.Event()
+    results = []
+    port, thread = _serve_silent(TOKEN, release, results)
+    try:
+        started = time.monotonic()
+        with pytest.raises(TimeoutError):
+            rx.record(
+                "127.0.0.1", port, tmp_path / "x.drawcap", timeout=0.15, token=TOKEN
+            )
+        assert time.monotonic() - started < 1.0
+        assert results == [True]
+    finally:
+        release.set()
+        thread.join(5)
+
+
+def test_tools_frames_from_socket_timeout_emissor_morto():
+    from tools import helper_receiver as rx
+
+    release = threading.Event()
+    results = []
+    port, thread = _serve_silent(TOKEN, release, results)
+    try:
+        started = time.monotonic()
+        with pytest.raises(TimeoutError):
+            list(rx.frames_from_socket("127.0.0.1", port, timeout=0.15, token=TOKEN))
+        assert time.monotonic() - started < 1.0
+        assert results == [True]
+    finally:
+        release.set()
+        thread.join(5)
+
+
+@pytest.mark.parametrize("timeout", [0, -1])
+def test_tools_timeout_invalido_antes_de_conectar(timeout, tmp_path, monkeypatch):
+    """timeout<=0 morre na validação: nem token nem conexão (a porta 1
+    nunca é discada e o env ausente não vira AuthenticationError)."""
+    from tools import helper_receiver as rx
+
+    monkeypatch.delenv(rx.TOKEN_ENV, raising=False)
+    with pytest.raises(ValueError, match="timeout"):
+        rx.frames_from_socket("127.0.0.1", 1, timeout=timeout)
+    with pytest.raises(ValueError, match="timeout"):
+        rx.record("127.0.0.1", 1, tmp_path / "x.drawcap", timeout=timeout)
+
+
+def test_tools_main_record_passa_timeout(tmp_path, monkeypatch):
+    from tools import helper_receiver as rx
+
+    monkeypatch.setenv(rx.TOKEN_ENV, TOKEN)
+    captured = {}
+
+    def fake_record(host, port, out_path, **kwargs):
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(rx, "record", fake_record)
+    out = tmp_path / "s.drawcap"
+    rc = rx.main(["--record", "--host", "h", "--out", str(out), "--timeout", "2.5"])
+    assert rc == 0
+    assert captured["timeout"] == 2.5
+    captured.clear()
+    rc = rx.main(["--record", "--host", "h", "--out", str(out)])
+    assert rc == 0
+    assert captured["timeout"] == rx.DEFAULT_RECV_TIMEOUT_S
+
+
+def test_tools_main_dump_socket_passa_timeout(monkeypatch):
+    from tools import helper_receiver as rx
+
+    monkeypatch.setenv(rx.TOKEN_ENV, TOKEN)
+    captured = {}
+
+    def fake_frames(host, port, **kwargs):
+        captured.update(kwargs)
+        return iter([])
+
+    monkeypatch.setattr(rx, "frames_from_socket", fake_frames)
+    assert rx.main(["--dump", "--host", "h", "--timeout", "3"]) == 0
+    assert captured["timeout"] == 3.0
+
+
+def test_tools_main_timeout_invalido_erro_de_cli(capsys):
+    from tools import helper_receiver as rx
+
+    with pytest.raises(SystemExit) as error:
+        rx.main(["--record", "--host", "h", "--out", "x.drawcap", "--timeout", "0"])
+    assert error.value.code == 2
+    assert "timeout" in capsys.readouterr().err
+
+
+def test_tools_main_record_emissor_morto_sai_limpo(tmp_path, monkeypatch, capsys):
+    """TimeoutError do recv vira `erro:` + rc 2, nao traceback cru."""
+    from tools import helper_receiver as rx
+
+    monkeypatch.setenv(rx.TOKEN_ENV, TOKEN)
+
+    def dead_record(*_a, **_k):
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(rx, "record", dead_record)
+    rc = rx.main(["--record", "--host", "h", "--out", str(tmp_path / "s.drawcap")])
+    assert rc == 2
+    assert "emissor parado" in capsys.readouterr().err
+
+
+def test_tools_main_dump_emissor_morto_sai_limpo(monkeypatch, capsys):
+    from tools import helper_receiver as rx
+
+    monkeypatch.setenv(rx.TOKEN_ENV, TOKEN)
+
+    def dead_frames(*_a, **_k):
+        def gen():
+            raise TimeoutError("timed out")
+            yield  # pragma: no cover - inalcancavel
+
+        return gen()
+
+    monkeypatch.setattr(rx, "frames_from_socket", dead_frames)
+    rc = rx.main(["--dump", "--host", "h"])
+    assert rc == 2
+    assert "emissor parado" in capsys.readouterr().err
+
+
+def test_tools_main_dump_token_ausente_sai_limpo(monkeypatch, capsys):
+    """AuthenticationError na resolucao do token: `erro:` + rc 2."""
+    from tools import helper_receiver as rx
+
+    monkeypatch.delenv(rx.TOKEN_ENV, raising=False)
+    rc = rx.main(["--dump", "--host", "h"])
+    assert rc == 2
+    assert "erro:" in capsys.readouterr().err
 
 
 def test_source_dropped_conta_salto_sem_confundir_jpeg_ruim(tmp_path):
