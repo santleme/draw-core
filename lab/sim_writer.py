@@ -988,9 +988,12 @@ def audit_one(scen_dir, out_dir, flags, detector_kind="real"):
     return res
 
 
-def audit(corpus, out, flags, scenarios, detector_kind="real"):
+def audit(corpus, out, flags, scenarios, detector_kind="real", *, timeout=900):
     """Roda cada cenário num subprocesso (flags isoladas, ONNX
-    sequencial) e consolida."""
+    sequencial) e consolida.
+
+    `timeout` é por cenário (~30 quadros ≈ 1-3 min): teto de
+    travamento, não de desempenho."""
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     results = []
@@ -1009,7 +1012,22 @@ def audit(corpus, out, flags, scenarios, detector_kind="real"):
         ]
         if flags:
             cmd += ["--flags", ",".join(flags)]
-        r = subprocess.run(cmd, capture_output=True, text=True)
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired as error:
+            sout = error.stdout or ""
+            serr = error.stderr or ""
+            # Até o Python 3.11 a saída parcial chega em bytes mesmo
+            # com text=True; o 3.12+ já entrega decodificada.
+            if isinstance(sout, bytes):
+                sout = sout.decode(errors="replace")
+            if isinstance(serr, bytes):
+                serr = serr.decode(errors="replace")
+            print(sout[-3000:])
+            print(serr[-3000:], file=sys.stderr)
+            raise SystemExit(
+                f"audit-one excedeu o tempo limite ({timeout} s): {name}"
+            ) from None
         if r.returncode != 0:
             print(r.stdout[-3000:])
             print(r.stderr[-3000:], file=sys.stderr)

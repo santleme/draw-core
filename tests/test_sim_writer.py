@@ -82,3 +82,28 @@ def test_parse_flags_base_is_legacy_and_producao_preset_matches_the_default():
         ink=InkConfig(), ink_auto_gain=False, detect_wake=False
     )
     assert _parse_flags(preset_flags("producao")) == PipelineConfig()
+
+
+def test_audit_timeout_imprime_rabos_e_sai(monkeypatch, tmp_path, capsys):
+    """Cenário travado: o audit mostra os rabos da saída parcial do
+    audit-one e sai nomeando o cenário, em vez de pendurar a bateria
+    inteira atrás dele."""
+    import subprocess
+
+    from lab import sim_writer
+
+    captured = {}
+
+    def fake_run(cmd, **kw):
+        captured.update(kw)
+        raise subprocess.TimeoutExpired(
+            cmd, kw["timeout"], output="stdout parcial", stderr="stderr parcial"
+        )
+
+    monkeypatch.setattr(sim_writer.subprocess, "run", fake_run)
+    with pytest.raises(SystemExit, match="tempo limite.*cursive"):
+        sim_writer.audit("corpus", tmp_path, [], ["cursive"])
+    assert captured["timeout"] == 900
+    streams = capsys.readouterr()
+    assert "stdout parcial" in streams.out
+    assert "stderr parcial" in streams.err

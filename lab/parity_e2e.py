@@ -120,6 +120,7 @@ def run_new(
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     records, canvases = [], []
+    done = False
     try:
         for idx, frame in iter_frames(corpus, frames):
             clock.t = parity_frame_time(idx, fps)
@@ -144,22 +145,43 @@ def run_new(
                 if loop.clean_mask is None
                 else (np.asarray(loop.clean_mask) > 0)
             )
+        done = True
     finally:
-        # Os landmarkers fecham aqui, não pelo __del__.
-        if hand_masker is not None:
-            hand_masker.close()
-        if presence is not None:
-            presence.close()
-    hand_samples = presence_worker.real_samples if presence_worker else 0
-    (out_dir / "telemetry.json").write_text(
-        json.dumps({"frames": records, "hand_samples": hand_samples}, indent=1)
-    )
-    np.savez_compressed(out_dir / "canvas.npz", *canvases)
+        # O dump sai MESMO com crash no meio do laço ("partial": true) —
+        # telemetry.json/canvas.npz são artefatos de depuração, nunca
+        # relidos: um savez vazio é válido e evita que um telemetry.json
+        # velho pareça fresco. Escreve antes de fechar os landmarkers
+        # (um close() que levanta não pode comer o dump) e dentro de um
+        # try próprio (um dump que levanta não pode pular o close).
+        try:
+            hand_samples = (
+                presence_worker.real_samples if presence_worker is not None else 0
+            )
+            payload = {"frames": records, "hand_samples": hand_samples}
+            if not done:
+                payload["partial"] = True
+            (out_dir / "telemetry.json").write_text(json.dumps(payload, indent=1))
+            np.savez_compressed(out_dir / "canvas.npz", *canvases)
+        finally:
+            # Os landmarkers fecham aqui, não pelo __del__.
+            if hand_masker is not None:
+                hand_masker.close()
+            if presence is not None:
+                presence.close()
     return records, canvases, hand_samples
 
 
 def run_legacy(
-    legacy_repo, corpus, out_dir, *, frames, fps, sheet_model, ink_model, hand_model
+    legacy_repo,
+    corpus,
+    out_dir,
+    *,
+    frames,
+    fps,
+    sheet_model,
+    ink_model,
+    hand_model,
+    timeout=1800,
 ):
     """Lado legado: subprocesso com PYTHONPATH=<repo legado>.
 
@@ -189,7 +211,24 @@ def run_legacy(
         "--hand-model",
         str(hand_model),
     ]
-    result = subprocess.run(cmd, env=env, capture_output=True, text=True)
+    try:
+        result = subprocess.run(
+            cmd, env=env, capture_output=True, text=True, timeout=timeout
+        )
+    except subprocess.TimeoutExpired as error:
+        out = error.stdout or ""
+        err = error.stderr or ""
+        # Até o Python 3.11 a saída parcial chega em bytes mesmo com
+        # text=True; o 3.12+ já entrega decodificada.
+        if isinstance(out, bytes):
+            out = out.decode(errors="replace")
+        if isinstance(err, bytes):
+            err = err.decode(errors="replace")
+        print(out[-3000:])
+        print(err[-3000:], file=sys.stderr)
+        raise SystemExit(
+            f"driver legado excedeu o tempo limite ({timeout} s)"
+        ) from None
     if result.returncode != 0:
         print(result.stdout[-3000:])
         print(result.stderr[-3000:], file=sys.stderr)

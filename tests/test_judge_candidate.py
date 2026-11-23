@@ -328,6 +328,158 @@ def test_corrupt_report_exits_two_with_message(tmp_path, monkeypatch, capsys):
     assert "ERRO" in capsys.readouterr().err
 
 
+def test_run_judge_timeout_vira_runtime_error(tmp_path, monkeypatch):
+    """Juiz travado: TimeoutExpired vira RuntimeError (que main()
+    consolida em ERRO + saída 2), não traceback."""
+    import subprocess as sp
+
+    bench = _make_bench(tmp_path)
+    candidate = tmp_path / "cand.onnx"
+    candidate.write_bytes(b"onnx")
+    captured = {}
+
+    def fake_run(cmd, cwd=None, **kw):
+        captured.update(kw)
+        raise sp.TimeoutExpired(cmd, kw.get("timeout"))
+
+    monkeypatch.setattr(jc.subprocess, "run", fake_run)
+    with pytest.raises(RuntimeError, match="tempo limite"):
+        jc.run_judge(
+            sys.executable,
+            bench / "scripts",
+            bench / "results",
+            "judge_sheet.py",
+            "sheet",
+            candidate,
+        )
+    assert captured["timeout"] == jc.JUDGE_TIMEOUT_S
+
+
+def test_run_judge_report_com_mtime_atrasado_eh_encontrado(tmp_path, monkeypatch):
+    """Regressão do filtro por mtime: relatório escrito com mtime
+    anterior ao t0 do juiz (relógio grosso do kernel ou timestamp do
+    filesystem) era descartado como "não gerou relatório novo". A
+    diferença de conjuntos o reconhece: o arquivo não existia antes."""
+    import subprocess as sp
+
+    bench = _make_bench(tmp_path)
+    candidate = tmp_path / "cand.onnx"
+    candidate.write_bytes(b"onnx")
+
+    def fake_run(cmd, cwd=None, **_kw):
+        report = bench / "results" / "sheet_new.json"
+        report.write_text(json.dumps(sheet_json()))
+        past = time.time() - 10
+        os.utime(report, (past, past))
+        return sp.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(jc.subprocess, "run", fake_run)
+    report, _dt = jc.run_judge(
+        sys.executable,
+        bench / "scripts",
+        bench / "results",
+        "judge_sheet.py",
+        "sheet",
+        candidate,
+    )
+    assert report.name == "sheet_new.json"
+
+
+def test_run_judge_relatorio_sobrescrito_eh_encontrado(tmp_path, monkeypatch):
+    """Juiz que sobrescreve o relatório anterior (mesmo nome, mtime
+    novo): o arquivo está em `before`, então não conta como "criado" —
+    o fallback por mtime >= t0 o pega."""
+    import subprocess as sp
+
+    bench = _make_bench(tmp_path)
+    stale = bench / "results" / "sheet_run.json"
+    stale.write_text("{velho")
+    past = time.time() - 3600
+    os.utime(stale, (past, past))
+    candidate = tmp_path / "cand.onnx"
+    candidate.write_bytes(b"onnx")
+
+    def fake_run(cmd, cwd=None, **_kw):
+        stale.write_text(json.dumps(sheet_json()))
+        # st_mtime usa o relógio grosso do kernel (atraso de até um
+        # tick em relação a time.time()): força mtime novo.
+        future = time.time() + 1
+        os.utime(stale, (future, future))
+        return sp.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(jc.subprocess, "run", fake_run)
+    report, _dt = jc.run_judge(
+        sys.executable,
+        bench / "scripts",
+        bench / "results",
+        "judge_sheet.py",
+        "sheet",
+        candidate,
+    )
+    assert report == stale
+
+
+def test_run_judge_sem_relatorio_novo_falha(tmp_path, monkeypatch):
+    """Relatório velho intocado + juiz que não escreve nada: falha
+    explícita, nunca recicla o JSON da rodada anterior."""
+    import subprocess as sp
+
+    bench = _make_bench(tmp_path)
+    stale = bench / "results" / "sheet_run.json"
+    stale.write_text(json.dumps(sheet_json()))
+    past = time.time() - 3600
+    os.utime(stale, (past, past))
+    candidate = tmp_path / "cand.onnx"
+    candidate.write_bytes(b"onnx")
+
+    monkeypatch.setattr(
+        jc.subprocess,
+        "run",
+        lambda cmd, cwd=None, **_kw: sp.CompletedProcess(cmd, 0),
+    )
+    with pytest.raises(RuntimeError, match="não gerou relatório novo"):
+        jc.run_judge(
+            sys.executable,
+            bench / "scripts",
+            bench / "results",
+            "judge_sheet.py",
+            "sheet",
+            candidate,
+        )
+
+
+def test_main_juiz_travado_sai_dois_com_erro(tmp_path, monkeypatch, capsys):
+    """Timeout do juiz atravessa o consolidador de main() como erro de
+    execução (saída 2 + ERRO), não REPROVADO nem traceback."""
+    import subprocess as sp
+
+    bench = _make_bench(tmp_path)
+    for name in ("judge_sheet.py", "judge_absence.py", "judge_adversarial.py"):
+        (bench / "scripts" / name).write_text("# stub\n")
+    candidate = tmp_path / "cand.onnx"
+    candidate.write_bytes(b"onnx")
+
+    def fake_run(cmd, cwd=None, **kw):
+        raise sp.TimeoutExpired(cmd, kw.get("timeout"))
+
+    monkeypatch.setattr(jc.subprocess, "run", fake_run)
+    rc = jc.main(
+        [
+            "--candidate",
+            str(candidate),
+            "--bench-dir",
+            str(bench),
+            "--python",
+            sys.executable,
+            "--skip",
+            "absence,adversarial",
+        ]
+    )
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "ERRO" in err and "tempo limite" in err
+
+
 def test_venv_python_keeps_symlink_path(tmp_path, monkeypatch):
     """Path.resolve() dereferencia o symlink bin/python do venv e
     troca o interpretador pelo python base (perdendo as deps do venv).
