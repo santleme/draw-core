@@ -44,8 +44,10 @@ import cv2
 import numpy as np
 
 if __package__ in (None, ""):
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    _repo_root = Path(__file__).resolve().parent.parent
+    sys.path.insert(0, str(_repo_root / "packages" / "draw-dral" / "src"))
+    sys.path.insert(0, str(_repo_root / "src"))
+    sys.path.insert(0, str(_repo_root))
 
 from lab.eval_capture import run_pipeline  # noqa: E402
 
@@ -453,7 +455,9 @@ def main(argv=None):
     from draw.settings import PipelineConfig
 
     pipeline_config = (
-        PipelineConfig(ink=InkConfig(), ink_auto_gain=False, detect_wake=False)
+        PipelineConfig(
+            ink=InkConfig(paper_guard=False), ink_auto_gain=False, detect_wake=False
+        )
         if args.legacy_ink
         else PipelineConfig()
     )

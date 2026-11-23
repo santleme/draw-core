@@ -11,6 +11,12 @@ dependencies = [
     "numpy>=1.26",
     "opencv-contrib-python-headless>=4.8,<5.1",
     "onnxruntime>=1.17",
+    # Fio DRAL + handshake compartilhado, extraido para consumidores que
+    # nao precisam do runtime de inferencia (packages/draw-dral).
+    # Versao exata: o membro e versionado junto com o draw-core (mesmo
+    # commit, mesmo numero) — um pino que nao bate com o membro falha
+    # na resolucao do workspace, o que e o alarme de dessincronia.
+    "draw-dral==0.1.0",
 ]
 
 [project.optional-dependencies]
@@ -35,17 +41,26 @@ draw = "draw.app:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.uv.sources]
+draw-dral = { workspace = true }
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-markers = ["slow: tests with threads/real time; run serialized"]
+markers = [
+    "slow: tests with threads/real time; run serialized",
+    "timing: wall-clock budgets; run serialized (xdist contention skews them)",
+]
 filterwarnings = ["error::pytest.PytestUnhandledThreadExceptionWarning"]
 faulthandler_timeout = 120
 
 [tool.ruff]
 target-version = "py311"
 line-length = 88
-src = ["src", "tests", "lab", "tools"]
+src = ["src", "tests", "lab", "tools", "packages/draw-dral/src"]
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F", "I", "B"]

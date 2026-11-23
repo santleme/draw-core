@@ -799,5 +799,5 @@ def test_main_usa_preset_de_producao_por_padrao_e_aceita_legacy_ink(
 
     assert dc.main(["--out", str(tmp_path / "leg"), "--legacy-ink"]) == 0
     assert seen[-1] == PipelineConfig(
-        ink=InkConfig(), ink_auto_gain=False, detect_wake=False
+        ink=InkConfig(paper_guard=False), ink_auto_gain=False, detect_wake=False
     )

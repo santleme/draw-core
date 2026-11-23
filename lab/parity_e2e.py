@@ -46,6 +46,19 @@ from lab.sync_workers import (  # noqa: E402
 )
 
 
+def legacy_pipeline_config():
+    """PipelineConfig do laco legado: a base de comparacao da paridade.
+
+    Mesma config de tinta do `--legacy-ink` ao vivo (InkConfig.legacy_loop);
+    o teste de paridade de config prende as duas."""
+    from draw.ink.config import InkConfig
+    from draw.settings import PipelineConfig
+
+    return PipelineConfig(
+        ink=InkConfig.legacy_loop(), ink_auto_gain=False, detect_wake=False
+    )
+
+
 def parity_frame_time(idx, fps):
     """Instante do quadro, com a MESMA fórmula do driver legado.
 
@@ -71,12 +84,10 @@ def run_new(
     from draw import hand as hand_module
     from draw.contracts import FramePacket
     from draw.hand_presence import make_hand_presence
-    from draw.ink.config import InkConfig
     from draw.ink.worker import PageCleanWorker
     from draw.page_clean import PageCleanInk
     from draw.perception import NeuralSheetDetector
     from draw.pipeline import Pipeline
-    from draw.settings import PipelineConfig
 
     detector = NeuralSheetDetector(str(sheet_model), verify=verify)
     detector.load()
@@ -97,16 +108,13 @@ def run_new(
     # A régua de paridade compara contra o SheetInkLoop legado (Tier A, sem
     # ganho, sem Detect-Wake e com voto/cadência legados): fixa a mesma base
     # em Pipeline e PageCleanWorker para não misturar o preset de produção.
-    legacy_config = PipelineConfig(
-        ink=InkConfig(), ink_auto_gain=False, detect_wake=False
-    )
+    legacy_config = legacy_pipeline_config()
     worker = PageCleanWorker(
         page_clean,
         hand_masker,
         clock=clock,
         config=legacy_config.ink,
         ink_divnorm=legacy_config.ink_divnorm,
-        exposure_guard=False,
     )
     loop = Pipeline(
         detection_worker=det,

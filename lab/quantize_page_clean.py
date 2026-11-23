@@ -17,7 +17,7 @@ Receita medida em 2026-11-20 (draw-lab/bench-3b/RESULTADO.md, Ryzen 7
 
 Calibracao: as paginas retificadas que o page_clean recebe ao vivo,
 capturadas no replay dos clipes da mesa (bench-clips, preset
-ganho+histerese), 10 por clipe espalhadas pelo clipe inteiro;
+ganho+pauta+histerese), 10 por clipe espalhadas pelo clipe inteiro;
 os indices pares calibram (os impares ficam para a bancada de tempo).
 Esses clipes sao gravacoes proprias da camera do autor — disjuntos do
 holdout-v1 (school-notebooks-test) e das paginas em branco do portao
@@ -46,7 +46,7 @@ for _p in (str(_REPO_ROOT / "src"), str(_REPO_ROOT)):
 
 _PATCH = 256
 _PAGES_PER_CLIP = 10
-_PRESET = "ganho+histerese"
+_PRESET = "ganho+pauta+histerese"
 
 
 def capture_pages(clips_dir, out_dir, src_model):

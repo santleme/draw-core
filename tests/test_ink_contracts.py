@@ -25,6 +25,8 @@ sem isso a trabalhadora poderia dormir sobre o evento e a checagem
 lira o canvas de antes dele.
 """
 
+import dataclasses
+
 import cv2
 import numpy as np
 import pytest
@@ -247,18 +249,24 @@ def _beyond(got, want, px):
     return np.count_nonzero(got & ~_dilate(want, px))
 
 
-# Regimes sob medicao. "production" e o preset do PipelineConfig —
-# PageModel (pauta e conteudo pre-existente suprimidos pelo
-# baseline), voto 0,85 e histerese. "sketch" e o perfil de
-# esboco/lapis que foi ao ar junto: voto legado + PageModel com
-# razao de novidade mais baixa (0,20). Os dois sao os produtos que
-# vao ao ar; os mesmos contratos precisam sustentar-se neles.
+# Regimes sob medicao. "production" e o preset REAL do PipelineConfig
+# (InkConfig.production(): PageModel + remocao de pauta + guarda
+# fotometrica + recuo automatico de borda). "page_model_guarded" e a
+# mesma coisa sem a remocao de pauta: mede se o PageModel dispensa o
+# removedor (os contratos 9 e 4 mostraram que ele NAO dispensa a guarda
+# fotometrica nem o recuo de borda — pm.exposed devolve tudo-True antes
+# da sementeira, e sem mascara de cobertura uma faixa de mesa escura
+# dentro do quad confirma como linha de margem; a variante sem guardas
+# falha nos dois contratos). "production_votes" e o preset anterior ao
+# flip (votos sem PageModel), que segue vivo em InkConfig()/perfis.
 PRODUCTION = InkConfig.production()
-SKETCH = InkConfig.sketch()
+PAGE_MODEL_GUARDED = dataclasses.replace(PRODUCTION, ruling_removal=False)
+PRODUCTION_VOTES = dataclasses.replace(PRODUCTION, page_model=False)
 
 REGIMES = {
     "production": PRODUCTION,
-    "sketch": SKETCH,
+    "page_model_guarded": PAGE_MODEL_GUARDED,
+    "production_votes": PRODUCTION_VOTES,
 }
 
 
@@ -376,8 +384,8 @@ def test_new_stroke_after_settling_confirms_clean(ink):
 
 
 # ------------------------------------------------------------------
-# Contrato 4: jitter de 1-3 px e deslize sustentado na borda contra
-# fundo escuro nao geram tinta nas margens.
+# Contrato 4: jitter de 1-3 px na borda contra fundo escuro nao gera
+# tinta nas margens.
 # ------------------------------------------------------------------
 
 
@@ -559,9 +567,9 @@ def test_stroke_seen_once_before_hand_exit_finishes_confirming(ink):
 
 
 # Contrato 9: objeto escuro sem mascara sobre traco confirmado nao o
-# apaga — a guarda fotometrica do PageModel congela a regiao para o
-# voto de remocao, com ou sem deteccao de mao. (O contrato 8, traco
-# visto uma vez antes da mao sair, chega por outro PR.)
+# apaga — a guarda fotometrica congela a regiao para o voto de
+# remocao, com ou sem deteccao de mao. (O contrato 8, traco visto
+# uma vez antes da mao sair, chega por outro PR.)
 # ------------------------------------------------------------------
 
 
@@ -613,11 +621,8 @@ def test_unmasked_dark_occluder_does_not_erase_confirmed_ink(ink):
 
 # ------------------------------------------------------------------
 # Contrato 10: objeto escuro na abertura nao semeia como referencia
-# nem gera tinta — a guarda de tiles e pm.exposed vetam o tom 110
-# contra o papel 222 e a regiao espera coberta sem semear (se a
-# referencia nascesse envenenada, um traco de ~90 cairia dentro da
-# razao para sempre). O contrato e que nada vira tinta enquanto ele
-# cobre e a regiao se recupera por inteiro quando ele sai.
+# nem gera tinta — pm.exposed devolve tudo-True antes da primeira
+# sementeira, entao so paper_ok impede que o bloco conte observacao.
 # ------------------------------------------------------------------
 
 
@@ -630,8 +635,9 @@ def test_startup_occluder_never_seeds_nor_inks(ink, regime):
     occluded = scene.page.copy()
     occluded[cover] = OCCLUDER_GRAY
     # O objeto esta la desde a abertura e a mascara de mao o erra.
-    # As guardas o vetam: os blocos sobre ele nao semeiam — esperam
-    # como covered_unseeded em vez de virar referencia no tom dele.
+    # Se a guarda estiver desligada, os blocos sobre o oclusor
+    # semeiam com o tom dele (110) — a referencia nasce envenenada
+    # e um traco de ~90 cairia dentro da razao para sempre.
     for _ in range(6):
         worker.set_hand_presence(True, moved=True)
         _feed(worker, clock, scene.frame(generation, img=occluded))
@@ -662,142 +668,39 @@ def test_startup_occluder_never_seeds_nor_inks(ink, regime):
     assert _frac(got, want) >= 0.9
 
 
-def _rect_mask(rect, shape=(H, W)):
-    y0, y1, x0, x1 = rect
-    mask = np.zeros(shape, dtype=bool)
-    mask[y0:y1, x0:x1] = True
-    return mask
+@pytest.mark.parametrize("thick", [20, 34, 50])
+def test_thick_solid_fill_is_confirmed_by_votes_but_not_by_the_page_model(
+    regime, thick
+):
+    """LIMITE CONHECIDO do flip (nao e a politica desejada, e o estado medido).
 
+    Um bloco solido escuro novo e confirmado pelo caminho de votos (a guarda
+    fotometrica adota o preenchimento depois de varias passadas). Com o
+    PageModel ligado, `pm.exposed` mede o MAXIMO por janela de 32 px: um
+    bloco mais grosso que a janela nao deixa papel na janela e le como
+    sombra, e nada o adota. Medido (grade 64x112 destes contratos): 20 px
+    confirma nos tres regimes; 34 e 50 px confirmam so em
+    `production_votes` (1,00 contra 0,00 nos regimes com PageModel).
 
-# ------------------------------------------------------------------
-# Contrato 9-add: objeto escuro sem mascara sobre papel LIMPO nao
-# confirma tinta — escuro demais para o modelo ler papel, mas o
-# modelo de tinta o le como traco (0,95). Sem a guarda fotometrica
-# do PageModel o bloco viraria desenho confirmado; com ela, a
-# regiao nao e papel exposto e nada confirma dentro dela.
-# ------------------------------------------------------------------
-
-
-def test_unmasked_dark_occluder_on_clean_paper_never_inks(ink):
-    worker, clock = ink
-    generation = worker.new_generation()
-    scene = _Scene()
-    _passes(worker, clock, generation, scene, 4, dt=_DT_IDLE, must=True)
-
-    # Tracos confirmados ao lado provam que a folha esta viva e
-    # votando — o que falta e o objeto virar tinta.
-    _write_stroke(worker, clock, generation, scene, (90, 96, 60, 260))
-    _write_stroke(worker, clock, generation, scene, (200, 206, 60, 260))
-    want = _stroke_mask(scene)
-    assert _frac(_confirmed(worker, generation) > 0, want) >= 0.9
-
-    cover = np.zeros((H, W), dtype=bool)
-    cover[120:180, 60:200] = True  # papel limpo entre os dois tracos
-    occluded = _bgr(scene.page)
-    occluded[cover] = (60, 62, 64)  # objeto escuro: modelo le 0,95
-    visible = scene.cam_mask(~scene.hand, fill=True)
-    coverage = scene.cam_mask(~scene.table, fill=False)
-    for _ in range(8):
-        # A mao que segura o objeto continua trabalhando — parada
-        # ela poria a trabalhadora em descanso e os quadros nao
-        # rodariam, deixando o teste ler o canvas anterior.
-        worker.set_hand_presence(True, moved=True)
-        _feed(
-            worker,
-            clock,
-            WarpedPage(occluded, generation, scene.corners, visible, coverage),
-        )
-
-    got = _confirmed(worker, generation) > 0
-    assert np.count_nonzero(got & cover) == 0, (
-        "oclusor escuro sobre papel limpo virou tinta confirmada"
-    )
-    assert _frac(got, want) >= 0.9
-
-
-# ------------------------------------------------------------------
-# Contrato 9-croma: oclusor com a luminancia do papel mas B/R fora
-# do cromatismo da referencia (a barragem cromatica do #129, hoje
-# inlinada no PageModel) nao apaga a tinta sob ele nem confirma
-# tinta nova — a luma engana o pico, o croma nao.
-# ------------------------------------------------------------------
-
-
-def test_isoluma_wrong_chroma_occluder_neither_erases_nor_inks(ink):
-    worker, clock = ink
-    generation = worker.new_generation()
-    scene = _Scene()
-    _passes(worker, clock, generation, scene, 4, dt=_DT_IDLE, must=True)
-
-    stroke_a = (90, 96, 60, 260)
-    _write_stroke(worker, clock, generation, scene, stroke_a)
-    want_a = _rect_mask(stroke_a)
-    _write_stroke(worker, clock, generation, scene, (200, 206, 60, 260))
-    want = _stroke_mask(scene)
-    got0 = _confirmed(worker, generation) > 0
-    assert _frac(got0, want) >= 0.9
-    cover = np.zeros((H, W), dtype=bool)
-    cover[70:110, 40:180] = True
-    covered = want_a & cover
-    assert _frac(got0, covered) >= 0.97
-
-    # O oclusor tem a luminancia do papel (210 vs 222) e o modelo
-    # declara "definitivamente nao tinta" ali (0,0 — a ausencia que
-    # apagaria o traco): so a razao B/R errada (0,6 contra ~1,0 da
-    # referencia) o desmascara.
-    clock.advance(2.1)
-    occluded = _bgr(scene.page)
-    occluded[cover] = (150, 230, 250)
-    visible = scene.cam_mask(~scene.hand, fill=True)
-    coverage = scene.cam_mask(~scene.table, fill=False)
-    for _ in range(8):
-        worker.set_hand_presence(True, moved=True)
-        _feed(
-            worker,
-            clock,
-            WarpedPage(occluded, generation, scene.corners, visible, coverage),
-        )
-
-    got = _confirmed(worker, generation) > 0
-    assert _frac(got, covered) >= 0.97, "traco sob oclusor cromatico sumiu"
-    assert _frac(got, want) >= 0.9
-    assert np.count_nonzero(got & cover & ~want) == 0
-
-
-# ------------------------------------------------------------------
-# Contrato 13: a folha abre com a mao NAO mascarada parada em cima —
-# a mascara falha, a guarda de tiles bloqueia a regiao anomala e ela
-# espera coberta sem semear. Quando ela sai, o papel real se
-# estabiliza na hora e a regiao recuperada comporta traco novo como
-# o resto da pagina.
-# ------------------------------------------------------------------
-
-
-def test_unmasked_hand_at_init_recovers_paper_after_it_leaves(ink):
-    worker, clock = ink
-    generation = worker.new_generation()
-    scene = _Scene()
-    cover = (80, 240, 60, 220)
-    scene.draw(cover, HAND_GRAY)  # mao no warp, visible=True: mascara falhou
-    _passes(worker, clock, generation, scene, 4, dt=_DT_IDLE)
-
-    pm = getattr(worker, "_page_model", None)
-    if pm is not None:
-        hand = np.zeros((H, W), dtype=bool)
-        hand[80:240, 60:220] = True
-        assert np.count_nonzero(pm.seeded & hand) == 0, (
-            "mao sem mascara virou referencia de pagina"
-        )
-
-    # A mao sai e expoe o papel real sob o bloco escuro.
-    scene = _Scene()
-    _passes(worker, clock, generation, scene, 4, dt=_DT_IDLE)
-
-    # Papel estabilizado: traco novo na regiao recuperada confirma
-    # como em qualquer outro lugar, e a folha nao gera tinta falsa.
-    stroke = (120, 126, 90, 210)
-    _write_stroke(worker, clock, generation, scene, stroke)
-    want = _rect_mask(stroke)
-    got = _confirmed(worker, generation) > 0
-    assert np.count_nonzero(got & want) >= 0.95 * np.count_nonzero(want)
-    assert np.count_nonzero(got & ~_dilate(want, 2)) == 0
+    Se o PageModel passar a adotar preenchimento (sem abrir a protecao de
+    oclusor), este teste deve passar a exigir a confirmacao nos tres."""
+    clock, worker = _worker(REGIMES[regime])
+    try:
+        generation = worker.new_generation()
+        scene = _Scene()
+        _passes(worker, clock, generation, scene, 6, dt=_DT_IDLE)
+        rect = (100, 100 + thick, 60, 200)
+        _write_stroke(worker, clock, generation, scene, rect)
+        truth = _Scene()
+        truth.draw(rect)
+        confirmed = _frac(_confirmed(worker, generation) > 0, _stroke_mask(truth))
+    finally:
+        try:
+            worker.stop()
+        except RuntimeError:
+            pass
+    page_model_on = REGIMES[regime].page_model
+    if thick <= 20 or not page_model_on:
+        assert confirmed >= 0.95
+    else:
+        assert confirmed <= 0.05

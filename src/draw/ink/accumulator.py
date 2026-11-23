@@ -144,8 +144,6 @@ class LayeredInkAccumulator:
                 # como uma passada sem mascara — nao apaga
                 # provisorio, nao conta retracao, nao vota contra.
                 valid_mask = None
-        # Sem mascara de visibilidade nao ha evidencia negativa
-        # confiavel — a passada nao a inventa.
         if paper_exposed is not None and not isinstance(
             paper_exposed, (bool, np.bool_)
         ):
@@ -256,11 +254,6 @@ class LayeredInkAccumulator:
             weak = confirmed_rule & ~strong & (mean >= cfg.t_low - eps)
             kept = hysteresis.keep_anchored(weak, strong | confirmed_before)
             confirmed_rule = strong | kept
-        if visible is not None:
-            # Votos antigos da janela nao confirmam o que esta coberto:
-            # um pixel recem-ocluso nao entra no canvas por evidencia
-            # de passadas anteriores.
-            confirmed_rule &= visible
         new_confirmed = confirmed_rule & ~confirmed_before
         new_confirmed_px = int(np.count_nonzero(new_confirmed))
         if new_confirmed_px:

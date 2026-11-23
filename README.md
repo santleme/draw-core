@@ -44,33 +44,61 @@ manylinux_2_28 binaries): Ubuntu 20.04+, Debian 11+, Fedora 34+ or WSL2 —
 older glibc releases cannot run the runtime.
 
 No flags selects the production preset (`InkConfig.production()` plus
-`PipelineConfig()` defaults): digital gain, strict vote `0.85`, the
-persistent PageModel baseline (which suppresses printed rulings and
-pre-existing content by itself), hysteresis, motion veto, `0.15 s` ink
-interval and Detect-Wake. `--source` selects the camera (`0` by
-default); `--ink-vote` and `--ink-interval` tune the numbers. Known
-trade-off: the strict vote thins strokes (it relies on the gain).
-`--legacy-ink` restores the pre-preset behaviour for
-comparison. Streaming still requires an explicit port and token file;
-model verification stays on.
+`PipelineConfig()` defaults): digital gain, strict vote `0.85`, ruling
+removal, hysteresis, motion veto, the PageModel (persistent page background), `0.15 s` ink interval and Detect-Wake.
+`--source` selects the camera (`0` by default); `--ink-vote` and
+`--ink-interval` tune the numbers. Known trade-offs: the strict vote thins
+strokes (it relies on the gain), and ruling removal can suppress fine pencil
+laid over printed lines (`--no-ink-ruling` turns just that off and keeps the
+PageModel). The PageModel does not confirm a solid dark fill thicker than about
+32 px (it reads as shadow); `--legacy-ink` does.
+`--legacy-ink` restores the pre-preset behaviour for comparison. Streaming
+still requires an explicit port and token file; model verification stays on.
 
 ```sh
-pip install -e ".[dev]"
+uv pip install -e ".[dev]"
 ruff check . && pytest -q
 ```
 
-For a quick local check, run the module's tests directly, then use Testmon for
-changes that can affect other modules.
+`draw-core` depends on `draw-dral` (`packages/draw-dral`: the DRAL ink
+wire plus the shared token handshake). Inside the repo, uv resolves it
+from the workspace via `[tool.uv.sources]` — plain `pip install -e .`
+cannot, since pip does not read that configuration. `draw-dral` is
+versioned together with `draw-core` (same version, same commit); an
+install straight from Git therefore pins both at the same SHA:
+
+```sh
+pip install \
+  "draw-dral @ git+https://github.com/santleme/draw-core@<SHA>#subdirectory=packages/draw-dral" \
+  "draw-core @ git+https://github.com/santleme/draw-core@<SHA>"
+```
+
+If `draw-dral` is later published to an index, plain `draw-core` resolves
+normally and these extra pins become unnecessary.
+
+Two notes for consumers that pin to a commit. First, a same-version pin
+(like `0.1.0` today) does not by itself upgrade an environment that
+already has the dist installed — pip may keep the existing copy. Update
+flows should reinstall both Git pins in one `pip install --force-reinstall`
+command or use a fresh venv; reinstalling only `draw-core` can make pip look
+for the unpublished `draw-dral` on an index. Second, drawlink only stops
+pulling `draw-core`'s heavy deps when it drops its remaining `draw.*` imports
+(`draw.config`, `draw.exporters`) — repointing the wire imports alone is not
+enough.
+
+For a quick local check, run the module's tests directly. For changes that can
+affect other modules, use the separate parallel and serialized Testmon lanes in
+`AGENTS.md`.
 
 ```sh
 pytest -q tests/test_sheet_tracker.py tests/test_tracker_loss_clock.py
-pytest -q --testmon -n 4
 ```
 
-Seed `.testmondata` with a serial `pytest -q --testmon` on a fresh worktree.
-To keep `slow` tests serial, add `--testmon-forceselect -m 'not slow'` to
-the parallel command and run `pytest -q -m slow` separately. Use
-`--testmon-forceselect` whenever combining impact selection with `-m`.
+Do not run an unfiltered `pytest --testmon -n 4`: it can send selected
+`slow`/`timing` tests to xdist and a shared Testmon data file can lose history
+for tests excluded by a marker filter. The lane setup and commands in
+`AGENTS.md` keep those histories separate and run the serialized lane without
+xdist.
 
 Run the corresponding tests directly for scripts and subprocess entry
 points, such as `tests/test_run_sh.py` after changing `run.sh` or

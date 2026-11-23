@@ -1120,9 +1120,7 @@ def test_main_sem_flags_usa_o_preset_de_producao(monkeypatch):
     assert pipeline.ink_auto_gain is True
     assert pipeline.detect_wake is True
     ink = pipeline.ink
-    assert ink.page_model and ink.hysteresis and ink.motion_veto
-    assert ink.page_model_novel_ratio == 0.30
-    assert ink.border_guard_px is None
+    assert ink.ruling_removal and ink.hysteresis and ink.motion_veto
     assert ink.pass_interval_s == 0.15
     assert ink.vote_score_strong > 1.9
 
@@ -1130,7 +1128,7 @@ def test_main_sem_flags_usa_o_preset_de_producao(monkeypatch):
 def test_main_legacy_ink_volta_ao_comportamento_anterior(monkeypatch):
     pipeline = _run_main(monkeypatch, "--legacy-ink")["pipeline_config"]
     assert pipeline == app_module.PipelineConfig(
-        ink=app_module.InkConfig(),
+        ink=app_module.InkConfig(paper_guard=False),
         ink_auto_gain=False,
         detect_wake=False,
     )
@@ -1148,7 +1146,7 @@ def test_main_ink_baseline_coexiste_com_legacy_e_preset(monkeypatch):
     ruled = _run_main(monkeypatch, "--preset", "ruled", "--ink-baseline")[
         "pipeline_config"
     ]
-    assert legacy.ink == dataclasses.replace(app_module.InkConfig(), page_model=True)
+    assert legacy.ink == app_module.InkConfig(paper_guard=False, page_model=True)
     assert ruled.ink == dataclasses.replace(
         app_module.InkConfig.production(), page_model=True
     )
@@ -1168,6 +1166,12 @@ def test_baseline_pronto_so_sem_area_pendente():
         "Pronto para desenhar",
         (0, 255, 0),
     )
+
+
+def test_main_no_ink_ruling_tira_so_a_pauta(monkeypatch):
+    pipeline = _run_main(monkeypatch, "--no-ink-ruling")["pipeline_config"]
+    assert pipeline.ink == app_module.InkConfig.production(ruling_removal=False)
+    assert pipeline.ink_auto_gain and pipeline.detect_wake
 
 
 def test_main_ink_vote_e_interval_ajustam_o_preset(monkeypatch):
@@ -1240,7 +1244,7 @@ def test_run_warns_when_spread_mode_has_no_neural_detector(
 
 def test_main_markers_sem_flags_usa_o_preset_legado(monkeypatch):
     pipeline = _run_main(monkeypatch, "--markers")["pipeline_config"]
-    assert pipeline.ink == app_module.InkConfig()
+    assert pipeline.ink == app_module.InkConfig(paper_guard=False)
     assert pipeline.ink_auto_gain is False and pipeline.detect_wake is False
 
 
@@ -1249,13 +1253,14 @@ def test_main_markers_sem_flags_usa_o_preset_legado(monkeypatch):
     [
         ["--markers", "--ink-vote", "0.85"],
         ["--markers", "--ink-interval", "0.15"],
+        ["--markers", "--no-ink-ruling"],
         ["--markers", "--legacy-ink"],
         ["--markers", "--ink-baseline"],
+        ["--legacy-ink", "--no-ink-ruling"],
         ["--ink-interval", "0"],
         ["--ink-vote", "1.5"],
         ["--ink-gain"],
         ["--ink-ruling"],
-        ["--no-ink-ruling"],
         ["--ink-hysteresis"],
         ["--ink-motion-veto"],
         ["--detect-wake"],
@@ -1268,3 +1273,25 @@ def test_main_combinacoes_e_flags_removidas_saem_com_2(monkeypatch, argv):
     with pytest.raises(SystemExit) as error:
         app_module.main()
     assert error.value.code == 2
+
+
+def test_legacy_ink_live_and_parity_replay_share_one_ink_config(monkeypatch):
+    """`--legacy-ink` ao vivo e o replay de paridade comparam contra o MESMO
+    laco legado (sem a guarda de papel #129): uma unica definicao
+    (InkConfig.legacy_loop). Se um dos dois voltar a montar a sua propria
+    config, a comparacao deixa de validar o que o usuario roda."""
+    from lab.parity_e2e import legacy_pipeline_config
+
+    live = _run_main(monkeypatch, "--legacy-ink")["pipeline_config"]
+    replay = legacy_pipeline_config()
+    assert live.ink == replay.ink == app_module.InkConfig.legacy_loop()
+    assert live.ink.paper_guard is False
+
+
+def test_no_ink_ruling_keeps_the_page_model_on(monkeypatch):
+    """O override documentado segue valendo com o preset de producao e tira
+    SO a pauta: o PageModel (e as guardas) continuam ligados."""
+    ink = _run_main(monkeypatch, "--no-ink-ruling")["pipeline_config"].ink
+    assert ink.ruling_removal is False
+    assert ink.page_model is True
+    assert ink.paper_guard is True

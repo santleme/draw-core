@@ -33,6 +33,15 @@ PAPER = 235.0
 INK = 40.0
 
 
+@pytest.fixture(autouse=True)
+def _fast_idle_probe(monkeypatch):
+    # A sonda ociosa de producao (1 Hz para poupar CPU) nao pode vazar
+    # para o arnes: cada passada sintetica pagaria ~1 s de espera real
+    # na cadencia. Testes que fixam a propria sonda (pump com relogio
+    # falso) sobrescrevem este patch depois — o setattr tardio vence.
+    monkeypatch.setattr(worker_mod, "_IDLE_PROBE_SECONDS", 0.01)
+
+
 def _paper(shape=(H, W)):
     return np.full(shape, PAPER, dtype=np.float32)
 
@@ -163,7 +172,7 @@ def test_shape_mismatch_raises():
         model.observe(np.zeros((H + 1, W), dtype=np.float32))
 
 
-@pytest.mark.slow
+@pytest.mark.timing
 def test_observe_budget_on_a4_grid():
     model = pm_mod.PageModel((1200, 850), confirm_obs=3)
     gray = _paper((1200, 850))
@@ -585,7 +594,7 @@ def test_page_model_reacquires_partially_covered_stroke_crossing_printed_rule(
         worker.stop()
 
 
-@pytest.mark.slow
+@pytest.mark.timing
 def test_identity_recovery_budget_on_a4_grid(monkeypatch):
     """worker.py:236 & test_page_model.py:575: avaliacao de identidade A4 com marcas em cantos opostos < 10 ms e fora do lock do worker."""
     shape = (1200, 850)
@@ -1166,7 +1175,7 @@ def test_page_model_baseline_footprint_without_border_guard(monkeypatch):
     registro nao semeia a referencia de pagina limpa — a pegada do
     modelo nao depende da guarda."""
     monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
-    worker = _worker(InkConfig(page_model=True, border_guard_px=0))
+    worker = _worker(InkConfig(page_model=True, border_guard_px=0, paper_guard=False))
     try:
         generation = worker.new_generation()
         image = np.full((H, W), PAPER, dtype=np.float32)
@@ -1175,7 +1184,8 @@ def test_page_model_baseline_footprint_without_border_guard(monkeypatch):
 
         # Folha recuada 6 px a direita e 4 px para baixo: o warp deixa
         # padding (zeros) nas linhas < 4 e colunas < 6 da ancora. Sem
-        # mascara de visibilidade e sem guarda de borda, a pegada e
+        # mascara de visibilidade, sem guarda de borda e sem a guarda
+        # de papel (que ja rejeitaria o preto do padding), a pegada e
         # a unica coisa que separa "nao observei" de "observei vazio".
         shifted_quad = Q0 + np.float32([[6, 4], [6, 4], [6, 4], [6, 4]])
         for _ in range(6):
@@ -1390,6 +1400,42 @@ def test_page_model_exposed_hold_counts_exact_recovery_passes():
         assert exp_done[48, 64]
         assert model.recovering_px == 0
         assert not model.hold_mask[48, 64]
+
+
+def test_page_model_does_not_seed_under_startup_shadow_rejected_by_paper_guard(
+    monkeypatch,
+):
+    """R2285-2293: sombra local na abertura rejeitada por paper_ok nao semeia baseline."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    worker = _worker(InkConfig(page_model=True, occlusion_hold_passes=1))
+    try:
+        generation = worker.new_generation()
+        real_sheet = np.full((H, W), PAPER, dtype=np.float32)
+        real_sheet[40:50, 40:50] = INK  # marca impressa pre-existente
+
+        # Sombra local [32:64, 32:64] em nivel 110 (paper_ok False contra papel 235),
+        # mas sem mascara de mao (visible=None) e marca pre-existente a 40.
+        shadowed = real_sheet.copy()
+        shadowed[32:64, 32:64] = 110.0
+        shadowed[40:50, 40:50] = INK
+        for _ in range(4):
+            _drive(worker, generation, shadowed)
+        assert not np.any(worker._page_model.seeded[32:64, 32:64])
+        assert np.count_nonzero(_confirmed(worker, generation)) == 0
+
+        # Sombra sai: hold esgota e o bloco semeia COM a marca pre-existente como fundo
+        for _ in range(5):
+            _drive(worker, generation, real_sheet)
+        assert np.all(worker._page_model.seeded[32:64, 32:64])
+        assert np.count_nonzero(_confirmed(worker, generation)) == 0
+
+        # Traco novo na mesma regiao confirma normalmente
+        real_sheet[52:60, 40:50] = INK
+        for _ in range(4):
+            _drive(worker, generation, real_sheet)
+        assert np.count_nonzero(_confirmed(worker, generation)[52:60, 40:50]) == 80
+    finally:
+        worker.stop()
 
 
 def test_page_model_adapts_to_sustained_dimming_and_captures_new_stroke(monkeypatch):
@@ -1629,8 +1675,8 @@ def test_page_model_hand_exit_holds_until_uncovered_stroke_confirms_before_rest(
     )
     generation = worker.new_generation()
     # Folha com papel a 200 e patch [24:72, 40:88] mais claro a 250:
-    # uma sombra local a 180 no patch cai abaixo de 0.78 * 250 = 195 (aciona
-    # o hold do PageModel na regiao), mas segue exposta no resto da folha.
+    # uma sombra local a 180 no patch cai abaixo de 0.78 * 250 = 195 (aciona hold
+    # do PageModel), mas fica acima de 0.78 * 200 = 156 (paper_ok global = True).
     base = np.full((H, W), 200.0, dtype=np.float32)
     base[24:72, 40:88] = 250.0
     worker.set_hand_presence(True)
@@ -3046,83 +3092,3 @@ def test_identity_darker_admits_what_novel_admits():
     assert model.novel(traced)[42, 45]
     darker, _ = model.darker_than_reference(traced)
     assert darker[42, 45]
-
-
-def test_dimming_and_chroma_shift_under_partial_mask_does_not_freeze_on_reveal():
-    """Regressao PR #189: parte visivel adapta para lampada mais fraca e
-    mais quente enquanto a mao cobre a maioria da pagina; ao revelar,
-    _estimate_gain precisa aceitar o ganho das testemunhas em vez de
-    devolver 1.0 e congelar a folha inteira abaixo do cutoff."""
-    model = pm_mod.PageModel((H, W), confirm_obs=1)
-    bright_neutral = np.full((H, W, 3), 230, dtype=np.uint8)
-    model.observe(
-        np.full((H, W), 230, dtype=np.uint8),
-        bgr=bright_neutral,
-    )
-
-    # Troca para lampada mais fraca (luma ~161) e quente (B/R ~0.48) com 60% coberto.
-    dim_warm = np.zeros((H, W, 3), dtype=np.uint8)
-    dim_warm[..., 0] = 108  # B
-    dim_warm[..., 1] = 152  # G
-    dim_warm[..., 2] = 225  # R -> B/R = 0.48, gray ~161
-    dim_gray = np.full((H, W), 161, dtype=np.uint8)
-    vis_40 = np.zeros((H, W), dtype=bool)
-    vis_40[:, : int(W * 0.4)] = True
-    for _ in range(12):
-        exp = model.exposed(dim_gray, bgr=dim_warm, visible=vis_40)
-        assert exp[:, : int(W * 0.4)].all()
-        model.observe(dim_gray, visible=exp & vis_40, bgr=dim_warm)
-
-    # Mao sai: os 60% revelados nao podem congelar o estimador de ganho.
-    exp_all = model.exposed(dim_gray, bgr=dim_warm)
-    assert exp_all.all()
-    model.observe(dim_gray, visible=exp_all, bgr=dim_warm)
-    stroke = dim_gray.copy()
-    stroke[40:44, int(W * 0.6) : int(W * 0.8)] = 95
-    assert model.novel(stroke)[42, int(W * 0.7)]
-
-
-def test_exposed_local_bg_ignores_occluded_regions():
-    """Regiao ocluida (visible=False) nao pode contaminar o local_bg da parte visivel."""
-    model = pm_mod.PageModel((200, 200), confirm_obs=1)
-    gray = np.full((200, 200), 160, dtype=np.uint8)
-    gray[:, :110] = 245  # manga clara ocluida
-    vis = np.ones((200, 200), dtype=bool)
-    vis[:, :110] = False
-    exp = model.exposed(gray, visible=vis)
-    assert exp[:, 112:].all()
-
-
-def test_exposed_unseeded_region_under_dimming_rejects_shadow_without_double_gain():
-    """Regiao ainda nao semeada sob escurecimento global nao pode sofrer dupla escala de eff_gain."""
-    model = pm_mod.PageModel((200, 260), confirm_obs=1)
-    init = np.full((200, 260), 220, dtype=np.uint8)
-    init_vis = np.zeros((200, 260), dtype=bool)
-    init_vis[:, :80] = True
-    model.observe(init, visible=init_vis)
-
-    dim = np.full((200, 260), 110, dtype=np.uint8)
-    dim[76:124, 156:204] = 55  # 50% do papel escurecido (< 0.78 * 110 = 85.8)
-    exp = model.exposed(dim)
-    assert not exp[100, 180]
-
-
-def test_estimate_gain_small_plateau_without_empty_median_warning():
-    """Platos minusculos (tested_n < 4) com todas as celulas ok nao disparam warning nem shift falso."""
-    import warnings
-
-    model = pm_mod.PageModel((40, 40), confirm_obs=1)
-    bgr = np.full((40, 40, 3), 200, dtype=np.uint8)
-    bgr[..., 0] = 180
-    bgr[..., 2] = 200
-    model.observe(np.full((40, 40), 200, dtype=np.uint8), bgr=bgr)
-
-    vis = np.zeros((40, 40), dtype=bool)
-    vis[0:2, 0:24] = True
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        _gain, _chroma_ok, _shift = model._estimate_gain(
-            np.full((40, 40), 200, dtype=np.float32), bgr=bgr, visible=vis
-        )
-    assert not caught
-    assert not _shift

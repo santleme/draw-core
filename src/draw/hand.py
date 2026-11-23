@@ -75,6 +75,14 @@ _HOLD_FRAMES = 3
 # at landmark level by _retain.
 _MASK_HOLD_FRAMES = 3
 _MASK_HOLD_GROW_PX = 10
+# Por modo de deteccao: (atributo do landmarker publicado, flag de
+# indisponivel, RunningMode, avisa na falha). O VIDEO nao avisa: a
+# falha dele degrada para o IMAGE e a mascara segue viva; so a falha
+# do IMAGE, o modo final, anuncia a indisponibilidade.
+_LANDMARKER_MODES = {
+    "image": ("_landmarker", "_unavailable", "IMAGE", True),
+    "video": ("_video_landmarker", "_video_unavailable", "VIDEO", False),
+}
 
 
 def _resolve_model_path(model_path):
@@ -253,10 +261,7 @@ class HandMasker:
                 "acumulativo roda sem ela."
             )
 
-    def _create_landmarker(self, running_mode):
-        path = _resolve_model_path(self._requested_path)
-        if path is None or not Path(path).exists():
-            return None
+    def _create_landmarker(self, running_mode, path):
         try:
             import mediapipe as mp
 
@@ -272,40 +277,8 @@ class HandMasker:
         except Exception:
             return None
 
-    def _ensure(self):
-        with self._lock:
-            if self._landmarker is not None:
-                return True
-            if self._unavailable:
-                return False
-            path = _resolve_model_path(self._requested_path)
-            if path is None or not Path(path).exists():
-                self._unavailable = True
-                self._warn_once()
-                return False
-            try:
-                import mediapipe as mp
-            except Exception:
-                self._unavailable = True
-                self._warn_once()
-                return False
-            created = self._create_landmarker(mp.tasks.vision.RunningMode.IMAGE)
-            if created is None:
-                self._unavailable = True
-                self._warn_once()
-                return False
-            if self._closed:
-                # O close() correu sem o lock enquanto a criacao
-                # estava em voo: o recem-criado nao se publica —
-                # fecha ja.
-                self._dispose_fresh(created)
-                self._unavailable = True
-                return False
-            self._landmarker = created
-            return True
-
-    def _ensure_video(self):
-        """Landmarker em modo VIDEO, criado sob demanda.
+    def _ensure(self, kind="image"):
+        """Garante o landmarker (IMAGE ou VIDEO) sob demanda.
 
         O modo VIDEO do MediaPipe rastreia a mao entre quadros e
         pula a deteccao de palma enquanto ela esta localizada —
@@ -314,31 +287,40 @@ class HandMasker:
         detectar marca o modo como indisponivel e a presenca cai
         para o IMAGE permanentemente: degradacao, nunca erro.
         """
+        landmarker_attr, unavailable_attr, mode_name, warn = _LANDMARKER_MODES[kind]
         with self._lock:
-            if self._video_landmarker is not None:
+            if getattr(self, landmarker_attr) is not None:
                 return True
-            if self._video_unavailable:
+            if getattr(self, unavailable_attr):
                 return False
+
+            def _fail():
+                setattr(self, unavailable_attr, True)
+                if warn:
+                    self._warn_once()
+                return False
+
             path = _resolve_model_path(self._requested_path)
             if path is None or not Path(path).exists():
-                self._video_unavailable = True
-                return False
+                return _fail()
             try:
                 import mediapipe as mp
             except Exception:
-                self._video_unavailable = True
-                return False
-            created = self._create_landmarker(mp.tasks.vision.RunningMode.VIDEO)
+                return _fail()
+            created = self._create_landmarker(
+                getattr(mp.tasks.vision.RunningMode, mode_name),
+                path,
+            )
             if created is None:
-                self._video_unavailable = True
-                return False
+                return _fail()
             if self._closed:
-                # Mesma corrida do _ensure: criacao que termina
-                # depois do close() descarta o recem-criado.
+                # O close() correu sem o lock enquanto a criacao
+                # estava em voo: o recem-criado nao se publica —
+                # fecha ja.
                 self._dispose_fresh(created)
-                self._video_unavailable = True
+                setattr(self, unavailable_attr, True)
                 return False
-            self._video_landmarker = created
+            setattr(self, landmarker_attr, created)
             return True
 
     def _landmarks(self, frame, max_width=None, timestamp_ms=None):
@@ -402,8 +384,8 @@ class HandMasker:
 
     def _landmarks_locked(self, frame, max_width, timestamp_ms):
         """O corpo de _landmarks, rodando sob o lock do masker."""
-        use_video = timestamp_ms is not None and self._ensure_video()
-        if not use_video and not self._ensure():
+        use_video = timestamp_ms is not None and self._ensure("video")
+        if not use_video and not self._ensure("image"):
             return None
         import mediapipe as mp
 
@@ -439,7 +421,7 @@ class HandMasker:
                         pass
                 result = None
         if result is None:
-            if not self._ensure():
+            if not self._ensure("image"):
                 return None
             try:
                 result = self._landmarker.detect(image)

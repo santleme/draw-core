@@ -1,7 +1,7 @@
 # Migration spec: santleme/draw -> draw-core
 
-Status: draft for review. Legacy repo: `santleme/draw` (kept intact as the
-historical lab; tag `legacy-final` marks the last state).
+Status: executed — kept as the rules record. Legacy repo: `santleme/draw`
+(kept intact as the historical lab; tag `legacy-final` marks the last state).
 
 ## Goal
 
@@ -12,8 +12,9 @@ that the hot path can later move to C++ without touching the rest.
 ## Rules for what gets copied
 
 1. **Runtime imports no training stack.** `src/draw/` depends only on
-   `numpy`, `opencv-python-headless`, `onnxruntime` (+ optional
-   `mediapipe` extra). No `torch`, no `pandas`.
+   `numpy`, `opencv-contrib-python-headless`, `onnxruntime` (+ optional
+   `mediapipe` extra), plus first-party workspace packages under
+   `packages/` (currently `draw-dral`). No `torch`, no `pandas`.
 2. **Stages end on `contracts.py` dataclasses.** The final stage
    boundary is the frozen dataclasses, with no loose dicts or
    positional tuples between modules. During the migration each
@@ -39,20 +40,23 @@ draw-core/
 ├── pyproject.toml
 ├── assets/manifest.json        # sha256 of production models (not the binaries)
 ├── src/draw/
-│   ├── contracts.py            # FramePacket, SheetQuad, InkState, PageIdentity
-│   ├── infra/                  # safe_io, manifest verification, config, telemetry
+│   ├── contracts.py            # ~18 frozen dataclasses for stage boundaries
+│   ├── infra/                  # safe_io, manifest verification, session_report, telemetry
 │   ├── camera.py               # capture + latest-wins queue + FPS control
 │   ├── perception.py           # ONNX sessions (sheet + ink), unified preprocess
 │   ├── geometry.py             # corner fit, warp, optional ECC refine
 │   ├── tracker.py              # SheetTracker + F-11 page identity state machine
-│   ├── accumulator.py          # confirmed/provisional ink, votes, registration
+│   ├── ink/                    # accumulator, votes, registration, page_model, worker, ...
 │   ├── hand.py                 # optional hand presence/occlusion
-│   ├── exporters.py            # SVG, DXF (locked scale), CAD bridge
+│   ├── exporters/              # export_vectors + vectorize (SVG, DXF locked scale)
 │   └── pipeline.py             # frame -> events orchestration (threads)
+├── packages/draw-dral/         # DRAL wire + shared token handshake (uv workspace member)
 ├── lab/                        # replay, simulator, judges (not runtime)
 ├── bridge/                     # Windows camera helper
 └── tests/
 ```
+
+The tree is a sketch — see `src/draw/` for the current module set.
 
 The React `site/` and the research articles it publishes (`docs/research/`)
 were extracted to a separate repo, `GUZZBR1/-draw-site-` (#165, #166).
@@ -61,7 +65,13 @@ Separate repo `draw-training` (not created yet): `training/`, dataset
 tools, labeling, Kaggle runner, `draw/selflearn/`, `gpu_augmenter.py`.
 It delivers only approved `.onnx` files + hashes to `assets/manifest.json`.
 
-## Contracts (first sketch, to be refined in the contracts PR)
+## Contracts
+
+`contracts.py` holds ~18 frozen dataclasses today; the original sketch
+covered the stage boundaries below. `Config` never became a contract:
+settings resolve to `PipelineConfig` (`settings.py`) + `InkConfig`
+(`ink/config.py`) — replacing the scattered `os.environ.get` reads
+(legacy has ~40 `DRAW_*` reads).
 
 - `FramePacket`: image (H,W,3 uint8), monotonic timestamp, sequence id.
 - `SheetQuad`: 4x2 float32 corners in camera space, confidence,
@@ -69,8 +79,6 @@ It delivers only approved `.onnx` files + hashes to `assets/manifest.json`.
 - `PageIdentity`: generation id, decision (`same` / `new_page` / `defer`),
   recall/containment evidence.
 - `InkState`: confirmed mask, provisional mask, generation id, anchor corners.
-- `Config`: immutable settings resolved once from env/CLI (replaces scattered
-  `os.environ.get` calls; legacy has ~40 `DRAW_*` reads).
 
 ## Legacy inventory
 
@@ -82,7 +90,7 @@ It delivers only approved `.onnx` files + hashes to `assets/manifest.json`.
 | `draw/sheet_track.py` | migrate | `tracker.py` |
 | `draw/capture.py` | migrate | `camera.py` |
 | `draw/paper.py`, `page_clean.py`, `view.py`, `lk_propagate.py` | migrate | engine |
-| `draw/hand.py`, `hand_presence.py` | migrate | `hand.py` (mediapipe extra) |
+| `draw/hand.py`, `hand_presence.py` | migrate | `hand.py` + `hand_presence.py` (mediapipe extra) |
 | `draw/manifest.py`, `safe_io.py`, `config.py`, `telemetry.py`, `net_policy.py`, `session_report.py` | migrate | `infra/` |
 | `draw/ink.py` | migrate `render_canvas` only; drop legacy ink stack | see section below |
 | `draw/fusion.py` | not runtime | `lab/` or archive |
@@ -93,7 +101,7 @@ It delivers only approved `.onnx` files + hashes to `assets/manifest.json`.
 | `training/` | archive | `draw-training` |
 | `bridge/` | migrate | same name (monorepo) |
 | `site/` + `docs/research/` | extracted | own repo `GUZZBR1/-draw-site-` |
-| `docs/` | keep README, SIMULATOR, SETUP_WINDOWS, a trimmed FALHAS | dated pre-registrations stay in legacy |
+| `docs/` | keep spec, SIMULATOR, CHANNELS, CORPUS, dated reviews | SETUP_WINDOWS/FALHAS stayed in legacy |
 
 Tests: ~60 module tests migrate with their module; sim/judge/replay tests go
 to `lab/`; training and selflearn tests go to `draw-training`; pre-registration
@@ -115,10 +123,13 @@ and doc-lint tests stay in legacy.
 
 ## Production models (assets/manifest.json)
 
-Source of truth is the legacy manifest at `1fa3d76+3`:
-sheet detector T16 `5e20a89f...`, page-clean v6 `613e250f...`, MediaPipe
-hand landmarker (unmodified, Apache-2.0). Former production (`e20a89f0`,
-`a470bd28`) is recorded only as rollback references.
+`assets/manifest.json` is the source of truth (sha256 + bytes verified
+at load; binaries ship via GitHub Release `models-v3`). Current set:
+sheet detector `draw_seg_v3_dyn.onnx` `5e2c611f...` (T16, 2026-11-13),
+page-clean `page_clean_unet.onnx` `8359ff03...` (round-v2 INT8 QDQ,
+2026-11-20), MediaPipe hand landmarker (unmodified, Apache-2.0).
+Rollback references: `e20a89f0` (kept as `.bak`), fp32 `22a883f5`
+(models-v2 release).
 
 ## Flags policy
 
@@ -272,29 +283,26 @@ or by the migration). Parity runs must account for them.
   quads with a rolled anchor and never rested).
 - Pipeline: the detector's hand mask feeds `seg_hand_occlusion` regardless
   of `coverage` (legacy tied both detection extras to the same flag).
-- Ink worker: photometric occlusion guard (issue #129), now two always-on
-  mechanisms. The `PageModel` keeps `pm.exposed` active whenever the model
-  is on: regions that do not look like exposed paper (dark/chromatic block
-  versus the persistent page reference) are frozen like an occlusion — no
-  removal of confirmed ink, no new votes, provisional layer held — for
-  `occlusion_hold_passes` passes after the evidence disappears. Alongside
-  it the per-tile `PaperExposureGuard` (`draw.ink.occlusion`, unconditional)
-  keeps a stateful paper reference (luma + chroma + local texture, only
-  refreshed upward): an anomalous tile withholds removal evidence, a
-  connected 3x3-tile block also vetoes new votes, and a paper-colored
-  occluder whose texture or new ink-like marks differ from the learned
-  tile fails the same way — hand or shadow without a MediaPipe mask can
-  no longer erase confirmed ink or stamp phantom strokes. Global
+- Ink worker: photometric occlusion guard (`InkConfig.paper_guard`, issue
+  #129). A stateful per-tile paper reference (luma + chroma + local
+  texture, only refreshed upward) marks regions that do not look like
+  exposed paper — a paper-colored occluder whose texture or new ink-like
+  marks differ from the learned tile also withholds removal evidence:
+  any anomalous tile withholds removal evidence, and a connected 3x3-tile
+  block also vetoes new votes — hand or shadow without a MediaPipe mask
+  can no longer erase confirmed ink or stamp phantom strokes. Global
   illumination shifts are absorbed as reference scaling above an absolute
   paper-luminance floor, so a covered lens or lights-out still fails
-  closed. A dark fill that the ink model reads as ink for several passes
-  is adopted (fill recovery), tiles leaving anomaly hold a short recovery
-  window so the worker stays awake until the revealed ink votes, and
-  covered-but-unseeded pixels hold for `unseeded_hold_passes` passes
-  (`PageModel.covered_unseeded`) before counting toward readiness.
-  Independent of MediaPipe. Limitation: a solid dark fill wider than
-  ~32 px reads as shadow to `pm.exposed` (thin and thick pen strokes do
-  not).
+  closed. On the vote path, a dark fill that the ink model reads as ink for
+  several passes is adopted (fill recovery), and tiles leaving anomaly hold a
+  short recovery window so the worker stays awake until the revealed ink
+  votes. With the PageModel on (the production preset), `pm.exposed` also
+  gates the vote and has no adoption: it takes the maximum per 32 px window,
+  so a solid dark fill thicker than the window reads as shadow and is NOT
+  confirmed (measured: 20 px confirms, 34 px and up does not; the vote path
+  confirms both). Known limit of the preset, pinned by
+  `test_thick_solid_fill_is_confirmed_by_votes_but_not_by_the_page_model`.
+  Independent of MediaPipe.
 - Pipeline: with `canvas_persist` off, a tracker drop also clears the
   rendered canvas and the provisional layer (legacy cleared only the
   confirmed mask). Neither change alters the production preset.
@@ -327,8 +335,9 @@ or by the migration). Parity runs must account for them.
 
 ## Open questions
 
-- Release hosting for model binaries (Release in this repo vs legacy
-  `models-2026-11-06`)?
-- Rights for the sailor-moon image before it enters the site.
+- ~~Release hosting for model binaries~~ — resolved: GitHub Release
+  `models-v3` in this repo.
+- ~~Rights for the sailor-moon image~~ — moot: the site left this repo
+  (#165, #166).
 - Confirm Tier A matches what is run at the desk today (the repo evidence says
   yes; only the owner can confirm).
