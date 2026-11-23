@@ -44,8 +44,16 @@ class SessionReport:
         write_interval=15.0,
         now=time.monotonic,
     ):
+        """O cabecalho precisa de "inicio_epoch" (epoch do inicio).
+
+        A validacao acontece na construcao: header sem a chave
+        (KeyError) ou com valor nao numerico (TypeError/ValueError)
+        estoura na cara do chamador, nao dentro da thread daemon onde
+        morreria em silencio.
+        """
         self._directory = Path(directory)
         self._header = dict(header)
+        self._header["inicio_epoch"] = float(self._header["inicio_epoch"])
         self._sample_interval = float(sample_interval)
         self._write_interval = float(write_interval)
         self._now = now
@@ -101,63 +109,68 @@ class SessionReport:
             self._latest.update(fields)
 
     def _sample_once(self):
+        # A dobra inteira fica sob o cadeado: os agregados e o retrato
+        # andam juntos, e summary() le um conjunto consistente.
         with self._lock:
             record = dict(self._latest)
-        elapsed = self._now() - self._started_at
-        self._samples += 1
-        present = bool(record.get("sheet_present"))
-        if present:
-            self._sheet_samples += 1
-            if self._first_sheet_s is None:
-                self._first_sheet_s = round(elapsed, 1)
-        elif self._previous_sheet:
-            self._drops += 1
-        self._previous_sheet = present
-        state = record.get("state")
-        if state is not None:
-            self._states[state] = self._states.get(state, 0) + 1
-        mode = record.get("worker_mode")
-        if mode is not None:
-            self._worker_modes[mode] = self._worker_modes.get(mode, 0) + 1
-        if record.get("hand_present"):
-            self._hand_samples += 1
-        for key in ("loop_fps", "detect_ms", "pass_ms"):
-            value = record.get(key)
-            if isinstance(value, (int, float)):
-                self._sums[key] = self._sums.get(key, 0.0) + value
-                self._counts[key] = self._counts.get(key, 0) + 1
-                self._maxes[key] = max(self._maxes.get(key, value), value)
+            elapsed = self._now() - self._started_at
+            self._samples += 1
+            present = bool(record.get("sheet_present"))
+            if present:
+                self._sheet_samples += 1
+                if self._first_sheet_s is None:
+                    self._first_sheet_s = round(elapsed, 1)
+            elif self._previous_sheet:
+                self._drops += 1
+            self._previous_sheet = present
+            state = record.get("state")
+            if state is not None:
+                self._states[state] = self._states.get(state, 0) + 1
+            mode = record.get("worker_mode")
+            if mode is not None:
+                self._worker_modes[mode] = self._worker_modes.get(mode, 0) + 1
+            if record.get("hand_present"):
+                self._hand_samples += 1
+            for key in ("loop_fps", "detect_ms", "pass_ms"):
+                value = record.get(key)
+                if isinstance(value, (int, float)):
+                    self._sums[key] = self._sums.get(key, 0.0) + value
+                    self._counts[key] = self._counts.get(key, 0) + 1
+                    self._maxes[key] = max(self._maxes.get(key, value), value)
 
     def summary(self):
         def mean(key):
             count = self._counts.get(key, 0)
             return round(self._sums[key] / count, 2) if count else None
 
-        total = self._samples
-        return {
-            **self._header,
-            "duracao_s": (
-                round(self._now() - self._started_at, 1)
-                if self._started_at is not None
-                else None
-            ),
-            "amostras_s": total,
-            "folha_presente_pct": (
-                round(100.0 * self._sheet_samples / total, 1) if total else None
-            ),
-            "primeira_folha_s": self._first_sheet_s,
-            "quedas_de_folha": self._drops,
-            "estados": dict(self._states),
-            "modos_worker": dict(self._worker_modes),
-            "mao_presente_pct": (
-                round(100.0 * self._hand_samples / total, 1) if total else None
-            ),
-            "loop_fps_medio": mean("loop_fps"),
-            "detect_ms_medio": mean("detect_ms"),
-            "detect_ms_max": self._maxes.get("detect_ms"),
-            "pass_ms_medio": mean("pass_ms"),
-            "pass_ms_max": self._maxes.get("pass_ms"),
-        }
+        # Leitura sob cadeado: sem ele, uma amostra em voo podia
+        # mudar os dicts de agregados durante a montagem do resumo.
+        with self._lock:
+            total = self._samples
+            return {
+                **self._header,
+                "duracao_s": (
+                    round(self._now() - self._started_at, 1)
+                    if self._started_at is not None
+                    else None
+                ),
+                "amostras_s": total,
+                "folha_presente_pct": (
+                    round(100.0 * self._sheet_samples / total, 1) if total else None
+                ),
+                "primeira_folha_s": self._first_sheet_s,
+                "quedas_de_folha": self._drops,
+                "estados": dict(self._states),
+                "modos_worker": dict(self._worker_modes),
+                "mao_presente_pct": (
+                    round(100.0 * self._hand_samples / total, 1) if total else None
+                ),
+                "loop_fps_medio": mean("loop_fps"),
+                "detect_ms_medio": mean("detect_ms"),
+                "detect_ms_max": self._maxes.get("detect_ms"),
+                "pass_ms_medio": mean("pass_ms"),
+                "pass_ms_max": self._maxes.get("pass_ms"),
+            }
 
     def _write(self):
         try:
@@ -184,21 +197,30 @@ class SessionReport:
                     tmp.unlink(missing_ok=True)
                     latest_tmp.unlink(missing_ok=True)
                     raise
-        except OSError as error:
-            self._error = error
+        except Exception as error:  # noqa: BLE001 - vai para o laco
+            with self._lock:
+                self._error = error
 
     def _run(self):
         since_write = 0.0
-        while not self._stopped.wait(self._sample_interval):
-            self._sample_once()
-            since_write += self._sample_interval
-            if since_write >= self._write_interval:
-                since_write = 0.0
-                self._write()
+        try:
+            while not self._stopped.wait(self._sample_interval):
+                self._sample_once()
+                since_write += self._sample_interval
+                if since_write >= self._write_interval:
+                    since_write = 0.0
+                    self._write()
+        except Exception as error:  # noqa: BLE001 - vai para o laco
+            # A thread daemon nao pode morrer em silencio: a excecao
+            # que a parou fica visivel na propriedade error.
+            with self._lock:
+                self._error = error
 
     @property
     def error(self):
-        return self._error
+        """A excecao que parou o escritor, ou None."""
+        with self._lock:
+            return self._error
 
     def close(self):
         self._stopped.set()

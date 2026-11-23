@@ -1,6 +1,9 @@
 """Relatorio de sessao: agregados e escrita do JSON por corrida."""
 
 import json
+import threading
+
+import pytest
 
 from draw.infra import session_report as report_module
 
@@ -185,3 +188,89 @@ def test_concurrent_path_readers_publish_one_name(tmp_path, monkeypatch):
     assert not t1.is_alive() and not t2.is_alive()
     assert seen["first"] is seen["second"]
     assert seen["first"] == report.path
+
+
+def test_header_requires_inicio_epoch(tmp_path):
+    """Sem o epoch do inicio o nome do arquivo nao sai: o KeyError tem
+    de estourar na construcao, nao dentro da thread daemon, onde
+    morreria sem deixar rastro."""
+    with pytest.raises(KeyError):
+        report_module.SessionReport(tmp_path / "session-reports", {"fonte": "0"})
+
+
+@pytest.mark.parametrize("bad", ["ontem", object()])
+def test_header_rejects_non_numeric_inicio_epoch(tmp_path, bad):
+    with pytest.raises((TypeError, ValueError)):
+        report_module.SessionReport(tmp_path / "session-reports", {"inicio_epoch": bad})
+
+
+def test_unserializable_field_surfaces_as_error(tmp_path):
+    """Um valor que json.dumps recusa (TypeError, nao OSError) parava
+    o escritor sem deixar rastro: agora fica visivel em .error."""
+    clock = _Clock()
+    report = _make(tmp_path, clock)
+    report.update(state=object())  # vira chave do histograma no resumo
+    report._sample_once()
+    report._write()
+    assert isinstance(report.error, TypeError)
+    assert not report.path.exists()
+
+
+def test_writer_loop_failure_surfaces_on_error(tmp_path, monkeypatch):
+    """Excecao fora do _write (no laco da thread) tambem nao pode
+    morrer em silencio."""
+    clock = _Clock()
+    report = _make(tmp_path, clock)
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("wait quebrado")
+
+    monkeypatch.setattr(report._stopped, "wait", fail)
+    report._run()  # nao propaga: a excecao vira report.error
+    assert isinstance(report.error, RuntimeError)
+
+
+def test_summary_waits_for_in_flight_sample(tmp_path, monkeypatch):
+    """summary() le os agregados sob o mesmo cadeado de _sample_once:
+    com uma amostra no ar, o resumo espera em vez de montar um
+    retrato pela metade (dicts mudando durante a leitura)."""
+    clock = _Clock()
+    report = _make(tmp_path, clock)
+    report.update(state="sheet", sheet_present=True)
+
+    sample_holding_lock = threading.Event()
+    release_sample = threading.Event()
+    summary_done = threading.Event()
+    blocked_once = []
+
+    def gated_now():
+        # Trava uma unica vez, ja dentro do cadeado de _sample_once.
+        if not blocked_once:
+            blocked_once.append(True)
+            sample_holding_lock.set()
+            release_sample.wait(timeout=5.0)
+        return clock()
+
+    monkeypatch.setattr(report, "_now", gated_now)
+
+    sampler = threading.Thread(target=report._sample_once)
+    sampler.start()
+    assert sample_holding_lock.wait(timeout=5.0)  # amostra detem o cadeado
+
+    def run_summary():
+        report.summary()
+        summary_done.set()
+
+    summarizer = threading.Thread(target=run_summary)
+    summarizer.start()
+    assert not summary_done.wait(timeout=0.5)  # travada no cadeado
+    release_sample.set()
+
+    assert summary_done.wait(timeout=5.0)
+    sampler.join(timeout=5.0)
+    summarizer.join(timeout=5.0)
+    assert not sampler.is_alive() and not summarizer.is_alive()
+
+    summary = report.summary()
+    assert summary["amostras_s"] == 1
+    assert summary["estados"] == {"sheet": 1}
