@@ -293,9 +293,15 @@ or by the migration). Parity runs must account for them.
   can no longer erase confirmed ink or stamp phantom strokes. Global
   illumination shifts are absorbed as reference scaling above an absolute
   paper-luminance floor, so a covered lens or lights-out still fails
-  closed. A dark fill that the ink model reads as ink for several passes
-  is adopted (fill recovery), and tiles leaving anomaly hold a short
-  recovery window so the worker stays awake until the revealed ink votes.
+  closed. On the vote path, a dark fill that the ink model reads as ink for
+  several passes is adopted (fill recovery), and tiles leaving anomaly hold a
+  short recovery window so the worker stays awake until the revealed ink
+  votes. With the PageModel on (the production preset), `pm.exposed` also
+  gates the vote and has no adoption: it takes the maximum per 32 px window,
+  so a solid dark fill thicker than the window reads as shadow and is NOT
+  confirmed (measured: 20 px confirms, 34 px and up does not; the vote path
+  confirms both). Known limit of the preset, pinned by
+  `test_thick_solid_fill_is_confirmed_by_votes_but_not_by_the_page_model`.
   Independent of MediaPipe.
 - Pipeline: with `canvas_persist` off, a tracker drop also clears the
   rendered canvas and the provisional layer (legacy cleared only the

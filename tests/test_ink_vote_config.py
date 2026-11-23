@@ -282,3 +282,23 @@ def test_production_preset_keeps_paper_and_border_guards():
     cfg = InkConfig.production()
     assert cfg.paper_guard is True
     assert cfg.border_guard_px is None
+
+
+def test_production_preset_turns_the_page_model_on_without_dropping_protections():
+    """O flip liga o PageModel e NAO remove nenhuma protecao: a remocao de
+    pauta, a guarda fotometrica de papel e o recuo automatico de borda
+    permanecem (sem holdout de traco sobre a pauta nem de oclusor que prove
+    a substituicao). `--no-ink-ruling` desliga so a pauta e mantem o modelo."""
+    cfg = InkConfig.production()
+    assert cfg.page_model is True
+    assert cfg.ruling_removal is True
+    assert cfg.paper_guard is True
+    assert cfg.border_guard_px is None
+    assert cfg.hysteresis is True
+    assert cfg.motion_veto is True
+    no_ruling = InkConfig.production(ruling_removal=False)
+    assert no_ruling.page_model is True
+    assert no_ruling.ruling_removal is False
+    # O escopo do flip e o preset de producao: legado e perfis nao mudam.
+    assert InkConfig().page_model is False
+    assert InkConfig.sketch().page_model is False

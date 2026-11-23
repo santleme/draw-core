@@ -29,7 +29,7 @@ recusa para aviso.
 
 A tinta usa por padrao o preset de producao (InkConfig.production):
 ganho digital, voto 0,85, remocao de pauta, histerese, veto por
-movimento, passadas a 0,15 s e Detect-Wake. --no-ink-ruling tira so a
+movimento, PageModel, passadas a 0,15 s e Detect-Wake. --no-ink-ruling tira so a
 pauta (pode apagar lapis fino sobre a linha); --legacy-ink volta ao
 comportamento anterior; --ink-vote e --ink-interval ajustam os numeros.
 --ink-baseline ignora o que ja estava na folha (PageModel); z recaptura.
@@ -1343,7 +1343,7 @@ def main():
         if legacy_ink:
             # Comparacao com o legado: sem a guarda de papel (#129), que o
             # laco legado nao tem.
-            ink_config = InkConfig(paper_guard=False)
+            ink_config = InkConfig.legacy_loop()
             if args.ink_vote is not None:
                 ink_config = InkConfig.strict_vote(args.ink_vote, paper_guard=False)
             if args.ink_interval is not None:

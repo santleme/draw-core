@@ -234,6 +234,16 @@ class InkConfig:
         return cls(**fields)
 
     @classmethod
+    def legacy_loop(cls, **overrides):
+        """Config do laco legado (`--legacy-ink` e a regua de paridade).
+
+        O laco legado nunca teve a guarda fotometrica de papel (#129): a
+        comparacao com ele precisa de `paper_guard=False`. E a UNICA
+        definicao: o caminho ao vivo (`app`) e o replay de paridade
+        (`lab/parity_e2e`) a leem daqui, para nao divergirem."""
+        return cls(paper_guard=False, **overrides)
+
+    @classmethod
     def production(
         cls,
         *,
@@ -242,7 +252,21 @@ class InkConfig:
         ruling_removal=True,
     ):
         """Preset de producao do motor de tinta: voto estrito (0,85), remocao
-        de pauta, histerese, veto por movimento e passadas a 0,15 s.
+        de pauta, histerese, veto por movimento, passadas a 0,15 s e o
+        PageModel como modelo de fundo persistente.
+
+        O PageModel e o que tira a tinta fantasma de mesa/pagina escura
+        estatica (corpus #130: `e5-` e `agora-escuro-estatico`, rotulados
+        `no_ink`: 21.219 e 20.259 px no preset anterior, 0 e 2 px com ele).
+        A remocao de pauta e as guardas (`paper_guard`, inset de borda)
+        PERMANECEM: nao ha holdout com traco sobre a pauta nem com oclusor
+        que mostre que o PageModel as substitui sem perda, entao nenhuma
+        protecao sai neste preset.
+
+        Custo medido do PageModel: um bloco solido escuro mais grosso que a
+        janela de 32 px (34 px ou mais na grade dos contratos) le como
+        sombra em `pm.exposed` e nao e confirmado; o caminho de votos
+        (`page_model=False`, `--legacy-ink`) o confirma.
 
         E o que `PipelineConfig()` usa; `InkConfig()` continua sendo o
         legado (paridade byte a byte com os campos desligados). Riscos
@@ -258,6 +282,7 @@ class InkConfig:
             motion_veto=True,
             pass_interval_s=pass_interval_s,
             border_guard_px=None,
+            page_model=True,
         )
 
     @classmethod

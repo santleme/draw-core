@@ -715,7 +715,16 @@ def test_cached_hand_mask_on_hand_exit_still_confirms_final_stroke_under_product
     now = [100.0]
     det = _ManualDet()
     hand = _ManualHand()
-    cfg = PipelineConfig()
+    # Caminho de votos do preset de producao (regressao do review #74); o
+    # PageModel ligado no preset trata o conteudo estatico como pagina.
+    import dataclasses
+
+    from draw.ink.config import InkConfig
+
+    cfg = dataclasses.replace(
+        PipelineConfig(),
+        ink=dataclasses.replace(InkConfig.production(), page_model=False),
+    )
     ink_worker = PageCleanWorker(_DarkIsInk(), config=cfg.ink, clock=lambda: now[0])
     pipe = pipeline.Pipeline(
         detection_worker=det,

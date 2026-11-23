@@ -185,6 +185,26 @@ para timing.
 - Clip antigo sem `conditions` não entra em fatia de relatório por
   condição — rode `corpus upgrade` em vez de inferir rótulo.
 
+## Antes/depois do PageModel no preset de produção (#162)
+
+Mesmo modelo (`draw_seg_v3_dyn.onnx` e `page_clean_unet.onnx`, hashes do
+`assets/manifest.json`), mesmo código (`main` em `816224f`), `lab/bench_ink.py`
+(`run_clip`), só a configuração muda. Pixels confirmados no canvas final:
+
+| clipe (rótulo) | A: preset anterior | B: + PageModel (preset novo) | C: + PageModel, sem pauta |
+|---|---:|---:|---:|
+| `agora-escuro-estatico` (`no_ink`) | 20.259 | **2** | 2 |
+| `e5-escuro-estatico` (`no_ink`) | 21.219 | **0** | 0 |
+| `escrita-folha-movida` (sem rótulo) | 36.851 | 14.781 | 16.554 |
+| `escrita-mao-sombra` (sem rótulo) | 57.290 | 10.782 | 16.302 |
+
+Leitura: onde há rótulo (`no_ink`) o ganho é inequívoco. Nos dois clipes de
+escrita **não há rótulo nem `regions.json`**: a queda de tinta pode ser
+fantasma removido ou escrita perdida, e o replay não distingue. B contra C
+também não desempata o valor da remoção de pauta. Por isso o preset novo
+mantém a remoção de pauta e as guardas. Falta um clipe com traço sobre a
+pauta e oclusor rotulados para decidir se o PageModel as substitui.
+
 ## Papel de calibração
 
 É este harness que vai calibrar os limiares do `PageModel` —
