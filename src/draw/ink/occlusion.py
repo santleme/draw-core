@@ -102,7 +102,7 @@ _MIN_PAPER_LUMA = 24.0
 # Papel que acabou de sair de anomalia fica em recuperação por este
 # número de passadas: a evidência voltou mas ainda não estabilizou —
 # uma anomalia persistente nunca entra em recuperação (espelha o hold
-# de `paper_ok` do guarda anterior, agora por tile).
+# do guarda de papel anterior, agora por tile).
 _RECOVERY_HOLD_PASSES = 4
 # Teto do tempo morto da espera da trabalhadora por recuperação
 # pendente (streak de preenchimento ou hold de recuperação): cobre os

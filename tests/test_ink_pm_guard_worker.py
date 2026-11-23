@@ -226,8 +226,8 @@ def test_paper_luma_wrong_chroma_occluder_neither_confirms_nor_erases(
         worker.stop()
 
 
-def test_startup_occluder_seeds_then_recovers_after_leaving(monkeypatch):
-    """Oclusor presente desde a abertura e semeado como parte da pagina:
+def test_startup_occluder_never_seeds_then_recovers_after_leaving(monkeypatch):
+    """Oclusor presente desde a abertura, barrado antes de semear:
     nao cria tinta enquanto cobre e, ao sair, a regiao libera e confirma
     traco novo (o hold de oclusao finito, nao congelamento eterno)."""
     monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)

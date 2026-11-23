@@ -612,16 +612,16 @@ def test_unmasked_dark_occluder_does_not_erase_confirmed_ink(ink):
 
 
 # ------------------------------------------------------------------
-# Contrato 10: objeto escuro na abertura nao gera tinta — pm.exposed
-# devolve tudo-True antes da primeira sementeira, entao o oclusor
-# semeia como a propria pagina (nao ha referencia previa para
-# recusa-lo). O contrato e que nada vira tinta enquanto ele cobre e
-# a regiao se recupera por inteiro quando ele sai — o caso oposto a
-# uma referencia envenenada permanente.
+# Contrato 10: objeto escuro na abertura nao semeia como referencia
+# nem gera tinta — a guarda de tiles e pm.exposed vetam o tom 110
+# contra o papel 222 e a regiao espera coberta sem semear (se a
+# referencia nascesse envenenada, um traco de ~90 cairia dentro da
+# razao para sempre). O contrato e que nada vira tinta enquanto ele
+# cobre e a regiao se recupera por inteiro quando ele sai.
 # ------------------------------------------------------------------
 
 
-def test_startup_occluder_never_seeds_nor_inks(ink):
+def test_startup_occluder_never_seeds_nor_inks(ink, regime):
     worker, clock = ink
     generation = worker.new_generation()
     scene = _Scene()
@@ -630,14 +630,22 @@ def test_startup_occluder_never_seeds_nor_inks(ink):
     occluded = scene.page.copy()
     occluded[cover] = OCCLUDER_GRAY
     # O objeto esta la desde a abertura e a mascara de mao o erra.
-    # Ele semeia como pagina no tom dele (110) — mas o bloco nao pode
-    # virar tinta e, revelado, a referencia rastreia o papel real:
-    # um traco de ~90 confirma como em qualquer outro lugar.
+    # As guardas o vetam: os blocos sobre ele nao semeiam — esperam
+    # como covered_unseeded em vez de virar referencia no tom dele.
     for _ in range(6):
         worker.set_hand_presence(True, moved=True)
         _feed(worker, clock, scene.frame(generation, img=occluded))
     worker.set_hand_presence(False)
 
+    pm = getattr(worker, "_page_model", None)
+    if REGIMES[regime].page_model:
+        # Com o PageModel ligado o modelo EXISTE: se sumir, a asserção de
+        # semeadura nao pode sumir junto em silencio.
+        assert pm is not None, f"{regime}: sem PageModel apos a abertura"
+    if pm is not None:
+        assert np.count_nonzero(pm.seeded & cover) == 0, (
+            "oclusor sem mascara virou referencia de pagina"
+        )
     assert np.count_nonzero(_confirmed(worker, generation)) == 0
 
     # Revelado, o papel semeia com o tom real e um traco de 90 —
@@ -758,9 +766,10 @@ def test_isoluma_wrong_chroma_occluder_neither_erases_nor_inks(ink):
 
 # ------------------------------------------------------------------
 # Contrato 13: a folha abre com a mao NAO mascarada parada em cima —
-# a mascara falha, o bloco semeia com o oclusor como referencia.
-# Quando ela sai, o papel real se estabiliza na hora e a regiao
-# recuperada comporta traco novo como o resto da pagina.
+# a mascara falha, a guarda de tiles bloqueia a regiao anomala e ela
+# espera coberta sem semear. Quando ela sai, o papel real se
+# estabiliza na hora e a regiao recuperada comporta traco novo como
+# o resto da pagina.
 # ------------------------------------------------------------------
 
 
@@ -771,6 +780,14 @@ def test_unmasked_hand_at_init_recovers_paper_after_it_leaves(ink):
     cover = (80, 240, 60, 220)
     scene.draw(cover, HAND_GRAY)  # mao no warp, visible=True: mascara falhou
     _passes(worker, clock, generation, scene, 4, dt=_DT_IDLE)
+
+    pm = getattr(worker, "_page_model", None)
+    if pm is not None:
+        hand = np.zeros((H, W), dtype=bool)
+        hand[80:240, 60:220] = True
+        assert np.count_nonzero(pm.seeded & hand) == 0, (
+            "mao sem mascara virou referencia de pagina"
+        )
 
     # A mao sai e expoe o papel real sob o bloco escuro.
     scene = _Scene()
