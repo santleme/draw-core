@@ -260,15 +260,6 @@ def _fill_page_outside(image, coverage):
     return filled
 
 
-def _bbox_of(mask):
-    """(y0, y1, x0, x1) meio-aberto do que e True em mask, ou None."""
-    rows = np.flatnonzero(mask.any(axis=1))
-    if rows.size == 0:
-        return None
-    cols = np.flatnonzero(mask.any(axis=0))
-    return int(rows[0]), int(rows[-1]) + 1, int(cols[0]), int(cols[-1]) + 1
-
-
 def _provisional_for_display(provisional, min_px):
     """Camada provisoria como a tela a ve (issue #134).
 
@@ -285,7 +276,7 @@ def _provisional_for_display(provisional, min_px):
     """
     mask = provisional > 0
     out = np.zeros(provisional.shape, dtype=np.uint8)
-    bbox = _bbox_of(mask)
+    bbox = _mask_bbox(mask)
     if bbox is None:
         return out
     y0, y1, x0, x1 = bbox
@@ -2293,7 +2284,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         bbox, mask = None, np.zeros((0, 0), np.uint8)
         if not full:
             new = now & ~prev[1]
-            bbox = _bbox_of(new)
+            bbox = _mask_bbox(new)
             if bbox is not None:
                 mask = new[bbox[0] : bbox[1], bbox[2] : bbox[3]].astype(np.uint8) * 255
         record = (
@@ -2363,7 +2354,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         removed_px = sum(r[5] for r in records)
         if full:
             full_mask = confirmed > 0
-            bbox = _bbox_of(full_mask)
+            bbox = _mask_bbox(full_mask)
             mask = (
                 np.zeros((0, 0), np.uint8)
                 if bbox is None
