@@ -2605,14 +2605,18 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             self._pass_register_motion_coverage(p)
             return self._pass_commit(p)
         except Exception as error:  # noqa: BLE001 - vai para o laco
-            with self._condition:
-                if p.generation != self._generation:
-                    self._telemetry_stale_errors += 1
-                    self._condition.notify_all()
-                    return True
-                self._error = error
-                self._stopped = True
+            return self._classify_pass_exception(p, error)
+
+    def _classify_pass_exception(self, p, error):
+        """Classifica uma falha no instante em que ela ainda e observavel."""
+        with self._condition:
+            if p.generation != self._generation:
+                self._telemetry_stale_errors += 1
                 self._condition.notify_all()
+                return True
+            self._error = error
+            self._stopped = True
+            self._condition.notify_all()
             return False
 
     def _pass_evidence(self, p):
@@ -2706,12 +2710,14 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     paper_ref = self._paper_ref
                 else:
                     paper_ref = None
-            # Sem NENHUMA referencia de papel (imagem preta desde o
-            # inicio da geracao) nao ha o que comparar: a guarda se
-            # abstem como antes. Com referencia previa, incerteza
-            # (reference None) congela a pagina inteira.
+            # Sem referencia persistida, a guarda se abstem como antes.
+            # Quando existe uma referencia persistida, a mascara usa a
+            # evidencia da imagem atual: reference=None significa que a
+            # amostra visivel desta passada e insuficiente, portanto
+            # congela. Usar paper_ref aqui liberaria uma faixa parcial
+            # durante o re-zero mesmo sem amostras suficientes.
             if paper_ref is not None:
-                p.paper_ok_page = paper_evidence.paper_exposed(p.warped, paper_ref)
+                p.paper_ok_page = paper_evidence.paper_exposed(p.warped, reference)
         if self._ruling is not None:
             if p.generation != self._ruling_generation:
                 self._ruling.reset()
@@ -3223,40 +3229,47 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         # inteiramente antes deste trecho (e o token abaixo o descarta)
         # ou depois do modelo, voto, publicação e delta desta passada.
         with self._pm_gate:
-            with self._condition:
-                if self._stopped:
-                    return False
-                if p.generation != self._generation or p.pm_epoch != (
-                    self._canvas_epoch,
-                    self._pm_reset_seq,
-                ):
-                    return True
-            self._pass_paper_and_page_model(p)
-            with self._condition:
-                if self._stopped:
-                    return False
-                step = 1 if p.pm_rezero_applied else 0
-                if (
-                    p.generation != self._generation
-                    or p.pm_epoch
-                    != (self._canvas_epoch + step, self._pm_reset_seq + step)
-                    or (p.pm_rezero_applied and not self._pm_rezero_requested)
-                ):
-                    return True
-                if p.pm_rezero_applied:
-                    # Commit do re-zero (#130): canvas e modelo novos juntos,
-                    # canvas vazio publicado nesta passada.
-                    self._pm_rezero_requested = False
-                    self._pm_rezero_seeding = True
-                    self._accumulator.reset()
-                    self._canvas_epoch += 1
-                    self._pm_reset_seq += 1
-                    self._pm_baseline_ink = None
-                    p.force_publish = True
-                delta_job = self._pass_vote_and_publish(p)
-                self._condition.notify_all()
-            if delta_job is not None:
-                self._record_delta(*delta_job)
+            try:
+                with self._condition:
+                    if self._stopped:
+                        return False
+                    if p.generation != self._generation or p.pm_epoch != (
+                        self._canvas_epoch,
+                        self._pm_reset_seq,
+                    ):
+                        return True
+                self._pass_paper_and_page_model(p)
+                with self._condition:
+                    if self._stopped:
+                        return False
+                    step = 1 if p.pm_rezero_applied else 0
+                    if (
+                        p.generation != self._generation
+                        or p.pm_epoch
+                        != (self._canvas_epoch + step, self._pm_reset_seq + step)
+                        or (p.pm_rezero_applied and not self._pm_rezero_requested)
+                    ):
+                        return True
+                    if p.pm_rezero_applied:
+                        # Commit do re-zero (#130): canvas e modelo novos juntos,
+                        # canvas vazio publicado nesta passada.
+                        self._pm_rezero_requested = False
+                        self._pm_rezero_seeding = True
+                        self._accumulator.reset()
+                        self._canvas_epoch += 1
+                        self._pm_reset_seq += 1
+                        self._pm_baseline_ink = None
+                        p.force_publish = True
+                    delta_job = self._pass_vote_and_publish(p)
+                    self._condition.notify_all()
+                if delta_job is not None:
+                    self._record_delta(*delta_job)
+            except Exception as error:  # noqa: BLE001 - classificar sob _pm_gate
+                # Nao liberar a transicao antes de classificar uma falha:
+                # caso contrario ela pode avancar a geracao e transformar
+                # uma falha corrente, apos mutacao parcial do modelo, em
+                # um erro aparentemente obsoleto.
+                return self._classify_pass_exception(p, error)
         return True
 
     def _pass_identity(self, p):

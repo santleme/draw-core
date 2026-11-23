@@ -174,6 +174,34 @@ def test_rezero_keeps_canvas_until_a_pass_has_usable_paper(monkeypatch):
         worker.stop()
 
 
+def test_rezero_does_not_use_cached_paper_ref_for_sparse_visibility(monkeypatch):
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    worker = _worker_pm()
+    try:
+        generation = worker.new_generation()
+        image = _paper()
+        for _ in range(3):
+            _drive(worker, generation, image)
+        image[50:60, 50:60] = INK
+        for _ in range(4):
+            _drive(worker, generation, image)
+        before = _confirmed(worker, generation).copy()
+        assert np.count_nonzero(before) == 100
+
+        assert worker.rezero_baseline()
+        sparse_visible = np.zeros((H, W), dtype=bool)
+        sparse_visible[:, :32] = True
+        # 12 sampled rows x 4 sampled columns = 48, below the 64-sample
+        # minimum for a reference from this frame.
+        assert np.count_nonzero(sparse_visible[::8, ::8]) == 48
+        _drive(worker, generation, image, sparse_visible)
+
+        assert worker.baseline_state().phase == "recapturing"
+        assert np.array_equal(_confirmed(worker, generation), before)
+    finally:
+        worker.stop()
+
+
 def test_worker_stays_awake_until_rezero_seeding_finishes(monkeypatch):
     monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
     worker = _worker_pm()

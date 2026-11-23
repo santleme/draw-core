@@ -83,11 +83,15 @@ class _ObservedGate:
         self._lock = threading.Lock()
         self._thread_name = thread_name
         self.attempted = threading.Event()
+        self.acquired = threading.Event()
 
     def __enter__(self):
-        if threading.current_thread().name == self._thread_name:
+        observed_thread = threading.current_thread().name == self._thread_name
+        if observed_thread:
             self.attempted.set()
         self._lock.acquire()
+        if observed_thread:
+            self.acquired.set()
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
@@ -298,17 +302,99 @@ def test_current_pass_exception_stops_worker(monkeypatch):
         worker.stop()
 
 
-def test_generation_flip_between_phase_a_and_phase_b(monkeypatch):
-    """Contrato (caracterizacao, verde hoje e depois do fencing): a
-    transicao no meio do trecho captura um estado coerente — a
-    referencia de identidade preservada carrega o desenho confirmado
-    no instante efetivo da transicao."""
+def test_model_exception_is_classified_before_transition_can_advance(monkeypatch):
+    """Uma mutacao parcial seguida de erro continua fatal na geracao atual.
+
+    A transicao fica esperando o gate enquanto observe() altera o modelo e
+    falha. O worker precisa gravar o erro antes de soltar o gate; senao a
+    transicao pode avancar a geracao e fazer o erro parecer obsoleto.
+    """
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    entered = threading.Event()
+    release = threading.Event()
+    gate_released = threading.Event()
+    orig_observe = pm_mod.PageModel.observe
+    armed = [False]
+    failure_started = [False]
+    error_seen_at_release = []
+
+    def _mutate_then_fail(self, *args, **kwargs):
+        if armed[0]:
+            armed[0] = False
+            orig_observe(self, *args, **kwargs)
+            failure_started[0] = True
+            entered.set()
+            release.wait(timeout=5.0)
+            raise RuntimeError("falha depois de mutar o PageModel")
+        return orig_observe(self, *args, **kwargs)
+
+    monkeypatch.setattr(pm_mod.PageModel, "observe", _mutate_then_fail)
+    worker = _worker(InkConfig(page_model=True))
+
+    class _ErrorProbeGate(_ObservedGate):
+        def __exit__(self, exc_type, exc_value, traceback):
+            if (
+                failure_started[0]
+                and threading.current_thread().name == "draw-page-clean"
+            ):
+                error_seen_at_release.append(worker.error is not None)
+                gate_released.set()
+            super().__exit__(exc_type, exc_value, traceback)
+
+    gate = _ErrorProbeGate("generation-flip")
+    worker._pm_gate = gate
+    try:
+        generation = worker.new_generation()
+        paper = np.full((H, W), PAPER, dtype=np.float32)
+        for _ in range(3):
+            _drive(worker, generation, paper)
+        armed[0] = True
+        worker.submit(WarpedPage(_bgr(paper), generation, Q0))
+        assert entered.wait(timeout=5.0)
+
+        flip_done = threading.Event()
+
+        def _flip():
+            worker.new_generation(preserve_identity=True)
+            flip_done.set()
+
+        flip_thread = threading.Thread(target=_flip, name="generation-flip")
+        flip_thread.start()
+        assert gate.attempted.wait(timeout=5.0)
+        assert not flip_done.is_set()
+        release.set()
+        assert gate_released.wait(timeout=5.0)
+        assert flip_done.wait(timeout=5.0)
+        flip_thread.join(timeout=5.0)
+        assert not flip_thread.is_alive()
+
+        assert error_seen_at_release == [True]
+        assert isinstance(worker.error, RuntimeError)
+        assert worker._telemetry_stale_errors == 0
+    finally:
+        release.set()
+        worker.stop()
+
+
+def test_generation_transition_preserves_the_publication_before_it(monkeypatch):
+    """A transicao espera a passada publicar antes de preservar a tinta.
+
+    Um voto deixa o novo traco ainda nao confirmado. A segunda passada
+    e parada durante PageModel; new_generation tenta tomar o gate. Quando
+    a passada termina, o canvas publicado deve conter o traco e a
+    referencia de identidade deve capturar exatamente esse resultado.
+    """
     monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
     entered = threading.Event()
     release = threading.Event()
     done = threading.Event()
+    vote_seen = threading.Event()
     orig_pm = worker_mod.PageCleanWorker._pass_paper_and_page_model
+    orig_vote = worker_mod.PageCleanWorker._pass_vote_and_publish
     armed = [False]
+    vote_armed = [False]
+    version_before = [0]
+    published = {}
 
     def _gated_pm(self, p):
         if armed[0]:
@@ -323,6 +409,19 @@ def test_generation_flip_between_phase_a_and_phase_b(monkeypatch):
     monkeypatch.setattr(
         worker_mod.PageCleanWorker, "_pass_paper_and_page_model", _gated_pm
     )
+
+    def _watched_vote(self, p):
+        result = orig_vote(self, p)
+        if vote_armed[0]:
+            vote_armed[0] = False
+            published["snapshot"] = self.poll(p.generation, version_before[0])
+            published["delta_job"] = result
+            vote_seen.set()
+        return result
+
+    monkeypatch.setattr(
+        worker_mod.PageCleanWorker, "_pass_vote_and_publish", _watched_vote
+    )
     worker = _worker(InkConfig(page_model=True))
     gate = _ObservedGate("generation-flip")
     worker._pm_gate = gate
@@ -333,11 +432,13 @@ def test_generation_flip_between_phase_a_and_phase_b(monkeypatch):
             _drive(worker, gen1, paper)
         stroked = paper.copy()
         stroked[50:60, 50:60] = INK
-        for _ in range(4):
+        for _ in range(1):
             _drive(worker, gen1, stroked)
-        assert np.count_nonzero(_confirmed(worker, gen1)[50:60, 50:60]) == 100
-        done.clear()  # dispara em toda passada; so a armada interessa
+        assert np.count_nonzero(_confirmed(worker, gen1)[50:60, 50:60]) == 0
+        version_before[0] = worker._version
+        done.clear()
         armed[0] = True
+        vote_armed[0] = True
         worker.submit(WarpedPage(_bgr(stroked), gen1, Q0))
         assert entered.wait(timeout=5.0)
         flip_done = threading.Event()
@@ -352,9 +453,16 @@ def test_generation_flip_between_phase_a_and_phase_b(monkeypatch):
         assert not flip_done.is_set()
         release.set()
         assert done.wait(timeout=5.0)
+        assert vote_seen.wait(timeout=5.0)
         assert flip_done.wait(timeout=5.0)
         flip_thread.join(timeout=5.0)
         assert not flip_thread.is_alive()
+        snapshot = published["snapshot"]
+        assert snapshot is not None
+        assert np.count_nonzero(snapshot.confirmed[50:60, 50:60]) == 100
+        delta_job = published["delta_job"]
+        assert delta_job is not None
+        assert np.count_nonzero(delta_job[2][50:60, 50:60]) == 100
         ref = worker._identity_reference
         assert ref is not None
         assert np.count_nonzero(ref[50:60, 50:60]) == 100
@@ -667,7 +775,10 @@ def test_stale_pass_cannot_swap_model(monkeypatch):
 
         flip_thread = threading.Thread(target=_flip, name="generation-flip")
         flip_thread.start()
-        assert gate.attempted.wait(timeout=5.0)
+        # A transicao precisa ter adquirido o gate antes de liberar a
+        # passada que ainda segura _condition; attempted sozinho apenas
+        # sinalizava antes do acquire e deixava a ordem indeterminada.
+        assert gate.acquired.wait(timeout=5.0)
         assert not flip_done.is_set()
         release.set()
         assert flip_done.wait(timeout=5.0)
