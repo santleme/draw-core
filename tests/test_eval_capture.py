@@ -5,19 +5,12 @@ na hora (onnx_fixtures) e detector clássico grampeado — o valor é
 exercitar Pipeline + PageCleanWorker reais sem thread e sem câmera.
 """
 
-import sys
-from pathlib import Path
-
 import numpy as np
 import pytest
+from lab import eval_capture as ec
+from lab.sync_workers import SyncDetector
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from lab import eval_capture as ec  # noqa: E402
-from lab.sync_workers import SyncDetector  # noqa: E402
-
-onnx_fixtures = pytest.importorskip("onnx_fixtures")  # noqa: E402
+onnx_fixtures = pytest.importorskip("onnx_fixtures")
 
 
 def test_pixel_metrics_perfeito():
