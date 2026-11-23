@@ -2,6 +2,7 @@
 
 import dataclasses
 import json
+import re
 from pathlib import Path
 
 CLIP_JSON_VERSION = 2
@@ -15,6 +16,12 @@ CONDITION_KEYS = (
 )
 EXPECTED_RULES = ("no_ink", "ink_present", "canvas_stable")
 REGION_KEYS = ("writing", "ruling_only")
+
+# Extensoes de imagem que as fontes-de-diretorio do lab aceitam
+# (cv2.imread decodifica todas): uniao das listas que replay_lab,
+# sync_workers e seg_scene_audit mantinham — .bmp chega de brinde a
+# auditoria de cena, que so listava .png/.jpg/.jpeg.
+IMG_EXTS = {".png", ".jpg", ".jpeg", ".bmp"}
 
 
 class ClipError(Exception):
@@ -47,18 +54,24 @@ def _is_number(value) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
-def _frame_sort_key(path):
-    """Chave de ordem do inventario: o INTEIRO do sufixo de ``f<N>.png``.
+def frame_sort_key(path):
+    """Chave de ordem de quadros: o INTEIRO do sufixo numerico do stem.
 
-    A captura grava ``f{indice:04d}`` — minimo de 4 digitos, que cresce
-    a partir do quadro 10000 — entao ``f10000.png`` segue ``f9999.png``,
-    nao ``f1000.png`` (ordem lexica rebotava quadros longos). Nomes
-    ``f*.png`` sem sufixo numerico vao ao fim, por nome; empates de
-    numero (``f1.png`` x ``f0001.png``) desempatam pelo nome.
+    O sufixo e a corrida de digitos no FIM do nome — ``f2.png``,
+    ``frame_00010.jpg``, ``seq_9.bmp``: quem termina em digito ordena
+    pelo valor, entao ``f2.png`` precede ``f10.png`` (a ordem lexica
+    os invertia) e empates de numero (``f1.png`` x ``f0001.png``)
+    desempatam pelo nome. Nomes sem sufixo numerico vao ao fim, por
+    nome.
+
+    A captura grava ``f{indice:04d}`` — minimo de 4 digitos, que
+    cresce a partir do quadro 10000 — entao ``f10000.png`` segue
+    ``f9999.png``, nao ``f1000.png`` (ordem lexica rebotava quadros
+    longos).
     """
-    digits = path.stem[1:]
-    if digits.isdecimal():
-        return (0, int(digits), path.name)
+    digits = re.search(r"(\d+)$", path.stem)
+    if digits is not None:
+        return (0, int(digits.group(1)), path.name)
     return (1, 0, path.name)
 
 
@@ -81,7 +94,7 @@ def clip_frames(clip_dir) -> list[Path]:
     if not clip_dir.is_dir():
         return []
     return sorted(
-        (p for p in clip_dir.glob("f*.png") if p.is_file()), key=_frame_sort_key
+        (p for p in clip_dir.glob("f*.png") if p.is_file()), key=frame_sort_key
     )
 
 

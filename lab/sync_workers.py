@@ -7,21 +7,32 @@ submit/poll dos workers de detecção e presença.
 
 O driver de paridade do legado (parity_legacy_driver.py) NÃO usa
 este módulo: roda num subprocesso com PYTHONPATH do repo legado e
-fica auto-contido de propósito.
+fica auto-contido de propósito. Assimetria assumida: a ordenação de
+diretório dele continua léxica, então um corpus sem zero-padding
+(f2.png/f10.png) alimenta os dois lados em sequências diferentes —
+corpora de paridade precisam de nomes f%04d, que é o que a captura
+grava.
 """
 
 from pathlib import Path
 
 import cv2
 
-IMG_EXTS = {".png", ".jpg", ".jpeg", ".bmp"}
+from lab.corpus.clip import IMG_EXTS, frame_sort_key
 
 
 def iter_frames(source, limit):
-    """Frames de um diretório de imagens ou de um vídeo."""
+    """Frames de um diretório de imagens ou de um vídeo.
+
+    Diretório: a ordem é a numérica do sufixo do nome (f2 antes de
+    f10) — a lexica os invertia e o replay consumia os quadros fora
+    de sequência."""
     path = Path(source)
     if path.is_dir():
-        files = sorted(p for p in path.iterdir() if p.suffix.lower() in IMG_EXTS)
+        files = sorted(
+            (p for p in path.iterdir() if p.suffix.lower() in IMG_EXTS),
+            key=frame_sort_key,
+        )
         for i, f in enumerate(files):
             if i >= limit:
                 break

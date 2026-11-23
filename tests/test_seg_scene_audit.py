@@ -319,6 +319,27 @@ def test_run_sobre_diretorio_de_pngs_grava_jsonl_e_resumo(tmp_path):
     assert audit["interrupted"] is False and audit["source_error"] is None
 
 
+def test_run_ordena_frames_de_diretorio_por_sufixo_numerico(tmp_path):
+    """f2.png entra em frames.jsonl antes de f10.png: a auditoria
+    seguia a ordem de nome, que os invertia."""
+    src = tmp_path / "frames"
+    src.mkdir()
+    frame = np.zeros((80, 100, 3), np.uint8)
+    assert cv2.imwrite(str(src / "f10.png"), frame)
+    assert cv2.imwrite(str(src / "f2.png"), frame)
+    no_quad = {"corners": None, "verdict": None, "coverage": None, "presence": -9.0}
+    det = _FakeDet([no_quad])
+    out = tmp_path / "audit"
+
+    sa.run(src, det, out_dir=out, model="fake.onnx", log=lambda *_a: None)
+
+    rows = [
+        json.loads(line)
+        for line in (out / "frames.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [r["file"] for r in rows] == ["f2.png", "f10.png"]
+
+
 def test_run_drawcap_truncado_marca_source_error(tmp_path):
     """Registro cortado no payload: o resumo sai marcando incompleto.
 
