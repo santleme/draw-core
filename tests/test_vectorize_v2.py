@@ -291,6 +291,42 @@ def test_anisotropic_paper_decides_rectangle_in_mm():
         )
 
 
+def test_anisotropic_paper_decides_circle_in_mm():
+    # 170x200 mm sobre 850x1200 px (~18% anisotrópico): um círculo de
+    # 30 mm chega como elipse de ~150x180 px — o fit em px o rejeita,
+    # mas a decisão em mm o devolve como circle. O simétrico (círculo
+    # pequeno em px = elipse em mm) sai como contorno escalado: sem o
+    # desvio ele atravessava o detector de retângulo e exportava uma
+    # caixa de 4 lados.
+    vectorize._set_paper_mm(170.0, 200.0, 850, 1200)
+    try:
+        sx, sy = 170.0 / 850.0, 200.0 / 1200.0
+        theta = np.linspace(0.0, 2.0 * np.pi, 240, endpoint=False)
+        circle_mm = np.stack(
+            [100.0 + 30.0 * np.cos(theta), 100.0 + 30.0 * np.sin(theta)],
+            axis=1,
+        )
+        circle_px = np.empty_like(circle_mm)
+        circle_px[:, 0] = circle_mm[:, 0] / sx
+        circle_px[:, 1] = circle_mm[:, 1] / sy
+        prim = vectorize.classify_primitive({"points": circle_px, "closed": True})
+        assert prim["type"] == "circle"
+        assert prim["r_mm"] == pytest.approx(30.0, rel=0.05)
+        assert prim["cx_mm"] == pytest.approx(100.0, abs=0.5)
+        assert prim["cy_mm"] == pytest.approx(100.0, abs=0.5)
+
+        small_px = np.stack(
+            [425.0 + 10.0 * np.cos(theta), 600.0 + 10.0 * np.sin(theta)],
+            axis=1,
+        )
+        prim = vectorize.classify_primitive({"points": small_px, "closed": True})
+        assert prim["type"] == "polygon"
+    finally:
+        vectorize._set_paper_mm(
+            210.0, 297.0, vectorize.PAPER_W_PX, vectorize.PAPER_H_PX
+        )
+
+
 def test_isotropic_paper_still_classifies_circle():
     # A4 legado já é ~0,2% anisotrópico (210/850 vs 297/1200) e sempre
     # classificou círculo com r_mm médio — o comportamento se mantém.
@@ -311,6 +347,17 @@ def test_isotropic_paper_still_classifies_circle():
         )
 
 
+def test_default_a4_measurements_stay_legacy():
+    # Sem flags de papel as medidas usam a escala média legada: uma
+    # linha horizontal de 400 px reporta chord_len * MM_PER_PX —
+    # o mesmo número de sempre (98.912, não o 98.824 da escala-x).
+    pts = np.array([[100.0, 200.0], [500.0, 200.0]])
+    prim = vectorize.classify_primitive({"points": pts, "closed": False})
+    assert prim["type"] == "line"
+    assert prim["length_mm"] == round(400.0 * vectorize.MM_PER_PX, 3)
+    assert prim["length_mm"] == 98.912
+
+
 def main():
     test_node_indexing_matches_naive_and_scales_linearly()
     test_thick_shapes_axis_aligned_rect_circle_lines_and_freehand_wave()
@@ -319,7 +366,9 @@ def main():
     test_paper_mm_flags_must_come_in_pairs_and_be_finite()
     test_anisotropic_paper_measures_geometry_in_mm()
     test_anisotropic_paper_decides_rectangle_in_mm()
+    test_anisotropic_paper_decides_circle_in_mm()
     test_isotropic_paper_still_classifies_circle()
+    test_default_a4_measurements_stay_legacy()
     print("TESTES DE VECTORIZE V2 E CAMADA 2 OK.")
     return 0
 

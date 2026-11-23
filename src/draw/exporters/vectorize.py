@@ -74,6 +74,19 @@ def _set_paper_mm(paper_w_mm, paper_h_mm, img_w_px, img_h_px):
     MM_PER_PX = 0.5 * (MM_PER_PX_X + MM_PER_PX_Y)
 
 
+# Escalas do A4 legado congeladas na carga do módulo: enquanto a escala
+# corrente for essa (sem --paper-w-mm/--paper-h-mm), medidas mm ficam
+# bit-idênticas ao comportamento histórico px*MM_PER_PX.
+_MM_SCALE_DEFAULT = (MM_PER_PX_X, MM_PER_PX_Y)
+
+
+def _mm_scale_vec():
+    """Vetor de escala px->mm: por eixo sob papel custom, média legada senão."""
+    if (MM_PER_PX_X, MM_PER_PX_Y) != _MM_SCALE_DEFAULT:
+        return np.array([MM_PER_PX_X, MM_PER_PX_Y])
+    return np.array([MM_PER_PX, MM_PER_PX])
+
+
 def _isotropic_scale():
     """Escala px->mm isotrópica o bastante para ``circle`` (<=1% relativo).
 
@@ -90,7 +103,8 @@ def _isotropic_scale():
 
 def _mm_dist(dx_px, dy_px):
     """Distância euclidiana px->mm eixo a eixo (segura p/ escala anisotrópica)."""
-    return math.hypot(dx_px * MM_PER_PX_X, dy_px * MM_PER_PX_Y)
+    sx, sy = _mm_scale_vec()
+    return math.hypot(dx_px * sx, dy_px * sy)
 
 
 THINNING_TYPES = {
@@ -703,7 +717,9 @@ def classify_primitive(polyline):
     # 2. Círculo (fechado ou quase fechado):
     end_gap = 0.0 if closed else float(np.hypot(*(pts[-1] - pts[0])))
     perim = _polyline_arc_length(np.vstack([pts, pts[:1]]) if closed else pts)
+    skip_rect = False
     if (closed or end_gap <= max(8.0, 0.08 * perim)) and len(dense) >= 16:
+        circle_like = False
         fit = _fit_circle_kasa(dense)
         if fit is not None:
             cx, cy, r = fit
@@ -717,14 +733,12 @@ def classify_primitive(polyline):
                 )
                 bins = np.unique((angles // 15.0).astype(int))
                 # >= 21 de 24 setores de 15° cobertos (>= 315°).
-                # Escala anisotrópica transforma o círculo em elipse —
-                # sem representação no schema, cai no contorno escalado.
-                if (
+                circle_like = (
                     len(bins) >= 21
                     and rmse / r <= 0.055
                     and max_err <= max(3.5, 0.10 * r)
-                    and _isotropic_scale()
-                ):
+                )
+                if circle_like and _isotropic_scale():
                     return {
                         "type": "circle",
                         "cx_mm": round(cx * MM_PER_PX_X, 3),
@@ -733,9 +747,47 @@ def classify_primitive(polyline):
                         "radial_rmse_px": round(rmse, 3),
                         **meta,
                     }
+        if not _isotropic_scale():
+            # A redondeza também é decidida no espaço de saída (mm): o
+            # cisalhamento px->mm pode esconder um círculo real atrás de
+            # uma elipse no raster (e vice-versa). O ajuste Kåsa é
+            # refeito sobre as amostras já escaladas.
+            dense_mm = dense * np.array([MM_PER_PX_X, MM_PER_PX_Y])
+            fit_mm = _fit_circle_kasa(dense_mm)
+            if fit_mm is not None:
+                cxm, cym, rm = fit_mm
+                if rm >= 6.0 * MM_PER_PX:
+                    radii_m = np.hypot(dense_mm[:, 0] - cxm, dense_mm[:, 1] - cym)
+                    rmse_m = float(np.sqrt(np.mean((radii_m - rm) ** 2)))
+                    max_err_m = float(np.max(np.abs(radii_m - rm)))
+                    ang_m = np.mod(
+                        np.degrees(
+                            np.arctan2(dense_mm[:, 1] - cym, dense_mm[:, 0] - cxm)
+                        ),
+                        360.0,
+                    )
+                    bins_m = np.unique((ang_m // 15.0).astype(int))
+                    if (
+                        len(bins_m) >= 21
+                        and rmse_m / rm <= 0.055
+                        and max_err_m <= max(3.5 * MM_PER_PX, 0.10 * rm)
+                    ):
+                        return {
+                            "type": "circle",
+                            "cx_mm": round(cxm, 3),
+                            "cy_mm": round(cym, 3),
+                            "r_mm": round(rm, 3),
+                            "radial_rmse_px": round(rmse_m / MM_PER_PX, 3),
+                            **meta,
+                        }
+            # Um quase-círculo em px que não fecha círculo em mm é uma
+            # elipse na saída: vai para o contorno escalado direto, sem
+            # passar pelo detector de retângulo (a simplificação a 4
+            # cantos o venderia como caixa).
+            skip_rect = circle_like
 
     # 3. Retângulo fechado:
-    if closed and len(pts) >= 4:
+    if closed and len(pts) >= 4 and not skip_rect:
         coarse = _dp_open(np.vstack([pts, pts[:1]]), epsilon=3.0)
         corners = _merge_collinear_closed_vertices(coarse)
         if len(corners) == 4:
@@ -744,8 +796,10 @@ def classify_primitive(polyline):
             if min(lengths) >= 10.0:
                 # A forma é decidida em mm: com escala anisotrópica um
                 # retângulo rotacionado cisalha em px (ângulos != 90°) e
-                # um paralelogramo em px pode parecer retângulo.
-                sides_mm = [s * np.array([MM_PER_PX_X, MM_PER_PX_Y]) for s in sides]
+                # um paralelogramo em px pode parecer retângulo. Sob o
+                # default A4 o vetor é uniforme (escala média) — a
+                # decisão e as medidas saem idênticas às do legado px.
+                sides_mm = [s * _mm_scale_vec() for s in sides]
                 lengths_mm = [float(np.hypot(s[0], s[1])) for s in sides_mm]
                 angles_ok = True
                 for i in range(4):
