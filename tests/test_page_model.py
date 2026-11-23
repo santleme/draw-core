@@ -3235,6 +3235,55 @@ def test_identity_residual_resolves_aliasing_ruling_with_distinguishing_marks(dy
     assert _residual_of(_ruled(16, marks=True), dy) == (0, -dy)
 
 
+def _ruled_with_table(table_shift, true_shift=6):
+    """Referencia (3 tracos), evidencia = tracos reais deslocados (so os 120
+    px da esquerda) + uma banda de MESA escura deslocada de `table_shift`."""
+    ref = np.zeros((240, 320), np.uint8)
+    evidence = np.zeros((240, 320), np.float32)
+    coverage = np.ones((240, 320), dtype=bool)
+    for y0, y1 in ((50, 56), (90, 96), (130, 136)):
+        ref[y0:y1, 40:280] = 255
+        evidence[y0 + true_shift : y1 + true_shift, 40:160] = 0.95
+        evidence[y0 + table_shift : y1 + table_shift, 40:280] = 0.95
+        coverage[y0 + table_shift - 2 : y1 + table_shift + 2, :] = False  # mesa
+    return ref, evidence, coverage
+
+
+# 10, 14 e 30 px: sem a cobertura o estimador escolhe o deslocamento da mesa.
+@pytest.mark.parametrize("table_shift", [10, 14, 30])
+def test_identity_residual_ignores_dark_evidence_outside_the_sheet(table_shift):
+    ref, evidence, coverage = _ruled_with_table(table_shift)
+    got = worker_mod._estimate_identity_residual(
+        ref, None, evidence, None, None, 0.5, coverage
+    )
+    assert got[1] == -6  # a mesa escura nao desvia o eixo observavel
+
+
+@pytest.mark.parametrize("table_shift", [8, 9])
+def test_identity_residual_abstains_when_the_band_hides_the_evidence(table_shift):
+    # A banda descoberta cobre a propria tinta real: sem suporte observavel o
+    # estimador se abstem em vez de escolher o deslocamento da mesa.
+    ref, evidence, coverage = _ruled_with_table(table_shift)
+    assert worker_mod._estimate_identity_residual(
+        ref, None, evidence, None, None, 0.5, coverage
+    ) == (0, 0)
+
+
+def test_identity_residual_abstains_without_observable_support():
+    ref, evidence, _ = _ruled_with_table(20)
+    nothing_covered = np.zeros(ref.shape, dtype=bool)
+    assert worker_mod._estimate_identity_residual(
+        ref, None, evidence, None, None, 0.5, nothing_covered
+    ) == (0, 0)
+
+
+def test_identity_residual_without_coverage_is_unchanged():
+    ref, candidate = _shifted_evidence(6)
+    assert worker_mod._estimate_identity_residual(
+        ref, None, candidate, None, None, 0.5, None
+    ) == (0, -6)
+
+
 @pytest.mark.parametrize("empty", ["reference", "evidence"])
 def test_identity_residual_fails_safe_without_ink(empty):
     ref, candidate = _shifted_evidence(6)

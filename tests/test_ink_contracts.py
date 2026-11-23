@@ -822,6 +822,31 @@ def test_new_stroke_after_a_return_with_residual_confirms_in_place(ink, residual
     assert _beyond(got, want | old, 1) == 0
 
 
+@pytest.mark.parametrize(
+    "table_shift",
+    [None, 9, 11],  # sem mesa (controle) e com banda escura fora da folha
+)
+def test_dark_uncovered_band_does_not_steer_the_residual(ink, table_shift):
+    worker, clock = ink
+    generation = worker.new_generation()
+    scene = _Scene()
+    _passes(worker, clock, generation, scene, 4, dt=_DT_IDLE)
+    for stroke in _F11_STROKES:
+        _write_stroke(worker, clock, generation, scene, stroke)
+    drawn = _stroke_mask(scene)
+    returned = _Scene()
+    for y0, y1, x0, x1 in _F11_STROKES:
+        returned.draw((y0 + 6, y1 + 6, x0, x1))
+        if table_shift:  # banda escura fora da folha, sem cobertura
+            returned.table[y0 + table_shift : y1 + table_shift + 6, x0:x1] = True
+    gen2 = worker.new_generation(preserve_identity=True)
+    _passes(worker, clock, gen2, returned, 8, dt=_DT_IDLE)
+
+    got = _confirmed(worker, gen2) > 0
+    assert _frac(got, drawn) >= 0.95
+    assert _beyond(got, drawn, 1) == 0
+
+
 def _return_with_residual(worker, clock, residual, strokes=_F11_STROKES):
     generation = worker.new_generation()
     scene = _Scene()

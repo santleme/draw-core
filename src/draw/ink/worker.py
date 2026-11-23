@@ -511,25 +511,34 @@ _RESIDUAL_MIN_PEAK = 0.05  # correlacao normalizada minima na janela
 _RESIDUAL_MIN_GAIN = 0.10  # ganho minimo de recall exato sobre (0, 0)
 _RESIDUAL_MIN_RECALL = 0.5  # recall exato minimo apos o deslocamento
 _RESIDUAL_CROP_PAD = 16
+_RESIDUAL_MIN_SUPPORT = 0.3  # fracao minima da referencia observavel por candidato
 _RESIDUAL_RIVAL_GUARD = 3  # px (meia resolucao) em volta do melhor pico
 _RESIDUAL_RIVAL_PEAK = 0.9  # pico rival relevante: >= 90% do melhor
 
 
-def _exact_recall(prior, seen, dx, dy, prior_px):
-    """Fracao da referencia coberta pela evidencia deslocada, sem tolerancia."""
+def _exact_recall(prior, seen, dx, dy, prior_px, coverage=None):
+    """Fracao da referencia coberta pela evidencia deslocada, sem tolerancia.
+
+    Com `coverage`, o denominador e so a parte da referencia cujo destino
+    esta sobre a folha (por candidato); sem suporte suficiente o candidato
+    vale 0: nao se estima por cima do que a cobertura esconde."""
     h, w = prior.shape
     y0, y1 = max(0, dy), min(h, h + dy)
     x0, x1 = max(0, dx), min(w, w + dx)
     if y1 <= y0 or x1 <= x0:
         return 0.0
-    hit = np.count_nonzero(
-        prior[y0:y1, x0:x1] & seen[y0 - dy : y1 - dy, x0 - dx : x1 - dx]
-    )
-    return hit / prior_px
+    ref = prior[y0:y1, x0:x1]
+    hit = np.count_nonzero(ref & seen[y0 - dy : y1 - dy, x0 - dx : x1 - dx])
+    if coverage is None:
+        return hit / prior_px
+    observable = np.count_nonzero(ref & coverage[y0 - dy : y1 - dy, x0 - dx : x1 - dx])
+    if observable < max(_RESIDUAL_MIN_PX, _RESIDUAL_MIN_SUPPORT * prior_px):
+        return 0.0
+    return hit / observable
 
 
 def _estimate_identity_residual(
-    reference, baseline, evidence, visible, sampled, threshold
+    reference, baseline, evidence, visible, sampled, threshold, coverage=None
 ):
     """(dx, dy) inteiro que alinha a evidencia da passada a referencia.
 
@@ -552,6 +561,15 @@ def _estimate_identity_residual(
         if domain is not None:
             prior = prior & domain
             seen = seen & domain
+    if coverage is not None and coverage.shape == seen.shape:
+        # visible/sampled dizem que ha dado ali, nao que ha PAPEL. Mesa
+        # escura fora da folha nao pode votar na estimativa: a evidencia so
+        # vale sobre cobertura. O denominador do recall e por candidato (ver
+        # `_exact_recall`): so contam os pixels da referencia cujo destino
+        # esta coberto.
+        seen = seen & coverage
+    else:
+        coverage = None
     if (
         np.count_nonzero(prior) < _RESIDUAL_MIN_PX
         or np.count_nonzero(seen) < _RESIDUAL_MIN_PX
@@ -562,6 +580,7 @@ def _estimate_identity_residual(
     y0, y1 = max(0, ys.min() - pad), ys.max() + pad + 1
     x0, x1 = max(0, xs.min() - pad), xs.max() + pad + 1
     prior_c, seen_c = prior[y0:y1, x0:x1], seen[y0:y1, x0:x1]
+    cover_c = None if coverage is None else coverage[y0:y1, x0:x1]
     # Correlacao em meia resolucao, restrita a +-R px: nao ha como
     # escolher o pico de alias de uma pauta periodica fora da janela.
     half = (max(8, prior_c.shape[1] // 2), max(8, prior_c.shape[0] // 2))
@@ -603,13 +622,13 @@ def _estimate_identity_residual(
     cx = 0 if amb_x else -(loc[0] - reach) * 2
     cy = -(loc[1] - reach) * 2
     prior_px = float(np.count_nonzero(prior_c))
-    base_recall = _exact_recall(prior_c, seen_c, 0, 0, prior_px)
+    base_recall = _exact_recall(prior_c, seen_c, 0, 0, prior_px, cover_c)
     best = None
     for ddy in range(-2, 3):
         for ddx in range(0, 1) if amb_x else range(-2, 3):
             dx, dy = cx + ddx, cy + ddy
             if (dx or dy) and max(abs(dx), abs(dy)) <= _RESIDUAL_MAX_PX:
-                recall = _exact_recall(prior_c, seen_c, dx, dy, prior_px)
+                recall = _exact_recall(prior_c, seen_c, dx, dy, prior_px, cover_c)
                 key = (-recall, abs(dx) + abs(dy))  # empate: menor deslocamento
                 if best is None or key < best[0]:
                     best = (key, dx, dy, recall)
@@ -3015,6 +3034,48 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             )
         return None
 
+    def _coverage_for_estimate(self, p):
+        """Cobertura da folha na grade da pre-registracao (ancora SEM residuo).
+
+        Mesmos ramos de `_covered` (gate do voto), mas sem escrever nos
+        caches `coverage_anchor`/`coverage_page`: o gate os preenche depois,
+        com a ancora ja corrigida pelo residuo. None sem mapa de cobertura.
+        """
+        cam, static = p.coverage_cam, p.coverage_page_static
+        if cam is None and static is None:
+            return None
+        size = (p.prob.shape[1], p.prob.shape[0])
+        if cam is not None and p.corners is not None:
+            matrix = registration._registration_matrix(
+                p.anchor, p.registration_corners, p.prob.shape
+            )
+            if not registration._registration_is_identity(matrix):
+                return (
+                    cv2.warpPerspective(
+                        cam.astype(np.uint8),
+                        matrix
+                        @ registration._corners_page_matrix(
+                            p.corners, size[0], size[1]
+                        ),
+                        size,
+                        flags=cv2.INTER_NEAREST,
+                        borderValue=0,
+                    )
+                    > 0
+                )
+        if static is not None:
+            return static
+        return (
+            cv2.warpPerspective(
+                cam.astype(np.uint8) * 255,
+                registration._corners_page_matrix(p.corners, size[0], size[1]),
+                size,
+                flags=cv2.INTER_LINEAR,
+                borderValue=0,
+            )
+            > 127
+        )
+
     def _pass_identity_residual(self, p):
         """Residuo de registro da folha devolvida (F-11).
 
@@ -3049,6 +3110,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 visible,
                 sampled,
                 self._accumulator.threshold,
+                self._coverage_for_estimate(p),
             )
         else:
             p.identity_residual = self._identity_residual
