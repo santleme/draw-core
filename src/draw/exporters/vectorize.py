@@ -58,6 +58,63 @@ MM_PER_PX_X = PAPER_W_MM / PAPER_W_PX
 MM_PER_PX_Y = PAPER_H_MM / PAPER_H_PX
 MM_PER_PX = 0.5 * (MM_PER_PX_X + MM_PER_PX_Y)
 
+
+# Modo de medida: False = legado A4; True = papel custom. É a FLAG que
+# distingue os dois modos, nunca o valor da escala — um papel explícito
+# pode reproduzir as razões do default (ex.: 420x594 mm em 1700x2400 px)
+# e mesmo assim pede a medida métrica por eixo.
+_PAPER_OVERRIDE = False
+
+
+def _set_paper_mm(paper_w_mm, paper_h_mm, img_w_px, img_h_px):
+    """Reaponta a escala px->mm para uma folha não-A4 (override de CLI).
+
+    Os denominadores em px vêm da imagem carregada, não das constantes
+    ``PAPER_W_PX``/``PAPER_H_PX``: uma folha paisagem chega com o canvas
+    já rotacionado (ex.: 1200x850), então a grade legada não se aplica.
+    """
+    global PAPER_W_MM, PAPER_H_MM, MM_PER_PX_X, MM_PER_PX_Y, MM_PER_PX
+    global _PAPER_OVERRIDE
+    PAPER_W_MM = float(paper_w_mm)
+    PAPER_H_MM = float(paper_h_mm)
+    MM_PER_PX_X = PAPER_W_MM / img_w_px
+    MM_PER_PX_Y = PAPER_H_MM / img_h_px
+    MM_PER_PX = 0.5 * (MM_PER_PX_X + MM_PER_PX_Y)
+    _PAPER_OVERRIDE = True
+
+
+def _reset_paper_mm():
+    """Restaura escala e modo de medida do A4 default (finally de main)."""
+    global _PAPER_OVERRIDE
+    _set_paper_mm(210.0, 297.0, PAPER_W_PX, PAPER_H_PX)
+    _PAPER_OVERRIDE = False
+
+
+def _decision_space():
+    """Espaço em que a geometria das primitivas é decidida.
+
+    Devolve ``(scale_dec, unit_mm, mm_axis)``: pontos de decisão =
+    ``pts_px * scale_dec``, medidas escalares = ``len_dec * unit_mm`` e
+    coordenadas de saída = ``p_dec * mm_axis``.
+
+    Sem override de papel, o espaço de decisão é o próprio raster em px,
+    as medidas saem pela média legada ``MM_PER_PX`` e as coordenadas pela
+    escala de cada eixo — bit a bit idêntico ao histórico. Com papel
+    custom, os pontos são normalizados para "pixels isotrópicos" — a
+    correção clássica de pixel aspect ratio, sem reamostrar o raster:
+    ``pts * (sx/ref, sy/ref)`` com ``ref = min(sx, sy)`` torna a métrica
+    uniforme (1 unidade = ``ref`` mm em qualquer direção). Nesse espaço
+    as mesmas tolerâncias do legado (gap 8, raio 6, desvios 2.5/3.5/4,
+    lado 10) medem geometria real: um círculo que o cisalhamento px->mm
+    tornou elipse no raster volta a ser redondo, e um oval do raster
+    não vira círculo na saída.
+    """
+    if not _PAPER_OVERRIDE:
+        return np.ones(2), MM_PER_PX, np.array([MM_PER_PX_X, MM_PER_PX_Y])
+    ref = min(MM_PER_PX_X, MM_PER_PX_Y)
+    return np.array([MM_PER_PX_X / ref, MM_PER_PX_Y / ref]), ref, np.full(2, ref)
+
+
 THINNING_TYPES = {
     "zhangsuen": cv2.ximgproc.THINNING_ZHANGSUEN,
     "guohall": cv2.ximgproc.THINNING_GUOHALL,
@@ -620,7 +677,8 @@ def classify_primitive(polyline):
     Retorna um dicionário com `type` em `{"point", "line", "circle",
     "rectangle", "polygon", "polyline"}` e parâmetros métricos em mm/px.
     """
-    pts = polyline["points"]
+    scale_dec, unit_mm, mm_axis = _decision_space()
+    pts = np.asarray(polyline["points"], dtype=np.float64) * scale_dec
     closed = bool(polyline["closed"])
     meta = {}
     if "t_start_ms" in polyline:
@@ -634,8 +692,8 @@ def classify_primitive(polyline):
     if len(pts) == 1:
         return {
             "type": "point",
-            "x_mm": round(float(pts[0, 0] * MM_PER_PX_X), 3),
-            "y_mm": round(float(pts[0, 1] * MM_PER_PX_Y), 3),
+            "x_mm": round(float(pts[0, 0] * mm_axis[0]), 3),
+            "y_mm": round(float(pts[0, 1] * mm_axis[1]), 3),
             **meta,
         }
 
@@ -656,11 +714,11 @@ def classify_primitive(polyline):
             if max_dev <= max(2.5, 0.025 * chord_len):
                 return {
                     "type": "line",
-                    "x1_mm": round(float(p0[0] * MM_PER_PX_X), 3),
-                    "y1_mm": round(float(p0[1] * MM_PER_PX_Y), 3),
-                    "x2_mm": round(float(p1[0] * MM_PER_PX_X), 3),
-                    "y2_mm": round(float(p1[1] * MM_PER_PX_Y), 3),
-                    "length_mm": round(float(chord_len * MM_PER_PX), 3),
+                    "x1_mm": round(float(p0[0] * mm_axis[0]), 3),
+                    "y1_mm": round(float(p0[1] * mm_axis[1]), 3),
+                    "x2_mm": round(float(p1[0] * mm_axis[0]), 3),
+                    "y2_mm": round(float(p1[1] * mm_axis[1]), 3),
+                    "length_mm": round(float(chord_len * unit_mm), 3),
                     "max_dev_px": round(max_dev, 3),
                     **meta,
                 }
@@ -676,22 +734,31 @@ def classify_primitive(polyline):
                 radii = np.hypot(dense[:, 0] - cx, dense[:, 1] - cy)
                 rmse = float(np.sqrt(np.mean((radii - r) ** 2)))
                 max_err = float(np.max(np.abs(radii - r)))
-                angles = np.mod(
-                    np.degrees(np.arctan2(dense[:, 1] - cy, dense[:, 0] - cx)),
-                    360.0,
-                )
-                bins = np.unique((angles // 15.0).astype(int))
+                theta = np.arctan2(dense[:, 1] - cy, dense[:, 0] - cx)
+                bins = np.unique((np.mod(np.degrees(theta), 360.0) // 15.0).astype(int))
                 # >= 21 de 24 setores de 15° cobertos (>= 315°).
-                if (
+                circle_like = (
                     len(bins) >= 21
                     and rmse / r <= 0.055
                     and max_err <= max(3.5, 0.10 * r)
-                ):
+                )
+                if circle_like and _PAPER_OVERRIDE:
+                    # No espaço normalizado a excentricidade é física: um
+                    # oval tem o desvio radial dominado pelo 2º harmônico
+                    # (polos opostos sistemáticos), ruído de raster não.
+                    # Sem essa auditoria uma elipse suave com rmse baixo
+                    # exportaria como círculo de raio único.
+                    h2 = np.column_stack([np.cos(2.0 * theta), np.sin(2.0 * theta)])
+                    coef, _, _, _ = np.linalg.lstsq(h2, radii - r, rcond=None)
+                    circle_like = float(np.hypot(coef[0], coef[1])) <= max(
+                        1.5, 0.035 * r
+                    )
+                if circle_like:
                     return {
                         "type": "circle",
-                        "cx_mm": round(cx * MM_PER_PX_X, 3),
-                        "cy_mm": round(cy * MM_PER_PX_Y, 3),
-                        "r_mm": round(r * MM_PER_PX, 3),
+                        "cx_mm": round(cx * mm_axis[0], 3),
+                        "cy_mm": round(cy * mm_axis[1], 3),
+                        "r_mm": round(r * unit_mm, 3),
                         "radial_rmse_px": round(rmse, 3),
                         **meta,
                     }
@@ -716,45 +783,58 @@ def classify_primitive(polyline):
                         break
                 opp0 = abs(lengths[0] - lengths[2]) / max(lengths[0], lengths[2])
                 opp1 = abs(lengths[1] - lengths[3]) / max(lengths[1], lengths[3])
-                # Garante também que o contorno real segue os 4 lados do retângulo.
+                # Garante também que o contorno real segue os 4 lados.
+                # O desvio é medido com sinal sobre a normal externa de
+                # cada lado: um contorno curvo (oval simplificado a 4
+                # cantos) fica sistematicamente FORA do quadrilátero
+                # inscrito, enquanto as arestas de um retângulo real
+                # oscilam em torno da aresta (~metade dentro, metade fora).
+                center = corners.mean(axis=0)
+                normals = []
+                for i, s in enumerate(sides):
+                    n = np.array([s[1], -s[0]], dtype=np.float64) / lengths[i]
+                    if float(np.dot(n, center - corners[i])) > 0:
+                        n = -n
+                    normals.append(n)
+                # "Fora" só conta acima de uma tolerância numérica: a
+                # interpolação deixa resíduos de ~1e-14 em amostras que
+                # estão exatamente sobre a aresta, e sem o eps a fração
+                # de fora depende do sinal do último bit (posição).
+                out_eps = (
+                    64.0
+                    * np.finfo(np.float64).eps
+                    * max(1.0, float(np.abs(dense).max()))
+                )
                 rect_dev = []
+                n_out = 0
                 for p in dense:
-                    d_min = min(
-                        abs(
-                            float(
-                                (corners[(i + 1) % 4, 0] - corners[i, 0])
-                                * (corners[i, 1] - p[1])
-                                - (corners[(i + 1) % 4, 1] - corners[i, 1])
-                                * (corners[i, 0] - p[0])
-                            )
-                        )
-                        / lengths[i]
-                        for i in range(4)
-                    )
-                    rect_dev.append(d_min)
+                    ds = [float(np.dot(p - corners[i], normals[i])) for i in range(4)]
+                    j = int(np.argmin(np.abs(ds)))
+                    rect_dev.append(abs(ds[j]))
+                    n_out += ds[j] > out_eps
                 if (
                     angles_ok
                     and opp0 <= 0.12
                     and opp1 <= 0.12
                     and max(rect_dev) <= max(4.0, 0.05 * max(lengths))
+                    and (not _PAPER_OVERRIDE or n_out / len(rect_dev) <= 0.7)
                 ):
-                    w_px = 0.5 * (lengths[0] + lengths[2])
-                    h_px = 0.5 * (lengths[1] + lengths[3])
+                    w_mm = 0.5 * (lengths[0] + lengths[2]) * unit_mm
+                    h_mm = 0.5 * (lengths[1] + lengths[3]) * unit_mm
                     ang_deg = math.degrees(math.atan2(sides[0][1], sides[0][0]))
-                    center = corners.mean(axis=0)
                     return {
                         "type": "rectangle",
                         "center_mm": [
-                            round(float(center[0] * MM_PER_PX_X), 3),
-                            round(float(center[1] * MM_PER_PX_Y), 3),
+                            round(float(center[0] * mm_axis[0]), 3),
+                            round(float(center[1] * mm_axis[1]), 3),
                         ],
-                        "width_mm": round(float(w_px * MM_PER_PX), 3),
-                        "height_mm": round(float(h_px * MM_PER_PX), 3),
+                        "width_mm": round(w_mm, 3),
+                        "height_mm": round(h_mm, 3),
                         "angle_deg": round(ang_deg, 2),
                         "corners_mm": [
                             [
-                                round(float(c[0] * MM_PER_PX_X), 3),
-                                round(float(c[1] * MM_PER_PX_Y), 3),
+                                round(float(c[0] * mm_axis[0]), 3),
+                                round(float(c[1] * mm_axis[1]), 3),
                             ]
                             for c in corners
                         ],
@@ -765,7 +845,7 @@ def classify_primitive(polyline):
         "type": "polygon" if closed else "polyline",
         "vertices": len(pts),
         "points_mm": [
-            [round(float(x * MM_PER_PX_X), 3), round(float(y * MM_PER_PX_Y), 3)]
+            [round(float(x * mm_axis[0]), 3), round(float(y * mm_axis[1]), 3)]
             for x, y in pts
         ],
         **meta,
@@ -1135,6 +1215,20 @@ def main(argv=None):
         help="imprime as distâncias nos dois sentidos",
     )
     parser.add_argument(
+        "--paper-w-mm",
+        type=float,
+        default=None,
+        help="largura da folha em mm (default A4 retrato: 210); os "
+        "denominadores em px saem da imagem carregada, então serve "
+        "também para paisagem e outras grades",
+    )
+    parser.add_argument(
+        "--paper-h-mm",
+        type=float,
+        default=None,
+        help="altura da folha em mm (default A4 retrato: 297); exige --paper-w-mm",
+    )
+    parser.add_argument(
         "--selfcheck",
         action="store_true",
         help="roda a bancada sintética e sai",
@@ -1146,8 +1240,30 @@ def main(argv=None):
         return 0
     if not args.input:
         parser.error("informe o PNG de entrada ou --selfcheck")
+    if (args.paper_w_mm is None) != (args.paper_h_mm is None):
+        parser.error("--paper-w-mm e --paper-h-mm devem ser passados juntos")
+    if args.paper_w_mm is not None and (
+        not math.isfinite(args.paper_w_mm)
+        or not math.isfinite(args.paper_h_mm)
+        or args.paper_w_mm <= 0
+        or args.paper_h_mm <= 0
+    ):
+        parser.error("--paper-w-mm/--paper-h-mm devem ser positivos finitos")
 
     ink, polarity = load_ink(args.input)
+    if args.paper_w_mm is None:
+        return _run_pipeline(args, ink, polarity)
+    # Folha não-A4: reaponta a escala a partir da imagem real e restaura
+    # o default no fim — main() nunca deixa o módulo mutado.
+    img_h_px, img_w_px = ink.shape[:2]
+    _set_paper_mm(args.paper_w_mm, args.paper_h_mm, img_w_px, img_h_px)
+    try:
+        return _run_pipeline(args, ink, polarity)
+    finally:
+        _reset_paper_mm()
+
+
+def _run_pipeline(args, ink, polarity):
     stamps = load_stamps(args.stamps) if args.stamps else None
     if args.clean:
         polylines = vectorize_clean(
@@ -1176,6 +1292,8 @@ def main(argv=None):
     summary["polaridade_tinta"] = polarity
     summary["epsilon_px"] = args.epsilon
     summary["thinning"] = args.thinning
+    if args.paper_w_mm is not None:
+        summary["paper_mm"] = [PAPER_W_MM, PAPER_H_MM]
     summary["svg"] = out
     if args.json:
         payload = {"summary": summary, "primitives": prims}
