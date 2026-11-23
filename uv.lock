@@ -475,7 +475,7 @@ hand = [
 requires-dist = [
     { name = "draw-dral", editable = "packages/draw-dral" },
     { name = "mediapipe", marker = "extra == 'hand'", specifier = ">=0.10" },
-    { name = "numpy", specifier = ">=1.26" },
+    { name = "numpy", specifier = ">=2.0" },
     { name = "onnx", marker = "extra == 'dev'", specifier = ">=1.16" },
     { name = "onnxruntime", specifier = ">=1.17" },
     { name = "opencv-contrib-python", marker = "extra == 'gui'", specifier = ">=4.8,<5.1" },
