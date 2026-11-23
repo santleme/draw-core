@@ -282,3 +282,32 @@ def test_production_preset_keeps_paper_and_border_guards():
     cfg = InkConfig.production()
     assert cfg.paper_guard is True
     assert cfg.border_guard_px is None
+
+
+def test_pipeline_config_legacy_reproduces_the_manual_pins():
+    """legacy() é o preset nomeado dos pinos manuais: False = a base de
+    parity/desk (a guarda fotométrica não existia no SheetInkLoop);
+    True = a base de eval/sim (InkConfig() de fábrica já traz a guarda)."""
+    from draw.settings import PipelineConfig
+
+    assert PipelineConfig.legacy(paper_guard=False) == PipelineConfig(
+        ink=InkConfig(paper_guard=False), ink_auto_gain=False, detect_wake=False
+    )
+    assert PipelineConfig.legacy(paper_guard=True) == PipelineConfig(
+        ink=InkConfig(), ink_auto_gain=False, detect_wake=False
+    )
+
+
+def test_pipeline_config_legacy_requires_the_guard_keyword():
+    """A guarda não tem default: cada régu escolhe o lado de propósito."""
+    from draw.settings import PipelineConfig
+
+    with pytest.raises(TypeError):
+        PipelineConfig.legacy()
+
+
+def test_pipeline_config_legacy_is_not_the_production_default():
+    from draw.settings import PipelineConfig
+
+    assert PipelineConfig.legacy(paper_guard=True) != PipelineConfig()
+    assert PipelineConfig.legacy(paper_guard=False) != PipelineConfig()

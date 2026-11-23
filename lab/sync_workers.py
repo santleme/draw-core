@@ -10,6 +10,7 @@ este módulo: roda num subprocesso com PYTHONPATH do repo legado e
 fica auto-contido de propósito.
 """
 
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import cv2
@@ -142,3 +143,189 @@ class SyncPresence:
         if self.result is not None and self.result.sequence > after_seq:
             return self.result
         return None
+
+
+# ------------------------------------------------------------------
+# Montagem compartilhada do laço síncrono
+# ------------------------------------------------------------------
+
+_NO_HAND = object()
+"""Sentinela do "sem pilha de mão" de build_sync_pipeline.
+
+Distingue o default (replay/sim/bench: nenhum objeto de mão é
+criado) de ``hand_model=None``, que resolve o modelo convencional
+como o app: masker e presença podem nascer dele."""
+
+
+@dataclass(frozen=True, slots=True)
+class SyncBundle:
+    """O laço dirigido montado, com os recursos vivos que ele segura.
+
+    ``close()`` fecha masker e presença (os landmarkers MediaPipe) de
+    forma idempotente — é o finally de cada driver, no lugar do
+    __del__ que vazava landmarker em vídeo longo. Detecção e tinta
+    não guardam recurso a fechar.
+    """
+
+    clock: StepClock
+    detection_worker: object
+    presence_worker: object
+    ink_worker: object
+    pipeline: object
+    page_clean: object
+    hand_masker: object
+    presence: object
+    _closed: bool = field(default=False, init=False, repr=False, compare=False)
+
+    def close(self):
+        """Fecha masker e presença; a segunda chamada não faz nada."""
+        if self._closed:
+            return
+        object.__setattr__(self, "_closed", True)
+        if self.hand_masker is not None:
+            self.hand_masker.close()
+        if self.presence is not None:
+            self.presence.close()
+
+
+def build_sync_pipeline(
+    *,
+    verify,
+    config,
+    sheet_model=None,
+    ink_model=None,
+    hand_model=_NO_HAND,
+    detector=None,
+    page_clean=None,
+    detection_worker=None,
+    detect_ms=1.0,
+    keep_history=False,
+    presence_strict=False,
+):
+    """Monta o Pipeline + as trabalhadoras síncronas dos drivers do lab.
+
+    É a fiação comum de eval_capture, parity_e2e, replay_lab e
+    sim_writer — os laços por quadro seguem sob medida em cada um.
+
+    verify é o callable de integridade dos modelos (o pipeline injeta
+    draw.infra.manifest.verify_model; None é o opt-out explícito das
+    bancadas). config é o PipelineConfig que alinha Pipeline e
+    PageCleanWorker no mesmo preset.
+
+    Detecção, por precedência: ``detection_worker`` pronto (o
+    OracleDet do sim) > ``detector`` crua (embrulhada no SyncDetector)
+    > ``sheet_model`` (NeuralSheetDetector construído e carregado aqui)
+    > nada (o SyncDetector roda o caminho clássico). ``sheet_model``
+    informado constrói e carrega SEMPRE — mesmo quando um
+    detection_worker o vence: o braço oráculo do sim_writer carrega o
+    binário real sem usá-lo, e essa verificação é fail-closed.
+
+    Tinta: ``page_clean`` injetado vence (não se chama load() no
+    injetado — quem monta é quem carrega); senão PageCleanInk recebe
+    ``ink_model`` CRU: None resolve DEFAULT_MODEL_PATH internamente e
+    str(None) quebraria o caminho.
+
+    Mão: ``hand_model=_NO_HAND`` (o default) não cria nada da pilha.
+    ``hand_model=None`` resolve o modelo convencional: o masker segue
+    o gate de ``hand_model_available`` (comportamento do eval/app); a
+    presença segue ``hand_model is not None`` — micro-alinhamento ao
+    `if hand_model` da paridade (morto via main, que sempre resolve um
+    Path, vivo nos testes): com None o masker pode existir e a
+    presença nunca nasce. ``presence_strict=True`` reprova a amostra
+    perdida como erro (a régua de paridade exige: amostra perdida não
+    pode virar "mão medida").
+
+    Todos os imports ``draw.*`` ficam DENTRO do corpo, resolvidos a
+    cada chamada: bancadas e testes instrumentam os módulos (o
+    bench_ink espioa ``pipeline.Pipeline``; a paridade e o eval
+    grampeiam ``PageCleanWorker``/``NeuralSheetDetector``/``Pipeline``)
+    — um import no topo fixaria a classe real antes da interceptação.
+    O SyncDetector.submit já lazy-importa pela mesma razão.
+    """
+    from draw import hand as hand_module
+    from draw.hand_presence import make_hand_presence
+    from draw.ink.worker import PageCleanWorker
+    from draw.page_clean import PageCleanInk
+    from draw.perception import NeuralSheetDetector
+    from draw.pipeline import Pipeline
+
+    clock = StepClock()
+
+    if page_clean is None:
+        page_clean = PageCleanInk(ink_model, verify=verify)
+        page_clean.load()
+
+    if hand_model is _NO_HAND:
+        hand_masker = None
+        presence = None
+    else:
+        hand_masker = (
+            hand_module.HandMasker(hand_model, verify=verify)
+            if hand_module.hand_model_available(hand_model)
+            else None
+        )
+        presence = (
+            make_hand_presence(hand_model, verify=verify)
+            if hand_model is not None
+            else None
+        )
+    presence_worker = (
+        SyncPresence(presence, strict=presence_strict) if presence is not None else None
+    )
+    ink_worker = PageCleanWorker(
+        page_clean,
+        hand_masker,
+        clock=clock,
+        config=config.ink,
+        ink_divnorm=config.ink_divnorm,
+    )
+
+    if sheet_model is not None:
+        built_detector = NeuralSheetDetector(str(sheet_model), verify=verify)
+        built_detector.load()
+        if detector is None:
+            detector = built_detector
+    if detection_worker is None:
+        detection_worker = SyncDetector(
+            detector, detect_ms=detect_ms, keep_history=keep_history
+        )
+    pipeline = Pipeline(
+        detection_worker=detection_worker,
+        ink_worker=ink_worker,
+        hand_presence_worker=presence_worker,
+        hand_masker=hand_masker,
+        clock=clock,
+        log=lambda *_a: None,
+        config=config,
+    )
+    return SyncBundle(
+        clock=clock,
+        detection_worker=detection_worker,
+        presence_worker=presence_worker,
+        ink_worker=ink_worker,
+        pipeline=pipeline,
+        page_clean=page_clean,
+        hand_masker=hand_masker,
+        presence=presence,
+    )
+
+
+def step_sync_frame(pipeline, ink_worker, packet):
+    """Um quadro do laço dirigido: step + pump + colheita, com erro explícito.
+
+    ``step`` já devolve uma colheita (None ou INK_WORKER_FAILED);
+    ``pump`` devolve True quando uma passada rodou — só então a
+    colheita extra publica a passada nova no mesmo quadro (sem
+    passada, collect_ink é um poll_display vazio). Um worker.error ou
+    um outcome não-None encerram o laço como RuntimeError. Devolve
+    ``pumped`` para o driver medir a passada deste quadro.
+    """
+    outcome = pipeline.step(packet)
+    pumped = ink_worker.pump()
+    if pumped and outcome is None:
+        outcome = pipeline.collect_ink()
+    if ink_worker.error is not None:
+        raise RuntimeError("trabalhadora de tinta falhou") from ink_worker.error
+    if outcome is not None:
+        raise RuntimeError(f"laço do Draw encerrou: {outcome}")
+    return pumped
