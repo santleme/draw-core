@@ -13,9 +13,9 @@ semeadura ou exposição.
 | Estado | Dono/escritor | Leitores |
 |---|---|---|
 | `_generation` | `_condition` (transições) | `submit`, `_pass_commit`, `poll`, `new_generation` |
-| `_page_model` (referência) | thread do worker, só dentro de `_pm_gate` | `new_generation` (snapshot), thread do worker |
+| `_page_model` (referência) | `_pass_identity` pode invalidar para `None` na fase A sob `_condition`; criação e re-zero no trecho sob `_pm_gate` | `new_generation` (snapshot), thread do worker |
 | Conteúdo do `PageModel` (`_ref`, `_norm_ref`, `_observed_norm`, `_seeded`, `_unseen_hold`, `_unseen_blocked`, `_streak`, holds, chroma) | thread do worker via `exposed`/`observe`/`covered_unseeded`, dentro de `_pm_gate` | `new_generation` (`.copy()` do `observed_normalized_gray`), leituras derivadas no mesmo trecho |
-| `_pm_epoch` / `_canvas_epoch` / `_pm_reset_seq` | thread do worker, `_pm_gate` + `_condition` | `_pass_commit` (check do token), `baseline_state` |
+| `_pm_epoch` / `_canvas_epoch` / `_pm_reset_seq` | `_pass_identity` invalida canvas/modelo na fase A sob `_condition`; re-zero e commit de epoch no trecho sob `_pm_gate` + `_condition`; `new_generation` sob ambos | `_pass_commit` (check do token), `baseline_state` |
 | `_paper_ref` | `_condition` | `_pass_evidence`/guarda de papel |
 | `_accumulator`, contadores, publicação | `_condition` (fase B) | `poll`, `stats` |
 
@@ -45,11 +45,12 @@ cópia, não de confiança na imutabilidade do produtor.
   `_paper_ref`, trecho do modelo). `submit()` descarta páginas de
   geração velha na entrada; a passada em voo é descartada no check de
   token do gate.
-- `pm_epoch = (canvas_epoch, pm_reset_seq)`: invalida a *vida* do modelo
-  — primeira passada de geração nova (`keep_page=False`), re-zero
-  aplicado, e `new_generation()` não-preserve adiantam a época. O check
-  do token usa os dois: `p.generation != _generation or
-  p.pm_epoch != (_canvas_epoch, _pm_reset_seq)`.
+- `pm_epoch = (canvas_epoch, pm_reset_seq)`: invalida a *vida* do modelo.
+  A decisão de página nova/timeout adianta `canvas_epoch` na fase A; o
+  re-zero aplicado adianta os dois componentes no commit da fase B; e
+  `new_generation()` não-preserve adianta `pm_reset_seq`. O check do token
+  usa ambos: `p.generation != _generation or p.pm_epoch !=
+  (_canvas_epoch, _pm_reset_seq)`.
 
 ## Lock order e regiões
 
@@ -72,7 +73,8 @@ Região crítica de `_pass_commit` (dentro de `_pm_gate`):
 3. lock 2b sob `_condition`: re-check do token (com `step` de re-zero),
    commit do re-zero (`_pm_rezero_requested` consumido,
    `_accumulator.reset`, `_canvas_epoch += 1`, `_pm_reset_seq += 1`),
-   `_pass_vote_and_publish`, `notify_all`, e o delta fora do lock.
+   `_pass_vote_and_publish` e `notify_all`. O cálculo/anexo do delta vem
+   depois, com `_condition` solto mas ainda sob `_pm_gate`.
 
 A transição (`new_generation`) faz `with self._pm_gate, self._condition`
 — captura de identidade (incluindo `observed_normalized_gray.copy()`),
@@ -96,6 +98,11 @@ seu commit:
   modelo novo ficaria com canvas velho e pedido pendente.
 - **Commit de publicação (fase B)**: voto + publicação sob `_condition`
   dentro do gate — lineariza junto com o trecho contra `new_generation`.
+- **Commit de fase A**: identidade, âncora e invalidações de página/canvas
+  são atualizadas sob `_condition`, depois da validação inicial de
+  `generation`. Se uma transição vier depois da fase A mas antes do gate,
+  ela observa essas mudanças; a passada ainda é descartada antes de
+  mutar o PageModel, votar ou publicar.
 - **Commit de transição**: `new_generation` inteiro sob
   `gate → _condition` — lineariza entre passadas comitadas.
 - **Rejeição de passada obsoleta**: `return True` no check do token —
@@ -103,8 +110,11 @@ seu commit:
 
 Consequência das duas ordenações possíveis:
 
-- transição antes → a passada morre inteira no check do token (sem
-  mutação, sem troca, sem publicação);
+- transição antes da fase A → a passada morre na validação inicial, sem
+  efeitos;
+- transição depois da fase A e antes do gate → a fase A já comitou sob
+  `_condition`; o check do gate descarta o PageModel, a troca, o voto e a
+  publicação da passada velha;
 - transição depois → mutações do modelo **e** publicação desta passada
   comitam antes do retorno de `new_generation()` — o estado persistente
   fotografado na transição já as contém, e nada muda depois.
