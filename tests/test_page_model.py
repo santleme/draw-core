@@ -3288,6 +3288,32 @@ def test_identity_residual_does_not_invent_x_when_half_the_stroke_is_visible(sid
     ) == (0, -dy)
 
 
+@pytest.mark.parametrize(
+    "strokes", [(4, 60, 110, 170), (4, 120)], ids=["quatro", "so_dois"]
+)
+@pytest.mark.parametrize("dy", [-3, -6, -9, -12, 6, 12])
+def test_identity_residual_when_the_shift_cuts_ink_at_the_grid_edge(dy, strokes):
+    """Um traco colado na borda da grade sai dela quando a translacao o empurra
+    (dy < -4 para o traco em y = 4): a evidencia perde massa e o suporte dos
+    candidatos muda. O estimador recupera o deslocamento verdadeiro (ou se
+    abstem), nunca devolve outro, com e sem cobertura; com a massa restante
+    ele ainda acerta."""
+    h, w = 240, 320
+    ref = np.zeros((h, w), np.uint8)
+    evidence = np.zeros((h, w), np.float32)
+    for y in strokes:
+        ref[y : y + 6, 40:280] = 255
+        lo, hi = max(0, y + dy), min(h, y + dy + 6)
+        if hi > lo:  # o que cai fora da grade e cortado
+            evidence[lo:hi, 40:280] = 0.95
+    coverage = np.ones((h, w), bool)
+    for cov in (None, coverage):
+        got = worker_mod._estimate_identity_residual(
+            ref, None, evidence, None, None, 0.5, cov
+        )
+        assert got == (0, -dy), (cov is not None, got)
+
+
 def test_identity_residual_abstains_without_observable_support():
     ref, evidence, _ = _ruled_with_table(20)
     nothing_covered = np.zeros(ref.shape, dtype=bool)
