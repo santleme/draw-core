@@ -25,3 +25,14 @@ logs/
 .idea/
 .vscode/
 
+# Local tool state and scratch outputs.
+.claude/
+.omc/
+.omx/
+.issues/
+release-downloads/
+*.err
+*.tmp
+*.log
+.env*
+

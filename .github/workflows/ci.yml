@@ -3,13 +3,11 @@ name: ci
 on:
   pull_request:
     paths-ignore:
-      - 'site/**'
       - 'docs/**'
       - '**.md'
   push:
     branches: [main]
     paths-ignore:
-      - 'site/**'
       - 'docs/**'
       - '**.md'
 
