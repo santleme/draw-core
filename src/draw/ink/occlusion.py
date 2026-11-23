@@ -236,7 +236,6 @@ class PaperExposureGuard:
         self._ink_streak = None
         self._fill_adopted = None
         self._last_fill_adoption = False
-        self._last_adopted_pixels = None
         self._recovering = None
         self._was_anomalous = None
         self._was_texture_anomaly = None
@@ -267,17 +266,6 @@ class PaperExposureGuard:
         janela de confirmação uma vez por preenchimento adotado, sem
         segurar o orçamento enquanto o bloco seguir adotado."""
         return self._last_fill_adoption
-
-    @property
-    def adopted_pixels(self):
-        """Pixels (grade do warp) do preenchimento ADOTADO nesta observacao.
-
-        None quando nenhum bloco esta adotado. E o que o worker usa para a
-        votacao nao perder um preenchimento que a guarda ja adotou (o
-        `pm.exposed` le o bloco solido mais grosso que a janela como sombra).
-        Nao e contrato congelado: so uma leitura da guarda.
-        """
-        return self._last_adopted_pixels
 
     @property
     def recovering(self):
@@ -406,7 +394,6 @@ class PaperExposureGuard:
         # recomputar, senão uma passada sem imagem válida a repetia
         # e a trabalhadora rearmava a janela para sempre.
         self._last_fill_adoption = False
-        self._last_adopted_pixels = None
         self._marks_pending_age = 0
         if not isinstance(image, np.ndarray) or image.dtype != np.uint8:
             return None
@@ -1079,7 +1066,6 @@ class PaperExposureGuard:
                 if unblocked is None:
                     unblocked = np.ones((height, width), dtype=bool)
                 unblocked[recovered] = True
-                self._last_adopted_pixels = recovered.copy()
         # Hold de recuperação: decai um por passada, zera onde a
         # anomalia voltou, e o tile que saiu de anomalia recarrega o
         # hold (a evidência voltando fica aberta _RECOVERY_HOLD_PASSES).
