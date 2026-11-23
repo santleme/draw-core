@@ -784,3 +784,39 @@ def test_slide_after_a_return_with_residual_keeps_the_drawing(ink):
     got = _confirmed(worker, gen2) > 0
     assert np.count_nonzero(got & before) >= 0.95 * np.count_nonzero(before)
     assert np.count_nonzero(got & ~_dilate(before, 1)) == 0
+
+
+@pytest.mark.parametrize("residual", [2, 6])
+def test_new_stroke_after_a_return_with_residual_confirms_in_place(ink, residual):
+    """Depois da devolucao com erro de rastreio, tinta NOVA precisa
+    confirmar no lugar certo da grade do canvas. A evidencia nova passa
+    pela cobertura, pelo cinza do PageModel e pela pegada; este contrato e
+    sensivel ao CONJUNTO desses mapas na grade corrigida (um mutante que
+    desalinha os tres de uma vez o reprova), sem isolar qual deles. O
+    desenho antigo, restaurado, continua intacto e esconde a falha — so um
+    traco novo a expoe."""
+    worker, clock = ink
+    generation = worker.new_generation()
+    scene = _Scene()
+    _passes(worker, clock, generation, scene, 4, dt=_DT_IDLE)
+    for stroke in _F11_STROKES:
+        _write_stroke(worker, clock, generation, scene, stroke)
+    old = _stroke_mask(scene)
+
+    returned = _Scene()
+    for y0, y1, x0, x1 in _F11_STROKES:
+        returned.draw((y0 + residual, y1 + residual, x0, x1))
+    gen2 = worker.new_generation(preserve_identity=True)
+    _passes(worker, clock, gen2, returned, 6, dt=_DT_IDLE)
+
+    new = (170, 176, 40, 280)  # lugar vazio da pagina, na grade do canvas
+    truth = _Scene()
+    truth.draw(new)
+    want = _stroke_mask(truth)
+    # A folha anda `residual` px na grade do warp: o traco novo tambem.
+    _write_stroke(
+        worker, clock, gen2, returned, (170 + residual, 176 + residual, 40, 280)
+    )
+    got = _confirmed(worker, gen2) > 0
+    assert _frac(got, want) >= 0.9
+    assert _beyond(got, want | old, 1) == 0
