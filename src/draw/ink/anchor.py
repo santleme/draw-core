@@ -133,6 +133,7 @@ class _AnchorSteps:
         raw_prob,
         registered_prob,
         visible=None,
+        grid_shift=(0, 0),
     ):
         """Avanca o evento de arbitragem; arbitra no fecho do streak.
 
@@ -193,6 +194,10 @@ class _AnchorSteps:
                 if self._anchor_roll == 0
                 else registration._permute_prob(raw_prob, -self._anchor_roll)
             )
+            # O residuo de registro (grade da ancora) vem DEPOIS da permutacao:
+            # T . Pi_k(P). A camera ja o recebe pela ancora efetiva (T . M . P).
+            dx, dy = grid_shift
+            page_prob = registration._translate_grid(page_prob, dx, dy)
             score_page = float(np.sum(page_prob * snapshot) / raw_total)
             score_camera = float(np.sum(registered_prob * snapshot) / registered_total)
             # Colocacoes ciclicas (frentes 23/24): a hipotese "a
@@ -209,7 +214,12 @@ class _AnchorSteps:
             else:
                 cyclic = tuple(
                     float(
-                        np.sum(registration._permute_prob(raw_prob, -k) * snapshot)
+                        np.sum(
+                            registration._translate_grid(
+                                registration._permute_prob(raw_prob, -k), dx, dy
+                            )
+                            * snapshot
+                        )
                         / raw_total
                     )
                     for k in (1, 2, 3)

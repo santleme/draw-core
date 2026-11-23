@@ -99,6 +99,19 @@ def _shift_anchor_corners(anchor_corners, dx, dy, shape):
     return moved.astype(np.float32)
 
 
+def _translate_grid(arr, dx, dy):
+    """Desloca o conteudo de (dx, dy) px inteiros; o que entra vira zero."""
+    if dx == 0 and dy == 0:
+        return arr
+    h, w = arr.shape[:2]
+    out = np.zeros_like(arr)
+    y0, y1 = max(0, dy), min(h, h + dy)
+    x0, x1 = max(0, dx), min(w, w + dx)
+    if y1 > y0 and x1 > x0:
+        out[y0:y1, x0:x1] = arr[y0 - dy : y1 - dy, x0 - dx : x1 - dx]
+    return out
+
+
 def _registration_is_identity(matrix):
     """True se a matriz nao move pixel nenhum (tol sub-pixel)."""
     return bool(

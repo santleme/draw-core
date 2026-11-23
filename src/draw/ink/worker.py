@@ -3731,6 +3731,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             p.prob,
             p.camera_prob,
             p.visible,
+            p.identity_residual,
         )
         p.arbitration_abstain = arb_status == "open"
         p.reg_info["arb_event_open"] = self._arb_event_open

@@ -892,3 +892,59 @@ def test_eraser_removes_a_stroke_after_a_return_with_residual(ink, residual):
     erased[:, cut:] = False
     assert np.count_nonzero(got & erased) <= 0.05 * np.count_nonzero(erased)
     assert _frac(got, drawn & ~erased) >= 0.90  # a testemunha segue confirmada
+
+
+@pytest.mark.parametrize("slide", [(14, 0), (0, 14)], ids=["x", "y"])
+@pytest.mark.parametrize("residual", [0, 2, 6])
+def test_new_stroke_after_a_slide_that_follows_a_return_with_residual(
+    ink, residual, slide
+):
+    worker, clock = ink
+    gen2, drawn, returned = _return_with_residual(worker, clock, residual)
+    returned.corners = Q0 + np.float32(slide)
+    worker.set_hand_presence(True, moved=True)
+    for _ in range(9):
+        _feed(worker, clock, returned.frame(gen2), dt=_DT_ACTIVE, must=False)
+    worker.set_hand_presence(False)
+    _passes(worker, clock, gen2, returned, 4, dt=_DT_IDLE)
+
+    new = (170, 176, 40, 280)
+    truth = _Scene()
+    truth.draw(new)
+    want = _stroke_mask(truth)
+    _write_stroke(
+        worker, clock, gen2, returned, (170 + residual, 176 + residual, 40, 280)
+    )
+    got = _confirmed(worker, gen2) > 0
+    assert _frac(got, want) >= 0.9
+    assert _beyond(got, want | drawn, 1) == 0
+
+
+@pytest.mark.parametrize("residual", [0, 6])
+def test_dark_band_and_residual_land_normally_on_a_vertical_slide(ink, residual):
+    """A banda escura deve mudar a evidência, não a ordem das hipóteses de
+    pose. A nova tinta é coberta por uma assimetria de coverage já existente;
+    este contrato fica restrito ao veredito, à pose e à retenção do canvas."""
+    worker, clock = ink
+    gen2, drawn, returned = _return_with_residual(worker, clock, residual)
+    for y0, y1, x0, x1 in _F11_STROKES:
+        returned.table[y0 + 11 : y1 + 17, x0:x1] = True
+    before = worker.anchor_corners
+    returned.corners = Q0 + np.float32([0, 14])
+    worker.set_hand_presence(True, moved=True)
+    for _ in range(9):
+        _feed(worker, clock, returned.frame(gen2), dt=_DT_ACTIVE, must=False)
+    worker.set_hand_presence(False)
+    _passes(worker, clock, gen2, returned, 4, dt=_DT_IDLE)
+
+    verdicts = {
+        record.get("arb_verdict") for record in worker.telemetry_snapshot()["records"]
+    }
+    assert "landing" in verdicts
+    assert "landing_rotated" not in verdicts
+    np.testing.assert_allclose(
+        worker.anchor_corners, before + np.float32([0, 14]), atol=1.5
+    )
+    got = _confirmed(worker, gen2) > 0
+    assert _frac(got, drawn) >= 0.95
+    assert _beyond(got, drawn, 1) == 0

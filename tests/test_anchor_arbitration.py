@@ -237,3 +237,53 @@ def test_no_mass_defaults_to_anchor_swap(fast):
     events = snapshot["anchor_arbitration_events"]
     assert [e["verdict"] for e in events] == ["landing_default"]
     np.testing.assert_allclose(worker._anchor_corners, STEP)
+
+
+def _shifted(img, dx, dy):
+    out = np.zeros_like(img)
+    h, w = img.shape
+    y0, y1, x0, x1 = max(0, dy), min(h, h + dy), max(0, dx), min(w, w + dx)
+    if y1 > y0 and x1 > x0:
+        out[y0:y1, x0:x1] = img[y0 - dy : y1 - dy, x0 - dx : x1 - dx]
+    return out
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    "residual", [(0, 0), (4, 0), (3, -5)], ids=["T0", "T4x", "T3_5"]
+)
+@pytest.mark.parametrize("k", [1, 2, 3])
+def test_rotated_landing_with_an_active_residual(fast, k, residual):
+    """O resíduo entra depois da permutação: T . Pi_k(P)."""
+    dx, dy = residual
+    full = np.array(
+        [[0.0, 0.0], [199.0, 0.0], [199.0, 99.0], [0.0, 99.0]], dtype=np.float32
+    )
+    moved = full + np.array([30.0, 10.0], dtype=np.float32)
+    content = np.zeros(SHAPE, dtype=np.float32)
+    content[15:22, 30:110] = 1.0
+    content[45:70, 55:63] = 1.0
+    content[75:82, 120:180] = 1.0
+    evidence = _shifted(content, -dx, -dy)
+    rotated = _permute(evidence, k)
+    worker = worker_mod.PageCleanWorker(_ProbIsWarp()).start()
+    try:
+        generation = worker.new_generation()
+        _drive(worker, generation, [(content, full.copy())])
+        worker._identity_residual = (dx, dy)
+        _drive(worker, generation, [(evidence, full.copy()) for _ in range(3)])
+        seen = len(worker.telemetry_snapshot()["anchor_arbitration_events"])
+        _drive(worker, generation, [(rotated, moved.copy()) for _ in range(6)])
+        events = worker.telemetry_snapshot()["anchor_arbitration_events"][seen:]
+        assert [event["verdict"] for event in events] == ["landing_rotated"]
+        assert events[0]["rotation_k"] == k
+        assert events[0]["scores_cyclic"][k] >= 0.9
+        np.testing.assert_allclose(worker._anchor_corners, np.roll(moved, k, axis=0))
+        confirmed = worker.poll_display(generation, 0).confirmed
+    finally:
+        worker.stop()
+    _tw, truth, _p2 = _run([(content, full.copy()) for _ in range(3)])
+    assert np.count_nonzero(truth & ~confirmed) == 0
+    inter = np.count_nonzero(confirmed & truth)
+    union = np.count_nonzero(confirmed | truth)
+    assert inter / union >= 0.85
