@@ -624,14 +624,21 @@ def _estimate_identity_residual(
     prior_px = float(np.count_nonzero(prior_c))
     base_recall = _exact_recall(prior_c, seen_c, 0, 0, prior_px, cover_c)
     best = None
-    for ddy in range(-2, 3):
-        for ddx in range(0, 1) if amb_x else range(-2, 3):
-            dx, dy = cx + ddx, cy + ddy
-            if (dx or dy) and max(abs(dx), abs(dy)) <= _RESIDUAL_MAX_PX:
-                recall = _exact_recall(prior_c, seen_c, dx, dy, prior_px, cover_c)
-                key = (-recall, abs(dx) + abs(dy))  # empate: menor deslocamento
-                if best is None or key < best[0]:
-                    best = (key, dx, dy, recall)
+    near_x = range(0, 1) if amb_x else range(-2, 3)
+    # Candidatos em volta do pico E com um eixo em zero: a correlacao aponta
+    # um pico mesmo quando so um eixo e determinado pela evidencia (tinta
+    # visivel pela metade, barras horizontais); se o recall nao distingue o
+    # deslocamento do pico do eixo em zero, o empate pelo MENOR deslocamento
+    # decide e nao se inventa uma translacao num eixo sem evidencia.
+    candidates = {(cx + ddx, cy + ddy) for ddy in range(-2, 3) for ddx in near_x}
+    candidates |= {(0, cy + ddy) for ddy in range(-2, 3)}
+    candidates |= {(cx + ddx, 0) for ddx in near_x}
+    for dx, dy in sorted(candidates):
+        if (dx or dy) and max(abs(dx), abs(dy)) <= _RESIDUAL_MAX_PX:
+            recall = _exact_recall(prior_c, seen_c, dx, dy, prior_px, cover_c)
+            key = (-recall, abs(dx) + abs(dy))  # empate: menor deslocamento
+            if best is None or key < best[0]:
+                best = (key, dx, dy, recall)
     if best is None:
         return 0, 0
     _, dx, dy, recall = best

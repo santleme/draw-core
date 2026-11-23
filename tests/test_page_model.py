@@ -3269,6 +3269,25 @@ def test_identity_residual_abstains_when_the_band_hides_the_evidence(table_shift
     ) == (0, 0)
 
 
+@pytest.mark.parametrize("side", ["left", "right"])
+@pytest.mark.parametrize("dy", [-6, 3, 6, 9])
+def test_identity_residual_does_not_invent_x_when_half_the_stroke_is_visible(side, dy):
+    """Barras horizontais com so metade da tinta visivel: a correlacao aponta
+    um pico em x (a borda da evidencia), mas o recall nao distingue esse dx do
+    dx = 0. O refinamento procurava so em volta do pico e devolvia (10, -6);
+    agora tambem avalia os candidatos com um eixo em zero e o empate pelo menor
+    deslocamento mantem x em 0."""
+    ref = np.zeros((240, 320), np.uint8)
+    evidence = np.zeros((240, 320), np.float32)
+    x0 = 40 if side == "left" else 160
+    for y0, y1 in ((50, 56), (90, 96), (130, 136)):
+        ref[y0:y1, 40:280] = 255
+        evidence[y0 + dy : y1 + dy, x0 : x0 + 120] = 0.95
+    assert worker_mod._estimate_identity_residual(
+        ref, None, evidence, None, None, 0.5
+    ) == (0, -dy)
+
+
 def test_identity_residual_abstains_without_observable_support():
     ref, evidence, _ = _ruled_with_table(20)
     nothing_covered = np.zeros(ref.shape, dtype=bool)
