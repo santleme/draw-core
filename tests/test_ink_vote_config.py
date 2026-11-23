@@ -302,3 +302,8 @@ def test_production_preset_turns_the_page_model_on_without_dropping_protections(
     # O escopo do flip e o preset de producao: legado e perfis nao mudam.
     assert InkConfig().page_model is False
     assert InkConfig.sketch().page_model is False
+    # technical() compoe production(), mas NAO herda o PageModel (nao medido
+    # para vetores de CAD): segue com votos + pauta, como antes do flip.
+    technical = InkConfig.technical()
+    assert technical.page_model is False
+    assert technical.ruling_removal is True

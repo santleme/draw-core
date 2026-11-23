@@ -482,6 +482,27 @@ class PageModel:
                             np.count_nonzero(np.abs(fail_c - cand) <= cand_spread)
                         )
                         global_shift = coherent_n >= _SHIFT_COHERENCE * fail_c.size
+                    elif witness_n < tested_n:
+                        # Testemunhas suficientes: oclusor local OU refs
+                        # mistas (parte da folha adaptou a luz nova enquanto
+                        # outra parte estava coberta e ficou com o ref velho).
+                        # Se as celulas reprovadas veem a MESMA cor atual que
+                        # as testemunhas, nao ha oclusor de outra cor: o que
+                        # difere e so o ref velho — luz mudou, e o ganho de
+                        # luminancia segue valido. Oclusor de cor diferente
+                        # (mao, sombra tingida) nao concorda com as
+                        # testemunhas e o veto fica.
+                        fail_c = cur_c[~cell_ok]
+                        witness_cur = float(np.median(cur_c[cell_ok]))
+                        cand = float(np.median(fail_c))
+                        spread = chroma_tol * max(witness_cur, 1e-3) + 1e-6
+                        same_light = abs(cand - witness_cur) <= spread
+                        coherent_n = int(
+                            np.count_nonzero(np.abs(fail_c - cand) <= spread)
+                        )
+                        global_shift = same_light and (
+                            coherent_n >= _SHIFT_COHERENCE * fail_c.size
+                        )
         if global_shift:
             return gain_p90, False, True
         if not chroma_valid:

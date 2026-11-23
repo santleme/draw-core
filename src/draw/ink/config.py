@@ -1,6 +1,6 @@
 """Preset de producao do motor de tinta (o que as flags Tier A/B liam do ambiente)."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 # Nivel de voto que reproduz o legado: a media das 3 passadas que fecha a
 # soma strong de 1,9. strict_vote desloca os campos a partir dele.
@@ -326,8 +326,14 @@ class InkConfig:
         zera a pauta residual) + removedor de pauta; o traço mais fino
         é desejado em linhas de construção.
         """
-        return cls.production(
-            vote_level=vote_level,
-            pass_interval_s=pass_interval_s,
-            ruling_removal=ruling_removal,
+        # `production()` liga o PageModel; o perfil tecnico NAO o herda: o
+        # PageModel nao foi medido para vetores de CAD, entao este perfil
+        # segue como antes do flip (votos + pauta).
+        return replace(
+            cls.production(
+                vote_level=vote_level,
+                pass_interval_s=pass_interval_s,
+                ruling_removal=ruling_removal,
+            ),
+            page_model=False,
         )
