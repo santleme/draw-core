@@ -25,7 +25,14 @@ import cv2
 import numpy as np
 
 if __package__ in (None, ""):
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    _repo_root = Path(__file__).resolve().parents[1]
+    for _p in (
+        str(_repo_root / "packages" / "draw-dral" / "src"),
+        str(_repo_root / "src"),
+        str(_repo_root),
+    ):
+        if _p not in sys.path:
+            sys.path.insert(0, _p)
 
 from lab import gen_synthetic as gs
 from lab import sim_isp

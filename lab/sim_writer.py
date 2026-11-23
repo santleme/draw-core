@@ -42,8 +42,13 @@ import cv2
 import numpy as np
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(_REPO_ROOT))
-sys.path.insert(0, str(_REPO_ROOT / "src"))
+for _p in (
+    str(_REPO_ROOT / "packages" / "draw-dral" / "src"),
+    str(_REPO_ROOT / "src"),
+    str(_REPO_ROOT),
+):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from lab.sync_workers import StepClock, SyncDetector  # noqa: E402
 
@@ -66,7 +71,6 @@ BG_ROOT = (
     / "train-negatives-v2"
     / "session_raw_capture"
 )
-_REPO_ROOT = Path(__file__).resolve().parents[1]
 SHEET_MODEL = _REPO_ROOT / "models" / "draw_seg_v3_dyn.onnx"
 INK_MODEL = _REPO_ROOT / "models" / "page_clean_unet.onnx"
 SCENE_FPS = 2.0

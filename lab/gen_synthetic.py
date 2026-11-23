@@ -104,7 +104,14 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+for _p in (
+    str(_REPO_ROOT / "packages" / "draw-dral" / "src"),
+    str(_REPO_ROOT / "src"),
+    str(_REPO_ROOT),
+):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 SIZE = 512
 BACKGROUND = 0
@@ -1905,7 +1912,7 @@ def generate_dataset(
     return manifest
 
 
-def main() -> int:
+def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         description="Gerador sintético do Draw (512x512, 4 classes)."
     )
@@ -2003,7 +2010,7 @@ def main() -> int:
         "shards [a,b) fundidos reproduzem a geração unificada byte a byte "
         "— paralelização determinística",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     temporal_counts = None
     if args.temporal_train > 0 or args.temporal_val > 0:
         temporal_counts = {"train": args.temporal_train, "val": args.temporal_val}

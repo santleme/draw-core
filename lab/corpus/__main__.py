@@ -5,6 +5,16 @@ import json
 import sys
 from pathlib import Path
 
+if __package__ in (None, ""):
+    _repo_root = Path(__file__).resolve().parents[2]
+    for _p in (
+        str(_repo_root / "packages" / "draw-dral" / "src"),
+        str(_repo_root / "src"),
+        str(_repo_root),
+    ):
+        if _p not in sys.path:
+            sys.path.insert(0, _p)
+
 
 def _parse_conds(items: list[str]) -> dict:
     out = {}
