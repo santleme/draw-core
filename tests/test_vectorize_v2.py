@@ -1,6 +1,7 @@
 """Testes de tools/vectorize.py v2: grafo O(H*W), limpeza, carimbos e Camada 2."""
 
 import json
+import math
 import tempfile
 import time
 from pathlib import Path
@@ -143,10 +144,391 @@ def test_stamps_order_strokes_chronologically_and_orient_direction():
         assert "<line " in svg_txt
 
 
+def test_paper_mm_flags_repoint_scale_and_restore_defaults():
+    # A4-PAISAGEM: canvas 1200x850 px mapeado para uma folha 297x210 mm;
+    # os denominadores em px saem da imagem, não das constantes legadas.
+    img = np.full((850, 1200), 255, dtype=np.uint8)
+    cv2.line(img, (60, 425), (1140, 425), 0, thickness=3)
+    with tempfile.TemporaryDirectory() as tmp:
+        png_path = Path(tmp) / "paisagem.png"
+        svg_path = Path(tmp) / "out.svg"
+        json_path = Path(tmp) / "out.json"
+        cv2.imwrite(str(png_path), img)
+        rc = vectorize.main(
+            [
+                str(png_path),
+                "--primitives",
+                "--paper-w-mm",
+                "297",
+                "--paper-h-mm",
+                "210",
+                "--out",
+                str(svg_path),
+                "--json",
+                str(json_path),
+            ]
+        )
+        assert rc == 0
+        payload = json.loads(json_path.read_text(encoding="utf-8"))
+        line = next(p for p in payload["primitives"] if p["type"] == "line")
+        # ~1080 px de largura a 297 mm/1200 px = 267.3 mm (aprox., após
+        # simplificação/traversal).
+        assert abs(line["length_mm"] - 1080 * 297.0 / 1200.0) < 3.0
+        assert payload["summary"]["paper_mm"] == [297.0, 210.0]
+        svg_txt = svg_path.read_text(encoding="utf-8")
+        assert 'viewBox="0 0 297.0 210.0"' in svg_txt
+        # Sem as flags, o summary não carrega paper_mm — o output A4
+        # default permanece bit a bit idêntico ao de antes das flags.
+        json_default = Path(tmp) / "default.json"
+        assert (
+            vectorize.main([str(png_path), "--primitives", "--json", str(json_default)])
+            == 0
+        )
+        assert (
+            "paper_mm"
+            not in json.loads(json_default.read_text(encoding="utf-8"))["summary"]
+        )
+    # O run não vaza escala para o módulo: defaults A4 restaurados.
+    assert vectorize.PAPER_W_MM == 210.0
+    assert vectorize.PAPER_H_MM == 297.0
+    assert vectorize.MM_PER_PX_X == 210.0 / 850.0
+    assert vectorize.MM_PER_PX_Y == 297.0 / 1200.0
+    assert vectorize._PAPER_OVERRIDE is False
+
+
+def test_paper_mm_flags_must_come_in_pairs_and_be_finite():
+    img = np.full((850, 1200), 255, dtype=np.uint8)
+    cv2.line(img, (60, 425), (1140, 425), 0, thickness=3)
+    with tempfile.TemporaryDirectory() as tmp:
+        png_path = Path(tmp) / "paisagem.png"
+        cv2.imwrite(str(png_path), img)
+        with pytest.raises(SystemExit):
+            vectorize.main([str(png_path), "--paper-w-mm", "297"])
+        for bad in ("0", "-1", "nan", "inf"):
+            with pytest.raises(SystemExit):
+                vectorize.main(
+                    [str(png_path), "--paper-w-mm", bad, "--paper-h-mm", "210"]
+                )
+
+
+def test_anisotropic_paper_measures_geometry_in_mm():
+    # Folha 200x200 mm sobre canvas 850x1200 px: SX != SY. Comprimentos
+    # e ângulos são medidos no espaço mm; um círculo em px vira elipse
+    # em mm e cai no contorno escalado (o schema não comporta elipse).
+    vectorize._set_paper_mm(200.0, 200.0, 850, 1200)
+    try:
+        sx, sy = 200.0 / 850.0, 200.0 / 1200.0
+        prim = vectorize.classify_primitive(
+            {"points": np.array([[0.0, 0.0], [400.0, 0.0]]), "closed": False}
+        )
+        assert prim["type"] == "line"
+        assert prim["length_mm"] == pytest.approx(400.0 * sx, abs=0.001)
+        prim = vectorize.classify_primitive(
+            {"points": np.array([[0.0, 0.0], [0.0, 600.0]]), "closed": False}
+        )
+        assert prim["type"] == "line"
+        assert prim["length_mm"] == pytest.approx(600.0 * sy, abs=0.001)
+
+        theta = np.linspace(0.0, 2.0 * np.pi, 200, endpoint=False)
+        circle_px = np.stack(
+            [425.0 + 100.0 * np.cos(theta), 600.0 + 100.0 * np.sin(theta)],
+            axis=1,
+        )
+        prim = vectorize.classify_primitive({"points": circle_px, "closed": True})
+        assert prim["type"] == "polygon"
+        xs = [p[0] for p in prim["points_mm"]]
+        ys = [p[1] for p in prim["points_mm"]]
+        assert (max(xs) - min(xs)) / 2 == pytest.approx(100.0 * sx, rel=0.05)
+        assert (max(ys) - min(ys)) / 2 == pytest.approx(100.0 * sy, rel=0.05)
+    finally:
+        vectorize._reset_paper_mm()
+
+
+def test_anisotropic_paper_decides_rectangle_in_mm():
+    # 200x200 mm sobre 850x1200 px: um quadrado a 45° em mm chega
+    # cisalhado como paralelogramo em px (~70° nos vértices) — a
+    # decisão de forma em mm o aceita como retângulo. O caso simétrico
+    # (losango ortogonal em px = paralelogramo em mm) é recusado.
+    vectorize._set_paper_mm(200.0, 200.0, 850, 1200)
+    try:
+        sx, sy = 200.0 / 850.0, 200.0 / 1200.0
+        half_diag = 30.0 * np.sqrt(2.0)
+        diamond_mm = np.array(
+            [
+                [0.0, half_diag],
+                [-half_diag, 0.0],
+                [0.0, -half_diag],
+                [half_diag, 0.0],
+            ]
+        ) + np.array([100.0, 100.0])
+        diamond_px = np.empty_like(diamond_mm)
+        diamond_px[:, 0] = diamond_mm[:, 0] / sx
+        diamond_px[:, 1] = diamond_mm[:, 1] / sy
+        prim = vectorize.classify_primitive({"points": diamond_px, "closed": True})
+        assert prim["type"] == "rectangle"
+        assert prim["width_mm"] == pytest.approx(60.0, rel=0.05)
+        assert prim["height_mm"] == pytest.approx(60.0, rel=0.05)
+        for got in prim["corners_mm"]:
+            assert any(
+                abs(got[0] - want[0]) < 0.5 and abs(got[1] - want[1]) < 0.5
+                for want in diamond_mm
+            )
+
+        radius = 200.0
+        px_diamond = np.array(
+            [
+                [425.0, 600.0 + radius],
+                [425.0 - radius, 600.0],
+                [425.0, 600.0 - radius],
+                [425.0 + radius, 600.0],
+            ]
+        )
+        prim = vectorize.classify_primitive({"points": px_diamond, "closed": True})
+        assert prim["type"] == "polygon"
+
+        # Borda arqueada (review #197): em px o desvio máximo (27.81)
+        # cabia na tolerância (28.65) e a caixa exportava achatada; no
+        # espaço escalado o desvio (6.24 mm) excede o piso — polygon.
+        bowed = np.array(
+            [
+                [361.0, 210.0],
+                [475.0, 466.0],
+                [541.0, 754.0],
+                [310.0, 906.0],
+                [130.0, 362.0],
+            ]
+        )
+        prim = vectorize.classify_primitive({"points": bowed, "closed": True})
+        assert prim["type"] == "polygon"
+    finally:
+        vectorize._reset_paper_mm()
+
+
+def test_anisotropic_paper_decides_circle_in_mm():
+    # 170x200 mm sobre 850x1200 px (~18% anisotrópico): um círculo de
+    # 30 mm chega como elipse de ~150x180 px — o fit em px o rejeita,
+    # mas a decisão em mm o devolve como circle. O simétrico (círculo
+    # pequeno em px = elipse em mm) sai como contorno escalado: sem o
+    # desvio ele atravessava o detector de retângulo e exportava uma
+    # caixa de 4 lados.
+    vectorize._set_paper_mm(170.0, 200.0, 850, 1200)
+    try:
+        sx, sy = 170.0 / 850.0, 200.0 / 1200.0
+        theta = np.linspace(0.0, 2.0 * np.pi, 240, endpoint=False)
+        circle_mm = np.stack(
+            [100.0 + 30.0 * np.cos(theta), 100.0 + 30.0 * np.sin(theta)],
+            axis=1,
+        )
+        circle_px = np.empty_like(circle_mm)
+        circle_px[:, 0] = circle_mm[:, 0] / sx
+        circle_px[:, 1] = circle_mm[:, 1] / sy
+        prim = vectorize.classify_primitive({"points": circle_px, "closed": True})
+        assert prim["type"] == "circle"
+        assert prim["r_mm"] == pytest.approx(30.0, rel=0.05)
+        assert prim["cx_mm"] == pytest.approx(100.0, abs=0.5)
+        assert prim["cy_mm"] == pytest.approx(100.0, abs=0.5)
+
+        small_px = np.stack(
+            [425.0 + 10.0 * np.cos(theta), 600.0 + 10.0 * np.sin(theta)],
+            axis=1,
+        )
+        prim = vectorize.classify_primitive({"points": small_px, "closed": True})
+        assert prim["type"] == "polygon"
+    finally:
+        vectorize._reset_paper_mm()
+
+
+def test_isotropic_paper_still_classifies_circle():
+    # A4 legado já é ~0,2% anisotrópico (210/850 vs 297/1200) e sempre
+    # classificou círculo com r_mm médio — o comportamento se mantém.
+    vectorize._set_paper_mm(210.0, 297.0, vectorize.PAPER_W_PX, vectorize.PAPER_H_PX)
+    try:
+        theta = np.linspace(0.0, 2.0 * np.pi, 200, endpoint=False)
+        circle_px = np.stack(
+            [425.0 + 100.0 * np.cos(theta), 600.0 + 100.0 * np.sin(theta)],
+            axis=1,
+        )
+        prim = vectorize.classify_primitive({"points": circle_px, "closed": True})
+        assert prim["type"] == "circle"
+        r_mean = 0.5 * (210.0 / 850.0 + 297.0 / 1200.0)
+        assert prim["r_mm"] == pytest.approx(100.0 * r_mean, rel=0.02)
+    finally:
+        vectorize._reset_paper_mm()
+
+
+def test_default_a4_measurements_stay_legacy():
+    # Sem flags de papel as medidas usam a escala média legada: uma
+    # linha horizontal de 400 px reporta chord_len * MM_PER_PX —
+    # o mesmo número de sempre (98.912, não o 98.824 da escala-x).
+    pts = np.array([[100.0, 200.0], [500.0, 200.0]])
+    prim = vectorize.classify_primitive({"points": pts, "closed": False})
+    assert prim["type"] == "line"
+    assert prim["length_mm"] == round(400.0 * vectorize.MM_PER_PX, 3)
+    assert prim["length_mm"] == 98.912
+
+    # A decisão de forma também fica no espaço legado: este quadrilátero
+    # fica a ~11.9° do corte de 12.0° em px — com escala por eixo o erro
+    # passaria a ~12.006° e ele viraria polygon (review #197).
+    near_cut = np.array([[280.0, 31.0], [460.0, 574.0], [215.0, 717.0], [35.0, 174.0]])
+    prim = vectorize.classify_primitive({"points": near_cut, "closed": True})
+    assert prim["type"] == "rectangle"
+
+    # Mesma borda de 4 px em duas posições: a decisão não pode depender
+    # da translação — a aritmética em coordenadas já escaladas tornava
+    # o corte dependente da posição (review #197).
+    bowed = np.array(
+        [
+            [100.0, 120.0],
+            [136.0, 116.0],
+            [172.0, 120.0],
+            [172.0, 160.0],
+            [100.0, 160.0],
+        ]
+    )
+    low = vectorize.classify_primitive({"points": bowed, "closed": True})
+    high = vectorize.classify_primitive({"points": bowed + [0.0, 20.0], "closed": True})
+    assert low["type"] == high["type"] == "rectangle"
+
+    # Diagonal 72x154 px: a medida legada é hypot(dx,dy)*MM_PER_PX =
+    # 42.038 — escalar os componentes antes do hypot dava 42.037.
+    diag = vectorize.classify_primitive(
+        {"points": np.array([[0.0, 0.0], [72.0, 154.0]]), "closed": False}
+    )
+    assert diag["type"] == "line"
+    assert diag["length_mm"] == 42.038
+
+
+def test_explicit_paper_at_a4_ratio_still_measures_per_axis():
+    # 420x594 mm em 1700x2400 px reproduz as razões exatas da escala
+    # default, mas o override pede a medida métrica por eixo: a linha
+    # horizontal de 400 px reporta 400*(420/1700)=98.824 — não os
+    # 98.912 da média legada — e bate com os endpoints exportados.
+    vectorize._set_paper_mm(420.0, 594.0, 1700, 2400)
+    try:
+        prim = vectorize.classify_primitive(
+            {
+                "points": np.array([[100.0, 200.0], [500.0, 200.0]]),
+                "closed": False,
+            }
+        )
+        assert prim["type"] == "line"
+        assert prim["length_mm"] == pytest.approx(400.0 * 420.0 / 1700.0, abs=0.001)
+        assert prim["x2_mm"] - prim["x1_mm"] == pytest.approx(
+            400.0 * 420.0 / 1700.0, abs=0.01
+        )
+    finally:
+        vectorize._reset_paper_mm()
+
+
+def test_anisotropic_paper_does_not_export_ellipse_as_circle():
+    # US Letter 215.9x279.4 mm em 850x1200 px: um círculo de 100 px no
+    # raster é uma elipse na folha (semieixos ~25.4x23.3 mm). O rmse
+    # agregado (~3%) passa no teste de redondeza, mas a excentricidade
+    # sistemática (2º harmônico do raio) a recusa — sai como contorno.
+    vectorize._set_paper_mm(215.9, 279.4, 850, 1200)
+    try:
+        theta = np.linspace(0.0, 2.0 * np.pi, 240, endpoint=False)
+        raster_circle = np.stack(
+            [425.0 + 100.0 * np.cos(theta), 600.0 + 100.0 * np.sin(theta)],
+            axis=1,
+        )
+        prim = vectorize.classify_primitive({"points": raster_circle, "closed": True})
+        assert prim["type"] == "polygon"
+        # O caminho inverso segue íntegro: um círculo real na folha
+        # (elipse no raster) é devolvido como circle com o raio físico.
+        sx, sy = 215.9 / 850.0, 279.4 / 1200.0
+        circle_mm = np.stack(
+            [100.0 + 30.0 * np.cos(theta), 100.0 + 30.0 * np.sin(theta)],
+            axis=1,
+        )
+        paper_circle_px = np.empty_like(circle_mm)
+        paper_circle_px[:, 0] = circle_mm[:, 0] / sx
+        paper_circle_px[:, 1] = circle_mm[:, 1] / sy
+        prim = vectorize.classify_primitive({"points": paper_circle_px, "closed": True})
+        assert prim["type"] == "circle"
+        assert prim["r_mm"] == pytest.approx(30.0, rel=0.05)
+    finally:
+        vectorize._reset_paper_mm()
+
+
+def test_arc_gap_decided_in_paper_space():
+    # O gate de quase-fechamento usa gap/perímetro no espaço de decisão
+    # — em px a razão depende da direção do gap (review #197). Papel
+    # 200x200 mm em 850x1200 px: um arco de 30 mm faltando 32° no topo
+    # tem gap de 7.8% em px mas 9.6% na folha (fica polyline); um arco
+    # faltando 25° na lateral tem 8.7% em px mas 7.4% na folha (circle).
+    vectorize._set_paper_mm(200.0, 200.0, 850, 1200)
+    try:
+        sx, sy = 200.0 / 850.0, 200.0 / 1200.0
+
+        def arc_px(missing_deg, mid_deg, r_mm=30.0):
+            a0 = math.radians(mid_deg + missing_deg / 2.0)
+            a1 = math.radians(mid_deg + 360.0 - missing_deg / 2.0)
+            t = np.linspace(a0, a1, 220)
+            mm = np.stack([100.0 + r_mm * np.cos(t), 100.0 + r_mm * np.sin(t)], axis=1)
+            px = np.empty_like(mm)
+            px[:, 0] = mm[:, 0] / sx
+            px[:, 1] = mm[:, 1] / sy
+            return px
+
+        top = vectorize.classify_primitive(
+            {"points": arc_px(32.0, -90.0), "closed": False}
+        )
+        side = vectorize.classify_primitive(
+            {"points": arc_px(25.0, 0.0), "closed": False}
+        )
+        assert top["type"] == "polyline"
+        assert side["type"] == "circle"
+    finally:
+        vectorize._reset_paper_mm()
+
+
+def test_rotated_rectangle_outside_count_tolerates_roundoff():
+    # A guarda de "fração fora" só pode contar desvio acima de uma
+    # tolerância numérica: a interpolação deixa resíduos de ~1e-14 em
+    # amostras sobre a aresta, e sem o eps a mesma forma virava polygon
+    # ou rectangle conforme a posição (review #197).
+    vectorize._set_paper_mm(170.0, 200.0, 850, 1200)
+    try:
+        sq = np.array(
+            [
+                [175.0, 189.0],
+                [195.0, 209.0],
+                [184.0, 225.0],
+                [164.0, 205.0],
+            ]
+        )
+        low = vectorize.classify_primitive({"points": sq, "closed": True})
+        high = vectorize.classify_primitive(
+            {"points": sq + [0.0, 10.0], "closed": True}
+        )
+        assert low["type"] == high["type"] == "rectangle"
+
+        # Um oval simplificado a 4 cantos continua polygon: as amostras
+        # abaulam para fora do quadrilátero muito acima da tolerância.
+        t = np.linspace(0.0, 2.0 * np.pi, 200, endpoint=False)
+        oval = np.stack([425.0 + 90.0 * np.cos(t), 600.0 + 130.0 * np.sin(t)], axis=1)
+        prim = vectorize.classify_primitive({"points": oval, "closed": True})
+        assert prim["type"] == "polygon"
+    finally:
+        vectorize._reset_paper_mm()
+
+
 def main():
     test_node_indexing_matches_naive_and_scales_linearly()
     test_thick_shapes_axis_aligned_rect_circle_lines_and_freehand_wave()
     test_stamps_order_strokes_chronologically_and_orient_direction()
+    test_paper_mm_flags_repoint_scale_and_restore_defaults()
+    test_paper_mm_flags_must_come_in_pairs_and_be_finite()
+    test_anisotropic_paper_measures_geometry_in_mm()
+    test_anisotropic_paper_decides_rectangle_in_mm()
+    test_anisotropic_paper_decides_circle_in_mm()
+    test_isotropic_paper_still_classifies_circle()
+    test_default_a4_measurements_stay_legacy()
+    test_explicit_paper_at_a4_ratio_still_measures_per_axis()
+    test_anisotropic_paper_does_not_export_ellipse_as_circle()
+    test_arc_gap_decided_in_paper_space()
+    test_rotated_rectangle_outside_count_tolerates_roundoff()
     print("TESTES DE VECTORIZE V2 E CAMADA 2 OK.")
     return 0
 
@@ -254,15 +636,13 @@ def test_thick_cross_contracts_double_junction():
     raw = vectorize.traverse_graph(
         vectorize._make_8_minimal(vectorize.thin(img < 128)), include_topology=True
     )
-    junctions = {
-        nid
-        for e in raw
-        for nid, deg in (
-            (e["start_node"], e["start_deg"]),
-            (e["end_node"], e["end_deg"]),
-        )
-        if nid is not None and deg >= 3
-    }
+    incidence = {}
+    for e in raw:
+        for key in ("start_node", "end_node"):
+            nid = e[key]
+            if nid is not None:
+                incidence[nid] = incidence.get(nid, 0) + 1
+    junctions = {nid for nid, deg in incidence.items() if deg >= 3}
     assert len(junctions) >= 2, "a bancada precisa de um cruzamento partido"
     assert len(_strokes(img)) == 2
 
@@ -368,8 +748,8 @@ def test_line_crossing_two_close_parallels_keeps_each_line_whole():
 
 
 def test_circle_with_tangent_stem_keeps_both_primitives():
-    # O laço volta ao próprio nó (u == v): fica fora do pareamento,
-    # como na costura legada (review do PR #65). Quando a haste grossa
+    # O laço volta ao próprio nó (u == v): fica fora do pareamento
+    # (review do PR #65). Quando a haste grossa
     # se sobrepõe ao arco por um trecho, o nó de junção sai do laço e
     # o arco continua tangente na haste — leitura ambígua (um 'd'),
     # resolvida pela continuidade.

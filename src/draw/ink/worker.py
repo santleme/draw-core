@@ -15,6 +15,7 @@ from . import (
     accumulator,
     identity,
     motion,
+    occlusion,
     page_model,
     paper_evidence,
     registration,
@@ -161,6 +162,8 @@ _NO_HAND_REST_AFTER_STILL_PASSES = 4
 # de acordar desse clone — com a porta de fronteira, ela nao
 # acumula mais.
 _REST_MIN_GENERATION_PASSES = 3
+
+
 # Pixels minimos de papel em recuperacao (hold) para re-armar a janela de
 # confirmacao pos-saida; abaixo disso e ruido de borda.
 _RECOVERY_MIN_PX = 256
@@ -210,6 +213,14 @@ _PAGE_CLEAN_INTERVAL_SECONDS = 0.25
 _PAGE_CLEAN_STOP_TIMEOUT_SECONDS = 5.0
 
 
+# Watchdog do descanso total: o wait() sem prazo depende de um
+# notify chegar — se algum evento se perder entre a avaliacao do
+# predicado e o sono, a trabalhadora nunca mais olha a cena. O
+# prazo so faz a volta reavaliar _pass_interval; o descanso
+# continua decidido pelos predicados, nao pelo relogio.
+_REST_WATCHDOG_SECONDS = 10.0
+
+
 # Publicacoes confirmadas guardadas para poll_delta mesclar: ~10 s a 3
 # passadas/s. Alem disso o consumidor atrasado recebe um delta full.
 _DELTA_HISTORY = 32
@@ -224,6 +235,14 @@ _WORKER_HISTORY = (256, 128)
 # Folga do teste de cadencia no pump(): relogio de cena em float
 # (indice * 1/30 s) nao pode perder uma passada por um ulp.
 _SYNC_CADENCE_EPS_SECONDS = 1e-9
+
+
+# Fracao de pixels semeados que ainda casam com a propria referencia
+# para um tile anomalo ser lido como "conteudo", nao "coberto":
+# impressao densa escurece a media do tile mantendo cada pixel na
+# aparencia semeada; uma capa ou regua escura leva os pixels de
+# papel semeados a `novel` e a fracao despenca bem abaixo disso.
+_RETURNED_TILE_MATCH = 0.75
 
 
 def _fill_page_outside(image, coverage):
@@ -282,6 +301,59 @@ def _crop_all_visible(visible, corners):
     crop = np.zeros(visible.shape, np.uint8)
     cv2.fillConvexPoly(crop, np.round(corners).astype(np.int32), 1)
     return bool(visible[crop.astype(bool)].all())
+
+
+def _warp_exposure_mask(mask, matrix, shape):
+    """Materializa escalar e warpa uma máscara bool (INTER_NEAREST)."""
+    if isinstance(mask, (bool, np.bool_)):
+        mask = np.full(shape, mask, dtype=bool)
+    return (
+        cv2.warpPerspective(
+            mask.astype(np.uint8),
+            matrix,
+            (shape[1], shape[0]),
+            flags=cv2.INTER_NEAREST,
+            borderValue=0,
+        )
+        > 0
+    )
+
+
+def _exposure_masks_in_geometry(
+    assessment, reg_anchor, reg_corners, shape, motion_fix=None, fill_clear=False
+):
+    """As máscaras fotométricas da guarda na grade de registro pedida.
+
+    A guarda mede o warp desta passada; quem julga identidade e quem
+    vota vivem na grade da âncora da geração. O par (âncora, quad de
+    registro) tem que ser o MESMO que registrou a prob — na passada de
+    re-ancoragem eles já são a âncora nova, e transformar pela âncora
+    velha cobre os pixels errados (Devin Review do PR #144). Com
+    motion_fix a correção medida acompanha a evidência, como na prob
+    registrada. fill_clear materializa o "tudo à vista" do veredito
+    quando a guarda é a única fonte de visibilidade da passada: sem
+    máscara alguma o acumulador não tem evidência para a remoção, e o
+    materializado antes do warp mantém o fora-do-quad mascarado.
+    """
+    photo_visible = assessment.visible
+    exposed = assessment.paper_exposed
+    if photo_visible is None and fill_clear:
+        photo_visible = np.ones(shape, dtype=bool)
+    if reg_anchor is not None and reg_corners is not None:
+        matrix = registration._registration_matrix(reg_anchor, reg_corners, shape)
+        if not registration._registration_is_identity(matrix):
+            if photo_visible is not None:
+                photo_visible = _warp_exposure_mask(photo_visible, matrix, shape)
+            exposed = _warp_exposure_mask(exposed, matrix, shape)
+    if motion_fix is not None:
+        if photo_visible is not None:
+            photo_visible = (
+                motion_fix.warp_back(photo_visible.astype(np.uint8), nearest=True) > 0
+            )
+        if isinstance(exposed, (bool, np.bool_)):
+            exposed = np.full(shape, exposed, dtype=bool)
+        exposed = motion_fix.warp_back(exposed.astype(np.uint8), nearest=True) > 0
+    return photo_visible, exposed
 
 
 def _reg_triple(anchor, reg_corners, corners):
@@ -1126,6 +1198,10 @@ class _Pass:
     coverage_anchor: object = None
     prob: object = None
     paper_ok_page: object = None
+    exposure: object = None
+    exposure_guard: object = None
+    exposure_confirmed_ink: object = None
+    exposure_confirmed_anchor: object = None
     # estado de ancora / registro
     first_pass: bool = False
     recovering: bool = False
@@ -1176,6 +1252,7 @@ class _Pass:
     pm_baseline_ink: object = None
     next_baseline_ink: object = None
     paper_ok: object = None
+    paper_exposed: object = None
     reg_coverage: object = None
     coverage_matches_last_reg: bool = False
     pm_seeding_remaining: int = 0
@@ -1278,8 +1355,9 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         self._motion_unregistered_total = 0
         self._ruling_generation = None
         # Modelo persistente da pagina limpa (InkConfig.page_model,
-        # opt-in): mantido por epoca (canvas_epoch, pm_reset_seq) e
-        # propriedade exclusiva da thread trabalhadora — ver draw.ink.page_model.
+        # opt-in): mantido por epoca (canvas_epoch, pm_reset_seq); a
+        # trabalhadora o muta sob _pm_gate, e new_generation usa o mesmo
+        # gate antes de preservar ou invalidar a epoca.
         self._page_model = None
         self._pm_epoch = None
         self._pm_reset_seq = 0
@@ -1298,7 +1376,13 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         # replays com pump() passam o relogio da cena.
         self._clock = clock
         self._hand_masker = hand_masker
+        self._paper_exposure = occlusion.PaperExposureGuard()
         self._condition = threading.Condition()
+        # Serializa o trecho que muta o PageModel e comita a passada
+        # contra a troca de geração. Ordem única: _pm_gate -> _condition.
+        # submit e os demais leitores usam só _condition; nenhum caminho
+        # toma _pm_gate enquanto já segura _condition.
+        self._pm_gate = threading.Lock()
         self._thread = threading.Thread(
             target=self._work, name="draw-page-clean", daemon=True
         )
@@ -1385,6 +1469,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         )
         self._last_pass_start = None
         self._passes_total = 0
+        self._telemetry_stale_errors = 0
         self._last_pass_ms = None
         self._provisional_px = 0
         self._confirmed_px = 0
@@ -1403,6 +1488,17 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         self._hand_exit_submits = 0
         self._awaiting_clear_post_exit = False
         self._still_passes = 0
+        # Passadas seguidas com recuperacao de preenchimento
+        # pendente e NENHUMA borda de adocao. O teto
+        # (_RECOVERY_WAIT_PASSES) nao corre sobre este total — o
+        # pendente e global e um streak que nasce quando outro morre
+        # herdaria a espera alheia: a porta compara com o teto mais
+        # a idade do pendente mais velho, entao o que o teto limita
+        # e o tempo morto anterior a ele (Devin Review do PR #144).
+        # Zera em qualquer adocao ou quando o pendente some; uma
+        # borda nova a reabre.
+        self._fill_recovery_waited = 0
+        self._marks_recovery_waited = 0
         # Descanso total (so a trabalhadora e o new_generation
         # tocam): passadas desta geracao e passadas seguidas sem
         # confirmar nada novo.
@@ -1455,7 +1551,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         que a primeira passada possa decidir, por conteudo registrado,
         se uma folha que voltou e a mesma pagina em outra pose.
         """
-        with self._condition:
+        with self._pm_gate, self._condition:
             self._identity_recovery_requested = bool(preserve_identity)
             self._identity_defer_count = 0
             self._identity_switch_votes = 0
@@ -1543,6 +1639,14 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             self._generation_passes = 0
             self._quiet_passes = 0
             self._activity_quiet_passes = 0
+            # Troca a guarda por uma instancia fresca (swap atomico sob o
+            # lock): uma passada em voo da geracao velha segue no objeto
+            # antigo, ainda valido, e tem o resultado descartado no
+            # check de geracao. Leitores de pending/recovering nunca
+            # veem estado da geracao anterior.
+            self._paper_exposure = occlusion.PaperExposureGuard()
+            self._fill_recovery_waited = 0
+            self._marks_recovery_waited = 0
             self._pending = None
             self._published = None
             self._published_display = None
@@ -1867,7 +1971,17 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 self._confirm_masked_skips = 0
                 self._hand_exit_submits = self._telemetry_submits
                 self._awaiting_clear_post_exit = True
-            elif present is not False:
+            elif present is not False and self._hand_state is False:
+                # A janela pos-saida so e cancelada pela TRANSICAO
+                # que encerra o episodio de mao fora (a mao de
+                # volta ou o sinal perdido): a premissa "pagina
+                # assentada sem mao" morreu. Uma amostra repetida
+                # com a mao ja presente nao muda estado nenhum —
+                # o laco chama isto a cada amostra de presenca, e
+                # zerar aqui apagava o rearma da adocao de
+                # preenchimento (_pass_anchor_state) na amostra
+                # seguinte, antes de o preenchimento votar (Devin
+                # Review do PR #144).
                 self._confirm_passes = 0
                 self._confirm_masked_skips = 0
                 self._awaiting_clear_post_exit = False
@@ -1891,6 +2005,67 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             and self._clock() - self._hand_motion_at >= _HAND_REST_STILL_SECONDS
         )
 
+    def _recovery_wait_open(self):
+        """Espera por recuperacao pendente ainda dentro do prazo.
+
+        O teto _RECOVERY_WAIT_PASSES cobre o tempo MORTO: as
+        passadas pendentes anteriores ao item vivo mais velho,
+        gastas em streaks que morreram no caminho. O pendente mais
+        velho recebe a propria idade como carencia — um streak que
+        so fica a vista tarde ainda completa o horizonte de adocao,
+        em vez de herdar a espera alheia e ter a contagem cortada
+        antes da leitura que o adota (Devin Review do PR #144).
+        Como a idade pendente e sempre menor que o teto, a espera
+        total fica limitada a 2*_RECOVERY_WAIT_PASSES - 1: o
+        vaivem de sombra que nunca adota segue fechando a porta.
+
+        Com a Condition na mao (le _paper_exposure e
+        _fill_recovery_waited).
+        """
+        return (
+            self._paper_exposure.recovery_pending
+            and self._fill_recovery_waited
+            < occlusion._RECOVERY_WAIT_PASSES + self._paper_exposure.max_recovery_age
+        )
+
+    def _marks_wait_open(self):
+        """Allow a clean position veto to expire and cast its first vote.
+
+        Age credit lets a late tile finish without allowing an endless
+        chain of different pending tiles: total wait is below twice the
+        marks horizon, independently of the fill recovery budget.
+        """
+        age = self._paper_exposure.max_marks_recovery_age
+        return age > 0 and self._marks_recovery_waited < occlusion._MARKS_HOLD_MAX + age
+
+    def _removal_pending(self):
+        """Removal votes still need observations at the active cadence.
+
+        O streak que não se move em toda uma janela de remoção — a
+        sombra estável que nunca prova papel, por exemplo — não é
+        trabalho urgente: como as carências de recovery e marks, a
+        espera é limitada e o pendurado caduca depois de
+        _REMOVAL_PASSES passadas sem progresso (Devin Review do
+        PR #144)."""
+        return (
+            self._removal_outstanding()
+            and self._accumulator._removal_stale_passes < registration._REMOVAL_PASSES
+        )
+
+    def _removal_outstanding(self):
+        """Voto de remoção existe — fresco ou caducado.
+
+        A caducidade do _removal_pending só rebaixa a cadência (de
+        ativa para a sonda ociosa); não apaga o trabalho. Enquanto
+        houver voto por resolver, o descanso total fica proibido: o
+        loop em repouso ignora frames novos — a sombra sair sozinha
+        não muda mão nem geometria — e a prova de papel que destrava
+        a contagem nunca chegaria ao acumulador, deixando a tinta
+        apagada congelada no canvas (Devin Review do PR #144)."""
+        return self._accumulator._removal_streak is not None and np.any(
+            self._accumulator._removal_streak
+        )
+
     def _at_rest(self):
         """Descanso total: nenhuma passada ate um evento acordar.
 
@@ -1903,9 +2078,21 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         propria mao, reportado pela assinatura da mascara.
         Ver _REST_MIN_GENERATION_PASSES/_REST_QUIET_PASSES.
         """
-        if self._accumulator._removal_streak is not None and np.any(
-            self._accumulator._removal_streak
-        ):
+        if self._removal_outstanding():
+            return False
+        if self._marks_wait_open():
+            return False
+        if self._recovery_wait_open():
+            # Streak de evidência de tinta contando num bloco
+            # anômalo: as passadas que a guarda precisa para adotar
+            # o preenchimento não podem contar como quietude —
+            # dormir no meio da contagem congelava o traco antes de
+            # ele votar. O prazo corre por item vivo (ver
+            # _recovery_wait_open): pendente por mais passadas que
+            # o teto mais a carencia e oscilacao de sombra, nao
+            # preenchimento — segurar a porta aí deixava a
+            # inferencia rodando sem fim depois da saida da mao
+            # (Devin Review do PR #144).
             return False
         if self._identity_recovery_requested and self._identity_reference is not None:
             return False
@@ -1919,22 +2106,63 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         if self._hand_state is False:
             return not self._confirm_once
         if self._hand_state is True:
-            return self._hand_still()
+            # A janela rearmada pela adocao tambem fala pela mao
+            # parada: o preenchimento recem-adotado precisa das
+            # passadas restantes para fechar o voto com a mao
+            # segurando a folha (Devin Review do PR #144).
+            return self._hand_still() and not self._confirm_once
         return False
 
     def _pass_interval(self):
         if self._at_rest():
             return None
-        if self._hand_state is False and not self._confirm_once:
+        # Carencia de recuperacao anda na cadencia ativa: manter a
+        # porta aberta mas amostrar uma vez por segundo esticava a
+        # espera limitada muito alem do horizonte de adocao —
+        # passadas, nao segundos, e o que a guarda conta
+        # (Devin Review do PR #144).
+        if (
+            self._hand_state is False
+            and not self._confirm_once
+            and not self._recovery_wait_open()
+            and not self._marks_wait_open()
+            and not self._removal_pending()
+        ):
             return _IDLE_PROBE_SECONDS
         if (
             self._hand_state is None
             and self._still_passes >= _NO_HAND_REST_AFTER_STILL_PASSES
+            and not self._recovery_wait_open()
+            and not self._marks_wait_open()
+            and not self._removal_pending()
         ):
             return _IDLE_PROBE_SECONDS
-        if self._config.pass_interval_s is not None:
-            return self._config.pass_interval_s
-        return _PAGE_CLEAN_INTERVAL_SECONDS
+        # Voto caducado sob mao parada: o descanso total e proibido
+        # (o voto existe), mas ele nao e trabalho urgente — sem o
+        # desvio para a sonda, o ativo de 250 ms rodava para sempre
+        # sob a sombra estavel com a mao pousada (Devin Review do
+        # PR #144).
+        if (
+            self._hand_state is True
+            and self._hand_still()
+            and self._removal_outstanding()
+            and not self._confirm_once
+            and not self._recovery_wait_open()
+            and not self._marks_wait_open()
+            and not self._removal_pending()
+        ):
+            return _IDLE_PROBE_SECONDS
+        interval = (
+            self._config.pass_interval_s
+            if self._config.pass_interval_s is not None
+            else _PAGE_CLEAN_INTERVAL_SECONDS
+        )
+        # Um voto de remoção pendente não pode esperar um
+        # --ink-interval lento: a cadência urgente é o probe ocioso
+        # (Devin Review do PR #144).
+        if self._removal_pending():
+            return min(interval, _IDLE_PROBE_SECONDS)
+        return interval
 
     def _announce_rest_locked(self):
         """Entrada do descanso total: a tela assenta numa unica troca.
@@ -1997,6 +2225,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 "passes": self._telemetry_passes,
                 "publishes": self._telemetry_publishes,
                 "passes_skipped_stale": self._telemetry_skipped_stale,
+                "passes_stale_errors": self._telemetry_stale_errors,
                 "records": [dict(r) for r in self._telemetry_records],
                 "page_identity_events": [
                     dict(event) for event in self._identity_events
@@ -2189,7 +2418,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 while self._last_pass_start is not None:
                     interval = self._pass_interval()
                     if interval is None:
-                        # Descanso total: espera sem prazo por um
+                        # Descanso total: espera por um
                         # evento que acorde (a mao voltar, a mao
                         # presente se mexer, geracao nova, stop).
                         # Submit NAO acorda: ele so troca o
@@ -2197,8 +2426,11 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                         # evento de verdade chegar. Sem isto a
                         # sonda de 1 Hz rodava para sempre sobre a
                         # pagina parada e o voto acumulava camadas.
+                        # O prazo é só watchdog contra um notify
+                        # perdido: quem decide continua sendo o
+                        # predicado do _pass_interval.
                         self._announce_rest_locked()
-                        self._condition.wait()
+                        self._condition.wait(timeout=_REST_WATCHDOG_SECONDS)
                         if self._stopped:
                             return
                         if self._pending is None:
@@ -2253,11 +2485,21 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             # fora do quad nao pode gastar a janela de confirmacao
             # pos-saida (review do PR #118).
             is_masked = visible is not None and not _crop_all_visible(visible, corners)
+            fill_pending = self._recovery_wait_open()
             if (
                 self._post_exit_confirm_passes() > 1
-                and (is_pre_exit or is_masked)
+                and (is_pre_exit or is_masked or fill_pending)
                 and self._confirm_masked_skips < votes._INK_VOTE_WINDOW
             ):
+                # Passada com recuperação de preenchimento em curso
+                # também não gasta a janela limpa: o veto da guarda
+                # esconde o traco exatamente como uma máscara — o
+                # orçamento serve às passadas em que ele pode votar
+                # (Devin Review do PR #144). O teto da janela vale
+                # para ela igual: pendente sem prazo rearmava a
+                # janela para sempre e mantinha a inferencia a
+                # toda depois da saida da mao — o orçamento
+                # compartilhado e a espera limitada fecham juntos.
                 self._confirm_masked_skips += 1
                 self._confirm_passes = self._post_exit_confirm_passes()
             else:
@@ -2326,6 +2568,21 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             if p.generation != self._generation:
                 self._telemetry_skipped_stale += 1
                 return True
+            # Captura a guarda desta geracao sob o lock: se new_generation
+            # trocar o objeto no meio da inferencia, o observe desta
+            # passada escreve na instancia orfa, nao na guarda nova —
+            # estado de pagina velha nao semeia referencia na pagina
+            # nova (Devin Review do PR #144).
+            p.exposure_guard = self._paper_exposure
+            if p.generation == self._worker_generation:
+                confirmed = self._accumulator._confirmed
+                if confirmed is not None:
+                    p.exposure_confirmed_ink = (confirmed > 0).copy()
+                    p.exposure_confirmed_anchor = (
+                        None
+                        if self._anchor_corners is None
+                        else self._anchor_corners.copy()
+                    )
         # Uma excecao do modelo (shape errado, sessao morta, ONNX
         # sem memoria) matava esta thread em silencio: o canvas
         # congelava no ultimo quadro e nada era impresso. O erro
@@ -2339,10 +2596,18 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             self._pass_register_motion_coverage(p)
             return self._pass_commit(p)
         except Exception as error:  # noqa: BLE001 - vai para o laco
-            with self._condition:
-                self._error = error
-                self._stopped = True
+            return self._classify_pass_exception(p, error)
+
+    def _classify_pass_exception(self, p, error):
+        """Classifica uma falha no instante em que ela ainda e observavel."""
+        with self._condition:
+            if p.generation != self._generation:
+                self._telemetry_stale_errors += 1
                 self._condition.notify_all()
+                return True
+            self._error = error
+            self._stopped = True
+            self._condition.notify_all()
             return False
 
     def _pass_evidence(self, p):
@@ -2378,6 +2643,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             )
         p.coverage_cam = p.coverage if p.corners is not None else None
         p.coverage_page_static = p.coverage if p.corners is None else None
+        photometric_image = p.warped
         if self._ink_divnorm:
             # O warp sobe cru; a imagem que o modelo vê é a
             # mesma que o laço submetia: fora-da-folha
@@ -2409,7 +2675,12 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             else:
                 p.warped = photometry.division_normalize(p.warped)
         if p.visible is None and self._hand_masker is not None:
-            hand_mask = self._hand_masker.mask(p.warped)
+            hand_mask = self._hand_masker.mask(
+                p.warped,
+                timestamp_ms=(
+                    None if p.captured_at is None else p.captured_at * 1000.0
+                ),
+            )
             if hand_mask is not None:
                 p.visible = hand_mask == 0
         ink_prob = getattr(self._page_clean, "ink_prob", None)
@@ -2423,19 +2694,63 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             # com ou sem a deteccao do MediaPipe. So imagem
             # fotometrica (uint8): mapa float nao e foto.
             reference = paper_evidence.paper_reference(p.warped, p.visible)
-            if reference is not None:
-                self._paper_ref = reference
-            # Sem NENHUMA referencia de papel (imagem preta desde o
-            # inicio da geracao) nao ha o que comparar: a guarda se
-            # abstem como antes. Com referencia previa, incerteza
-            # (reference None) congela a pagina inteira.
-            if self._paper_ref is not None:
+            with self._condition:
+                if p.generation == self._generation:
+                    if reference is not None:
+                        self._paper_ref = reference
+                    paper_ref = self._paper_ref
+                else:
+                    paper_ref = None
+            # Sem referencia persistida, a guarda se abstem como antes.
+            # Quando existe uma referencia persistida, a mascara usa a
+            # evidencia da imagem atual: reference=None significa que a
+            # amostra visivel desta passada e insuficiente, portanto
+            # congela. Usar paper_ref aqui liberaria uma faixa parcial
+            # durante o re-zero mesmo sem amostras suficientes.
+            if paper_ref is not None:
                 p.paper_ok_page = paper_evidence.paper_exposed(p.warped, reference)
         if self._ruling is not None:
             if p.generation != self._ruling_generation:
                 self._ruling.reset()
                 self._ruling_generation = p.generation
             p.prob = self._ruling.apply(p.prob, p.visible)
+        # O suporte de preenchimento conta a evidência no nível que
+        # o voto confirma (vote_hit), não num piso fixo: um bloco
+        # sustentado em [vote_hit, 0,7) confirmaria no voto mas
+        # ficava vetado para sempre (Devin Review do PR #144). A
+        # guarda mede a imagem FOTOMETRICA (antes do divnorm) — o
+        # normalizado muda a luminancia que a referencia compara.
+        confirmed_ink = p.exposure_confirmed_ink
+        if (
+            confirmed_ink is not None
+            and p.corners is not None
+            and p.exposure_confirmed_anchor is not None
+        ):
+            matrix = registration._registration_matrix(
+                p.exposure_confirmed_anchor, p.corners, p.prob.shape
+            )
+            if not registration._registration_is_identity(matrix):
+                confirmed_ink = (
+                    cv2.warpPerspective(
+                        confirmed_ink.astype(np.uint8),
+                        np.linalg.inv(matrix),
+                        (p.prob.shape[1], p.prob.shape[0]),
+                        flags=cv2.INTER_NEAREST,
+                        borderValue=0,
+                    )
+                    > 0
+                )
+        p.exposure = (
+            p.exposure_guard.observe(
+                photometric_image,
+                p.visible,
+                ink_prob=p.prob,
+                ink_support_threshold=self._config.vote_hit,
+                confirmed_ink=confirmed_ink,
+            )
+            if self._config.paper_guard
+            else None
+        )
         # Cobertura de folha (cobertura de folha do loop) viaja em
         # canal proprio ate depois do registro: o veto nao e
         # cego nem se confunde com oclusao de mao — ver o
@@ -2453,6 +2768,29 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 return False
             if p.generation != self._generation:
                 return True
+            if p.exposure_guard.last_fill_adoption:
+                # A guarda acabou de adotar um bloco como
+                # preenchimento: as passadas que o votam precisam
+                # cobrir a janela de voto — sem rearma o
+                # orçamento, gasto durante o streak, expirava
+                # antes da confirmação fechar (Devin Review do
+                # PR #144). Rearmar é por borda de adoção; um
+                # bloco adotado não segura o orçamento para
+                # sempre. A borda tambem zera a espera: houve
+                # progresso, a recuperacao nao e oscilacao.
+                self._fill_recovery_waited = 0
+                self._confirm_passes = max(
+                    self._confirm_passes,
+                    votes._INK_VOTE_WINDOW,
+                )
+            elif p.exposure_guard.recovery_pending:
+                self._fill_recovery_waited += 1
+            else:
+                self._fill_recovery_waited = 0
+            if p.exposure_guard.max_marks_recovery_age:
+                self._marks_recovery_waited += 1
+            else:
+                self._marks_recovery_waited = 0
             p.first_pass = p.generation != self._worker_generation
             p.recovering = self._identity_reference is not None and (
                 p.first_pass or self._identity_recovery_requested
@@ -2793,6 +3131,28 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     p.corners,
                     p.prob.shape,
                 )
+            identity_visible = p.registered_visible
+            if p.exposure is not None and p.exposure.visible is not None:
+                # O bloqueio fotométrico também rege o
+                # reencontro: a sombra que o detector de mão
+                # perdeu não pode contar contra a página —
+                # a tinta anterior escondida por ela deixa
+                # de derrubar o recall (Devin Review do PR
+                # #144). As máscaras entram na MESMA grade
+                # do candidato: o par que registrou esta
+                # passada, antes da arbitragem/follow.
+                identity_photo, _unused_exposed = _exposure_masks_in_geometry(
+                    p.exposure,
+                    p.anchor,
+                    p.registration_corners,
+                    p.prob.shape,
+                    (p.motion_fix if p.motion_decision == "correct" else None),
+                )
+                identity_visible = (
+                    identity_photo
+                    if identity_visible is None
+                    else identity_visible & identity_photo
+                )
             p.identity_precomputed = (
                 p.identity_reference_snap,
                 p.identity_baseline_snap,
@@ -2800,7 +3160,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     p.identity_reference_snap,
                     p.identity_baseline_snap,
                     p.registered_prob,
-                    p.registered_visible,
+                    identity_visible,
                     identity_sampled,
                     self._cached_border_guard(p.prob.shape, p.identity_corners_snap),
                     p.identity_hold_seen_snap,
@@ -2815,11 +3175,11 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         """Decisao, PageModel (fora do lock), voto e publicacao da passada.
 
         Estagios internos:
-        - Lock 2a: _pass_identity -> _pass_anchor_gates -> _pass_prepare_vote
-        - Fora do lock: _pass_paper_and_page_model (registro do gray/bgr,
-          cobertura, guarda de papel exposto, observe, novel, suppress)
-        - Lock 2b: _pass_vote_and_publish (checagem de epoca/geracao,
-          acumulador, contadores, fim do timer pass_ended_at e publicacao).
+        - _condition: identidade, ancora e preparo do voto (fase A).
+        - _pm_gate, fora de _condition: PageModel e registro fotometrico.
+        - _pm_gate + _condition: valida epochs, vota e publica (fase B).
+          new_generation toma o mesmo gate antes de _condition, entao nao
+          observa nem preserva um PageModel parcialmente atualizado.
         Devolve o bool que _run_pass propaga.
         """
         delta_job = None
@@ -2856,31 +3216,51 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             )
             self._pass_anchor_gates(p)
             self._pass_prepare_vote(p)
-        self._pass_paper_and_page_model(p)
-        with self._condition:
-            if self._stopped:
-                return False
-            step = 1 if p.pm_rezero_applied else 0
-            if (
-                p.generation != self._generation
-                or p.pm_epoch != (self._canvas_epoch + step, self._pm_reset_seq + step)
-                or (p.pm_rezero_applied and not self._pm_rezero_requested)
-            ):
-                return True
-            if p.pm_rezero_applied:
-                # Commit do re-zero (#130): canvas e modelo novos juntos,
-                # canvas vazio publicado nesta passada.
-                self._pm_rezero_requested = False
-                self._pm_rezero_seeding = True
-                self._accumulator.reset()
-                self._canvas_epoch += 1
-                self._pm_reset_seq += 1
-                self._pm_baseline_ink = None
-                p.force_publish = True
-            delta_job = self._pass_vote_and_publish(p)
-            self._condition.notify_all()
-        if delta_job is not None:
-            self._record_delta(*delta_job)
+        # A transição toma o mesmo gate antes do lock. Logo, ela ocorre
+        # inteiramente antes deste trecho (e o token abaixo o descarta)
+        # ou depois do modelo, voto, publicação e delta desta passada.
+        with self._pm_gate:
+            try:
+                with self._condition:
+                    if self._stopped:
+                        return False
+                    if p.generation != self._generation or p.pm_epoch != (
+                        self._canvas_epoch,
+                        self._pm_reset_seq,
+                    ):
+                        return True
+                self._pass_paper_and_page_model(p)
+                with self._condition:
+                    if self._stopped:
+                        return False
+                    step = 1 if p.pm_rezero_applied else 0
+                    if (
+                        p.generation != self._generation
+                        or p.pm_epoch
+                        != (self._canvas_epoch + step, self._pm_reset_seq + step)
+                        or (p.pm_rezero_applied and not self._pm_rezero_requested)
+                    ):
+                        return True
+                    if p.pm_rezero_applied:
+                        # Commit do re-zero (#130): canvas e modelo novos juntos,
+                        # canvas vazio publicado nesta passada.
+                        self._pm_rezero_requested = False
+                        self._pm_rezero_seeding = True
+                        self._accumulator.reset()
+                        self._canvas_epoch += 1
+                        self._pm_reset_seq += 1
+                        self._pm_baseline_ink = None
+                        p.force_publish = True
+                    delta_job = self._pass_vote_and_publish(p)
+                    self._condition.notify_all()
+                if delta_job is not None:
+                    self._record_delta(*delta_job)
+            except Exception as error:  # noqa: BLE001 - classificar sob _pm_gate
+                # Nao liberar a transicao antes de classificar uma falha:
+                # caso contrario ela pode avancar a geracao e transformar
+                # uma falha corrente, apos mutacao parcial do modelo, em
+                # um erro aparentemente obsoleto.
+                return self._classify_pass_exception(p, error)
         return True
 
     def _pass_identity(self, p):
@@ -2902,6 +3282,28 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             identity_recovery_requested = self._identity_recovery_requested
             p.keep_page = False
             if identity_reference is not None:
+                identity_visible = p.registered_visible
+                if p.exposure is not None and p.exposure.visible is not None:
+                    # O bloqueio fotométrico também rege o
+                    # reencontro: a sombra que o detector de mão
+                    # perdeu não pode contar contra a página —
+                    # a tinta anterior escondida por ela deixa
+                    # de derrubar o recall (Devin Review do PR
+                    # #144). As máscaras entram na MESMA grade
+                    # do candidato: o par que registrou esta
+                    # passada, antes da arbitragem/follow.
+                    identity_photo, _unused_exposed = _exposure_masks_in_geometry(
+                        p.exposure,
+                        p.anchor,
+                        p.registration_corners,
+                        p.prob.shape,
+                        (p.motion_fix if p.motion_decision == "correct" else None),
+                    )
+                    identity_visible = (
+                        identity_photo
+                        if identity_visible is None
+                        else identity_visible & identity_photo
+                    )
                 if identity_corners is not None and p.corners is not None:
                     p.identity_geometry_registered = True
                 if (
@@ -2926,7 +3328,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                         identity_reference,
                         identity_baseline,
                         p.registered_prob,
-                        p.registered_visible,
+                        identity_visible,
                         identity_sampled,
                         self._cached_border_guard(p.prob.shape, identity_corners),
                         self._identity_hold_seen,
@@ -3263,7 +3665,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             )
 
     def _pass_paper_and_page_model(self, p):
-        """Registro da guarda de papel e PageModel, fora do lock."""
+        """Registro da guarda e PageModel fora de _condition, sob _pm_gate."""
         paper_ok = p.paper_ok_page
         registration_used = p.last_reg
         if (
@@ -3290,7 +3692,59 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     p.motion_fix.warp_back(paper_ok.astype(np.uint8), nearest=True) > 0
                 )
         p.paper_ok = paper_ok
-        last_reg = p.last_reg
+        # Sem a guarda o comportamento é o legado: a evidência
+        # de papel exposto não rege a remoção — mas também não há
+        # avaliação fotométrica, então o opt-out entrega None (sem
+        # avaliação), não True: com True o acumulador lia "avaliação
+        # aprovada" e um streak de remoção armado drenava sem
+        # testemunha nem prova de papel (Devin Review do PR #144).
+        # Guarda ligada sem avaliação na passada (imagem fora do
+        # contrato fotométrico) falha fechada para a remoção: nada
+        # prova papel, a ausência não pode ser testemunhada —
+        # incerteza congela.
+        paper_exposed = None
+        if self._config.paper_guard:
+            paper_exposed = False
+        physical_visible = p.visible
+        if p.exposure is not None:
+            # O par de registro é o da passada que VOTA
+            # (p.last_reg), não o medido antes da
+            # arbitragem/follow: na passada de re-ancoragem a prob
+            # já está na âncora nova e a âncora velha cobriria os
+            # pixels errados. Sem máscara de visibilidade própria
+            # (caminho clássico, sem modelo de mão) o "sem bloco"
+            # da guarda é materializado em máscara — senão o
+            # acumulador nunca tem evidência para a remoção e o
+            # apagamento congela na página limpa.
+            last_reg = registration_used
+            photo_visible, paper_exposed = _exposure_masks_in_geometry(
+                p.exposure,
+                None if last_reg is None else last_reg[0],
+                None if last_reg is None else last_reg[1],
+                p.prob.shape,
+                (
+                    p.motion_fix
+                    if p.motion_decision == "correct" and p.used_registered_prob
+                    else None
+                ),
+                fill_clear=p.visible is None,
+            )
+            if photo_visible is not None:
+                p.visible = (
+                    photo_visible if p.visible is None else p.visible & photo_visible
+                )
+        if p.paper_ok is not None:
+            # As duas testemunhas de papel votam juntas na remocao:
+            # so conta onde a guarda fotometrica E a referencia de
+            # papel provam exposicao — fail-closed. Quem se abstem
+            # (paper_ok None, sem referencia ainda, ou a guarda
+            # desligada no modo legado) deixa o outro falar sozinho;
+            # quem nega papel congela a regiao.
+            paper_exposed = (
+                p.paper_ok if paper_exposed is None else paper_exposed & p.paper_ok
+            )
+        p.paper_exposed = paper_exposed
+        last_reg = registration_used
         if self._config.page_model and p.pass_voted:
             # Modelo persistente da pagina (draw.ink.page_model):
             # observa a passada na grade da ancora e so entrega
@@ -3459,15 +3913,25 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     pm_sampled if obs_visible is None else (obs_visible & pm_sampled)
                 )
             # Papel coberto agora pela mao (mascara fisica), ainda sem
-            # referencia: conta para a prontidao. Pixel visivel que a
-            # guarda recusa como papel (logo escuro, impressao densa)
-            # nunca semeia e fica de fora — esperar por ele seria
-            # esperar para sempre (o "fantasma" de inicializacao).
+            # referencia: conta para a prontidao. A mascara e a de
+            # ANTES do veto fotometrico — pixel visivel que a guarda
+            # recusa como papel (logo escuro, impressao densa) nunca
+            # semeia e fica de fora: esperar por ele seria esperar
+            # para sempre (o "fantasma" de inicializacao, medido no
+            # merge do #161 no PR #144).
             hand_covered = None
-            if p.visible is not None:
+            if physical_visible is not None:
                 hand_covered = (
-                    ~p.visible if pm_coverage is None else pm_coverage & ~p.visible
+                    ~physical_visible
+                    if pm_coverage is None
+                    else pm_coverage & ~physical_visible
                 )
+            # Dominio observavel antes dos vetos fotometricos: a
+            # diferenca para o obs_visible final e o que a guarda
+            # negou nesta passada — mao/oclusor que a mascara fisica
+            # nao viu e que ainda nao tem referencia conta para a
+            # prontidao com prazo curto (Devin Review do PR #144).
+            obs_domain = obs_visible
             if self._config.paper_guard and p.warped.dtype == np.uint8:
                 exposed_mask = pm.exposed(
                     gray,
@@ -3507,6 +3971,15 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 p.next_baseline_ink = np.zeros(p.prob.shape, dtype=bool)
                 p.pm_confirm_obs = pm.confirm_obs
                 p.pm_rezero_applied = True
+            cover_held = None
+            if obs_domain is not None:
+                blocked = (
+                    obs_domain if obs_visible is None else obs_domain & ~obs_visible
+                )
+                cover_held = pm.covered_unseeded(
+                    blocked,
+                    hold_passes=self._config.unseeded_hold_passes,
+                )
             pm.observe(
                 gray,
                 visible=obs_visible,
@@ -3546,6 +4019,8 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             unseeded_px = int(np.count_nonzero(pm.seeding_pending(obs_visible)))
             if hand_covered is not None:
                 unseeded_px += int(np.count_nonzero(hand_covered & ~pm.seeded))
+            if cover_held is not None:
+                unseeded_px += int(np.count_nonzero(cover_held))
             p.reg_info["pm_unseeded_px"] = unseeded_px
             baseline_seen = (
                 suppress & obs_admissible & (p.prob > self._accumulator.threshold)
@@ -3566,8 +4041,128 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             # do acumulador (visibilidade, testemunha, passadas
             # consecutivas) seguem.
             zero = suppress
-            if returned_mask is not None:
-                zero = zero | (erase_candidates & returned_mask & obs_admissible)
+            returned_seen = (
+                None
+                if returned_mask is None
+                else erase_candidates & returned_mask & obs_admissible
+            )
+            if returned_seen is not None and np.any(returned_seen):
+                # O retorno a aparencia semeada vale evidencia de
+                # ausencia so fora dos pixels sob suspeita de oclusor
+                # nesta passada: tile anomalo (luma/croma — a regua
+                # escura que imita a guia) ou tinta inexplicada em
+                # posicao nao aprendida (as marcas dela). A impressao
+                # semeada que segue lendo tinta (next_baseline_ink) NAO
+                # e marca nova: em tile denso demais para amostrar papel
+                # a guarda nunca aprende posicoes e o veto cego
+                # congelava a remocao (Devin Review do PR #144). O veto
+                # de pixel "confirmada sobre pixel escuro" e o unico
+                # que o casamento com a referencia do PageModel
+                # sobrepoe.
+                if p.exposure is not None:
+                    anomalous_px = p.exposure_guard.anomalous_px
+                    suspect = p.exposure_guard.suspect_ink
+                    # A guarda mede o warp desta passada; o veto e o
+                    # retorno julgados abaixo vivem na grade da ancora.
+                    # Sem a projecao, pagina que desloca ou rotaciona
+                    # deixa o veto cobrindo os pixels errados — e a
+                    # regua escura sob o traco confirmado deixava de
+                    # suprimir o retorno, virando ausencia provada
+                    # (Devin Review do PR #144). Mesmo par (ancora,
+                    # registro) e mesmo motion_fix das mascaras da
+                    # avaliacao acima.
+                    if last_reg is not None:
+                        matrix = registration._registration_matrix(
+                            last_reg[0], last_reg[1], p.prob.shape
+                        )
+                        if not registration._registration_is_identity(matrix):
+                            if anomalous_px is not None:
+                                anomalous_px = _warp_exposure_mask(
+                                    anomalous_px, matrix, p.prob.shape
+                                )
+                            if suspect is not None:
+                                suspect = _warp_exposure_mask(
+                                    suspect, matrix, p.prob.shape
+                                )
+                    motion_fix = (
+                        p.motion_fix
+                        if p.motion_decision == "correct" and p.used_registered_prob
+                        else None
+                    )
+                    if motion_fix is not None:
+                        if anomalous_px is not None:
+                            anomalous_px = (
+                                motion_fix.warp_back(
+                                    anomalous_px.astype(np.uint8), nearest=True
+                                )
+                                > 0
+                            )
+                        if suspect is not None:
+                            suspect = (
+                                motion_fix.warp_back(
+                                    suspect.astype(np.uint8), nearest=True
+                                )
+                                > 0
+                            )
+                    if anomalous_px is not None:
+                        veto = anomalous_px.copy()
+                        if suspect is not None:
+                            veto |= suspect & ~p.next_baseline_ink
+                        # Tile anomalo que segue parecendo a propria
+                        # semente nao esta coberto: a impressao densa
+                        # escurece a media do tile sem mudar a
+                        # aparencia de nenhum pixel semeado. Sob uma
+                        # capa ou regua escura, os pixels de papel
+                        # semeados viram `novel` e a fracao de
+                        # casamento despenca — o veto permanece
+                        # (Devin Review do PR #144).
+                        tile = occlusion._REFERENCE_TILE_PX
+                        grid = (
+                            (p.prob.shape[1] + tile - 1) // tile,
+                            (p.prob.shape[0] + tile - 1) // tile,
+                        )
+                        seeded_frac = cv2.resize(
+                            pm.seeded.astype(np.float32),
+                            grid,
+                            interpolation=cv2.INTER_AREA,
+                        )
+                        matched_frac = cv2.resize(
+                            (pm.seeded & ~novel_mask).astype(np.float32),
+                            grid,
+                            interpolation=cv2.INTER_AREA,
+                        )
+                        consistent = (
+                            cv2.resize(
+                                (
+                                    (seeded_frac > 0.0)
+                                    & (
+                                        matched_frac
+                                        >= seeded_frac * _RETURNED_TILE_MATCH
+                                    )
+                                ).astype(np.uint8),
+                                (p.prob.shape[1], p.prob.shape[0]),
+                                interpolation=cv2.INTER_NEAREST,
+                            )
+                            > 0
+                        )
+                        veto &= ~consistent
+                        returned_seen = returned_seen & ~veto
+                zero = zero | returned_seen
+                # O retorno a aparencia semeada tambem prova exposicao:
+                # a impressao escura sob o traco apagado cai no veto
+                # dark_ink da guarda ("tinta confirmada sobre pixel
+                # escuro") e a remocao congelava para sempre (merge do
+                # #161 no PR #144). O casamento com a referencia do
+                # PageModel e a evidencia de que nada cobre o pixel —
+                # abertura so pixel, nunca sobre veto de tile.
+                if p.exposure is not None and np.any(returned_seen):
+                    exposed_mask = p.paper_exposed
+                    if isinstance(exposed_mask, (bool, np.bool_)):
+                        exposed_mask = np.full(p.prob.shape, exposed_mask, dtype=bool)
+                    else:
+                        exposed_mask = exposed_mask.copy()
+                    exposed_mask[returned_seen] = True
+                    p.paper_exposed = exposed_mask
             if np.any(zero):
                 p.prob = np.where(zero, 0.0, p.prob).astype(np.float32)
 
@@ -3616,7 +4211,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             p.prob,
             p.visible,
             valid_mask=valid_mask,
-            paper_ok=p.paper_ok,
+            paper_exposed=p.paper_exposed,
             removal_allowed=(
                 not p.identity_owned
                 and not p.arbitration_abstain
@@ -3660,8 +4255,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 else p.pm_seeding_remaining
             )
             hold_needed = (
-                result["frozen_pending_px"] > 0
-                or result["recovering_px"] >= _RECOVERY_MIN_PX
+                self._recovery_wait_open()
                 or p.pm_hold_pending_px > 0
                 or p.pm_recovering_px >= _RECOVERY_MIN_PX
             )
@@ -3677,12 +4271,14 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 and self._confirm_passes < self._post_exit_confirm_passes()
                 and self._confirm_masked_skips < max_skips
             ):
-                # Pos-saida da mao: enquanto a guarda congela tinta nova
-                # detectada pelo modelo (ou remocao elegivel no hold) ou a
-                # sombra esta saindo (recovering_px), as passadas gastas ate
-                # aqui nao deram voto limpo. Re-arma a janela cheia (limitado
-                # pelo teto de devolucoes) para que, solto o hold, haja uma
-                # janela inteira de votos antes do descanso.
+                # Pos-saida da mao: enquanto a espera de recuperacao da
+                # guarda segue aberta (streak de preenchimento contando
+                # ou tile em hold pos-anomalia, ainda dentro do prazo
+                # de _recovery_wait_open) ou o PageModel segura oclusor,
+                # as passadas gastas ate aqui nao deram voto limpo.
+                # Re-arma a janela cheia (limitado pelo teto de
+                # devolucoes) para que, solto o hold, haja uma janela
+                # inteira de votos antes do descanso.
                 self._confirm_masked_skips += 1
                 self._confirm_passes = self._post_exit_confirm_passes()
             elif (

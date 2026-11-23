@@ -141,6 +141,27 @@ def _structure(block):
     return (a + c) / 2 - root, (a + c) / 2 + root
 
 
+def _eigen_ok(small_eig, big_eig):
+    return small_eig >= _TEXTURE_MIN and small_eig >= _TEXTURE_MIN_RATIO * big_eig
+
+
+def _iter_textured_parts(shape, eigen_source, *vis_masks):
+    """Blocos da grade com textura 2D e visiveis em todas as mascaras.
+
+    O teste de textura roda nos autovalores de eigen_source; devolve
+    (x, y, part, bloco contiguo float32) por bloco valido.
+    """
+    h, w = shape
+    for y in range(0, h - _BLOCK + 1, _BLOCK):
+        for x in range(0, w - _BLOCK + 1, _BLOCK):
+            part = np.s_[y : y + _BLOCK, x : x + _BLOCK]
+            if any(v[part].mean() < _BLOCK_MIN_VISIBLE for v in vis_masks):
+                continue
+            block = np.array(eigen_source[part], dtype=np.float32, order="C")
+            if _eigen_ok(*_structure(block)):
+                yield x, y, part, block
+
+
 def _fit_affine(points, shifts):
     """Ajuste afim robusto: parte dos blocos perto da mediana (a mao ou a
     sombra que a mascara nao cobre puxariam o primeiro minimos quadrados
@@ -222,22 +243,7 @@ class MotionGate:
         return _texture(small), hidden == 0
 
     def _textured_blocks(self, texture, vis):
-        h, w = texture.shape
-        count = 0
-        for y in range(0, h - _BLOCK + 1, _BLOCK):
-            for x in range(0, w - _BLOCK + 1, _BLOCK):
-                part = np.s_[y : y + _BLOCK, x : x + _BLOCK]
-                if vis[part].mean() < _BLOCK_MIN_VISIBLE:
-                    continue
-                small_eig, big_eig = _structure(
-                    np.array(texture[part], dtype=np.float32, order="C")
-                )
-                if (
-                    small_eig >= _TEXTURE_MIN
-                    and small_eig >= _TEXTURE_MIN_RATIO * big_eig
-                ):
-                    count += 1
-        return count
+        return sum(1 for _ in _iter_textured_parts(texture.shape, texture, vis))
 
     def _align_to_confirmed(self, texture, vis, confirmed_ink, ink_prob):
         """Alinha referencia tardia a tinta ja confirmada; None se nao der."""
@@ -332,27 +338,16 @@ class MotionGate:
         h, w = texture.shape
         window = cv2.createHanningWindow((_BLOCK, _BLOCK), cv2.CV_32F)
         points, shifts = [], []
-        for y in range(0, h - _BLOCK + 1, _BLOCK):
-            for x in range(0, w - _BLOCK + 1, _BLOCK):
-                part = np.s_[y : y + _BLOCK, x : x + _BLOCK]
-                if (
-                    vis[part].mean() < _BLOCK_MIN_VISIBLE
-                    or ref_vis[part].mean() < _BLOCK_MIN_VISIBLE
-                ):
-                    continue
-                a = np.array(ref[part], dtype=np.float32, order="C")
-                b = np.array(texture[part], dtype=np.float32, order="C")
-                small_eig, big_eig = _structure(a)
-                if small_eig < _TEXTURE_MIN or small_eig < _TEXTURE_MIN_RATIO * big_eig:
-                    continue
-                # Copias contiguas: o phaseCorrelate escreve na entrada
-                # quando ela chega como fatia (medido: a referencia
-                # derivava a cada medida).
-                (dx, dy), peak = cv2.phaseCorrelate(a, b, window)
-                if peak < _PEAK_MIN:
-                    continue
-                points.append(((x + _BLOCK / 2 - w / 2), (y + _BLOCK / 2 - h / 2)))
-                shifts.append((dx, dy))
+        for x, y, part, a in _iter_textured_parts(texture.shape, ref, vis, ref_vis):
+            b = np.array(texture[part], dtype=np.float32, order="C")
+            # Copias contiguas: o phaseCorrelate escreve na entrada
+            # quando ela chega como fatia (medido: a referencia
+            # derivava a cada medida).
+            (dx, dy), peak = cv2.phaseCorrelate(a, b, window)
+            if peak < _PEAK_MIN:
+                continue
+            points.append(((x + _BLOCK / 2 - w / 2), (y + _BLOCK / 2 - h / 2)))
+            shifts.append((dx, dy))
         if len(points) < _MIN_BLOCKS:
             return None
         points = np.asarray(points, dtype=np.float64) / _SCALE

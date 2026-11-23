@@ -1125,6 +1125,7 @@ def test_held_recovery_does_not_publish_saved_ink(paper_guard):
                 assert int(np.count_nonzero(disp.provisional[100:1100, 9:13])) == 0
         assert int(np.count_nonzero(worker._identity_reference)) > 0
 
+        marks = []
         for _ in range(8):
             clock.now += 1.1
             worker.submit(
@@ -1133,21 +1134,35 @@ def test_held_recovery_does_not_publish_saved_ink(paper_guard):
                 )
             )
             worker.pump()
+            snap = worker.poll(gen, 0)
+            marks.append(
+                0
+                if snap is None
+                else int(np.count_nonzero(snap.confirmed[200:800, 200:600]))
+            )
         snap = worker.poll(gen, 0)
         assert snap is not None
-        return int(np.count_nonzero(snap.confirmed[100:1100, 9:13])), int(
-            np.count_nonzero(snap.confirmed[200:800, 200:600])
+        return (
+            int(np.count_nonzero(snap.confirmed[100:1100, 9:13])),
+            int(np.count_nonzero(snap.confirmed[200:800, 200:600])),
+            marks,
         )
 
     # same_page: o desenho restaurado e publicado sob a geracao nova.
-    old_px, _ = run_case(img)
+    old_px, _, _ = run_case(img)
     assert old_px > 0
-    old_px, new_px = run_case(img_marked)
+    old_px, new_px, marks = run_case(img_marked)
     assert old_px == 0
     if paper_guard:
-        # A folha marcada nao parece papel exposto: a tinta nova
-        # congela sob a guarda fotometrica em vez de confirmar.
-        assert new_px == 0
+        # A folha marcada falha a leitura de papel exposto: a guarda
+        # bloqueia a região como oclusor nas primeiras passadas — a
+        # tinta nova NÃO confirma de cara. O modelo lendo tinta forte
+        # de forma persistente faz a recuperação por preenchimento
+        # adotar o bloco (draw.ink.occlusion, PR #144): confirmar ela
+        # confirma, mas só depois do veto fotométrico — ao contrário
+        # do caminho sem guarda, que vota imediatamente.
+        assert max(marks[:4]) == 0
+        assert new_px > 0
     else:
         assert new_px > 0
 

@@ -566,6 +566,8 @@ def test_stroke_seen_once_before_hand_exit_finishes_confirming(ink):
     got = _confirmed(worker, generation) > 0
     assert _frac(got, want) >= 0.95
     assert _beyond(got, want, 2) <= 0.02 * np.count_nonzero(want)
+
+
 # Contrato 9: objeto escuro sem mascara sobre traco confirmado nao o
 # apaga — a guarda fotometrica congela a regiao para o voto de
 # remocao, com ou sem deteccao de mao. (O contrato 8, traco visto
@@ -626,7 +628,7 @@ def test_unmasked_dark_occluder_does_not_erase_confirmed_ink(ink):
 # ------------------------------------------------------------------
 
 
-def test_startup_occluder_never_seeds_nor_inks(ink):
+def test_startup_occluder_never_seeds_nor_inks(ink, regime):
     worker, clock = ink
     generation = worker.new_generation()
     scene = _Scene()
@@ -644,6 +646,10 @@ def test_startup_occluder_never_seeds_nor_inks(ink):
     worker.set_hand_presence(False)
 
     pm = getattr(worker, "_page_model", None)
+    if REGIMES[regime].page_model:
+        # Com o PageModel ligado o modelo EXISTE: se sumir, a asserção de
+        # semeadura nao pode sumir junto em silencio.
+        assert pm is not None, f"{regime}: sem PageModel apos a abertura"
     if pm is not None:
         assert np.count_nonzero(pm.seeded & cover) == 0, (
             "oclusor sem mascara virou referencia de pagina"

@@ -35,7 +35,7 @@ def _corners_float32(value, name):
 
 
 def _readonly(value, copy=False):
-    """Devolve visão (ou cópia) somente-leitura do array."""
+    """Devolve visão (ou cópia própria) somente-leitura do array."""
     out = value.copy() if copy else value.view()
     out.flags.writeable = False
     return out
@@ -196,8 +196,10 @@ class WarpedPage:
     """Uma página retificada entregue à trabalhadora de tinta.
 
     image é o warp: ndarray 2D ou (H, W, 3) uint8 — a saída de
-    warp_sheet sobre o quadro da câmera — guardada como visão
-    somente-leitura do buffer recebido. generation é a geração de
+    warp_sheet sobre o quadro da câmera — copiada para um buffer
+    próprio somente-leitura. O mesmo vale para visible e coverage:
+    depois da construção, o produtor pode reutilizar os arrays de
+    entrada sem alterar uma passada enfileirada. generation é a geração de
     sessão da folha, >= 0. corners é o quad (4, 2) float32
     somente-leitura que retificou ESTE warp, ou None. visible é a
     máscara de visibilidade do FRAME que originou este warp
@@ -227,7 +229,7 @@ class WarpedPage:
             self.image.shape[2] != 3 or self.image.dtype != np.uint8
         ):
             raise ValueError(f"image (H, W, 3) precisa ser uint8: {self.image.dtype}")
-        object.__setattr__(self, "image", _readonly(self.image))
+        object.__setattr__(self, "image", _readonly(self.image, copy=True))
         if self.generation < 0:
             raise ValueError(f"generation precisa ser >= 0: {self.generation}")
         _corners_field(self, "corners")
@@ -235,7 +237,7 @@ class WarpedPage:
             mask = getattr(self, name)
             if mask is None:
                 continue
-            _mask_2d(self, name, dtypes=(bool, np.uint8))
+            _mask_2d(self, name, copy=True, dtypes=(bool, np.uint8))
             if self.corners is None and mask.shape != self.image.shape[:2]:
                 raise ValueError(
                     f"{name} sem corners segue a grade do warp: "
@@ -362,6 +364,10 @@ class InkPublication:
     full (descontinuidade: tinta removida/migrada ou âncora movida) vêm do
     InkDelta da mesma passada; None/False quando não se pediu a metadados ou
     a publicação não trouxe tinta nova.
+
+    Este é o tipo concreto canônico; `draw_dral.stream.InkPublication` é a
+    vista estrutural (Protocol) do mesmo contrato, para o fio não importar
+    o core. Mesmo nome, papéis diferentes — não é duplicata acidental.
     """
 
     generation: int
@@ -522,3 +528,44 @@ class HandOcclusion:
         a, b = self.occlusion_mask, self.orientation_mask
         if a is not None and b is not None and a.shape != b.shape:
             raise ValueError("as máscaras precisam usar a mesma grade de câmera")
+
+
+@dataclass(frozen=True, slots=True)
+class ExposureAssessment:
+    """Veredito fotométrico de uma passada da trabalhadora de tinta.
+
+    Produzido pelo guarda de exposição do warp (ink/occlusion) e
+    consumido pelo voto: máscaras independentes porque adicionar e
+    remover tinta pedem provas diferentes. visible é máscara 2D
+    bool/uint8 na grade do warp — True onde a imagem sustenta
+    evidência — ou None quando a guarda não encontrou região
+    bloqueada (não é "evidência indisponível": imagem sem fotometria
+    confiável devolve None no observe inteiro). paper_exposed é
+    bool (página inteira verificada) ou máscara 2D — True onde a
+    imagem prova papel exposto, o requisito separado da remoção de
+    tinta confirmada.
+    """
+
+    visible: np.ndarray | None
+    paper_exposed: np.ndarray | bool
+
+    def __post_init__(self):
+        # O tipo declarado de paper_exposed não admite None: uma
+        # avaliação emitida sem veredito de papel não é "sem avaliação"
+        # (None no acumulador reabriria o contrato legado — Devin
+        # Review do PR #144), é "nada prova papel" — False congela.
+        if self.paper_exposed is None:
+            object.__setattr__(self, "paper_exposed", False)
+        for name in ("visible", "paper_exposed"):
+            mask = getattr(self, name)
+            if mask is None:
+                continue
+            # Escalar só vale para paper_exposed (veredito da página
+            # inteira); visible é sempre máscara ou None.
+            if isinstance(mask, (bool, np.bool_)):
+                if name == "visible":
+                    raise ValueError(
+                        "visible precisa ser None ou máscara 2D bool/uint8"
+                    )
+                continue
+            _mask_2d(self, name, dtypes=(bool, np.uint8))

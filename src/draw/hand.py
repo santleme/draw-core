@@ -70,6 +70,19 @@ _DARK_SAMPLE_STRIDE = 8
 # a ultima mao vista (queda curta do detector nao libera a folha). So vale
 # para o mesmo tamanho de frame; "indisponivel" nunca e retido.
 _HOLD_FRAMES = 3
+# A partial detection (for example, only one of two hands found) keeps
+# the missing hand's last mask briefly. Full misses are already retained
+# at landmark level by _retain.
+_MASK_HOLD_FRAMES = 3
+_MASK_HOLD_GROW_PX = 10
+# Por modo de deteccao: (atributo do landmarker publicado, flag de
+# indisponivel, RunningMode, avisa na falha). O VIDEO nao avisa: a
+# falha dele degrada para o IMAGE e a mascara segue viva; so a falha
+# do IMAGE, o modo final, anuncia a indisponibilidade.
+_LANDMARKER_MODES = {
+    "image": ("_landmarker", "_unavailable", "IMAGE", True),
+    "video": ("_video_landmarker", "_video_unavailable", "VIDEO", False),
+}
 
 
 def _resolve_model_path(model_path):
@@ -178,6 +191,9 @@ class HandMasker:
         self._held_misses = 0
         self.last_detection_held = False
         self._observed_source_id = None
+        self._last_hand_mask = None
+        self._last_hand_count = 0
+        self._mask_misses = 0
         self._warned = False
         self._closed = False
         self._lock = threading.RLock()
@@ -245,10 +261,7 @@ class HandMasker:
                 "acumulativo roda sem ela."
             )
 
-    def _create_landmarker(self, running_mode):
-        path = _resolve_model_path(self._requested_path)
-        if path is None or not Path(path).exists():
-            return None
+    def _create_landmarker(self, running_mode, path):
         try:
             import mediapipe as mp
 
@@ -264,40 +277,8 @@ class HandMasker:
         except Exception:
             return None
 
-    def _ensure(self):
-        with self._lock:
-            if self._landmarker is not None:
-                return True
-            if self._unavailable:
-                return False
-            path = _resolve_model_path(self._requested_path)
-            if path is None or not Path(path).exists():
-                self._unavailable = True
-                self._warn_once()
-                return False
-            try:
-                import mediapipe as mp
-            except Exception:
-                self._unavailable = True
-                self._warn_once()
-                return False
-            created = self._create_landmarker(mp.tasks.vision.RunningMode.IMAGE)
-            if created is None:
-                self._unavailable = True
-                self._warn_once()
-                return False
-            if self._closed:
-                # O close() correu sem o lock enquanto a criacao
-                # estava em voo: o recem-criado nao se publica —
-                # fecha ja.
-                self._dispose_fresh(created)
-                self._unavailable = True
-                return False
-            self._landmarker = created
-            return True
-
-    def _ensure_video(self):
-        """Landmarker em modo VIDEO, criado sob demanda.
+    def _ensure(self, kind="image"):
+        """Garante o landmarker (IMAGE ou VIDEO) sob demanda.
 
         O modo VIDEO do MediaPipe rastreia a mao entre quadros e
         pula a deteccao de palma enquanto ela esta localizada —
@@ -306,31 +287,40 @@ class HandMasker:
         detectar marca o modo como indisponivel e a presenca cai
         para o IMAGE permanentemente: degradacao, nunca erro.
         """
+        landmarker_attr, unavailable_attr, mode_name, warn = _LANDMARKER_MODES[kind]
         with self._lock:
-            if self._video_landmarker is not None:
+            if getattr(self, landmarker_attr) is not None:
                 return True
-            if self._video_unavailable:
+            if getattr(self, unavailable_attr):
                 return False
+
+            def _fail():
+                setattr(self, unavailable_attr, True)
+                if warn:
+                    self._warn_once()
+                return False
+
             path = _resolve_model_path(self._requested_path)
             if path is None or not Path(path).exists():
-                self._video_unavailable = True
-                return False
+                return _fail()
             try:
                 import mediapipe as mp
             except Exception:
-                self._video_unavailable = True
-                return False
-            created = self._create_landmarker(mp.tasks.vision.RunningMode.VIDEO)
+                return _fail()
+            created = self._create_landmarker(
+                getattr(mp.tasks.vision.RunningMode, mode_name),
+                path,
+            )
             if created is None:
-                self._video_unavailable = True
-                return False
+                return _fail()
             if self._closed:
-                # Mesma corrida do _ensure: criacao que termina
-                # depois do close() descarta o recem-criado.
+                # O close() correu sem o lock enquanto a criacao
+                # estava em voo: o recem-criado nao se publica —
+                # fecha ja.
                 self._dispose_fresh(created)
-                self._video_unavailable = True
+                setattr(self, unavailable_attr, True)
                 return False
-            self._video_landmarker = created
+            setattr(self, landmarker_attr, created)
             return True
 
     def _landmarks(self, frame, max_width=None, timestamp_ms=None):
@@ -368,6 +358,9 @@ class HandMasker:
             self._held_shape = None
             self._held_misses = 0
             self.last_detection_held = False
+            self._last_hand_mask = None
+            self._last_hand_count = 0
+            self._mask_misses = 0
 
     def _retain(self, hands, frame):
         """Histerese de presenca: sem mao por ate _HOLD_FRAMES deteccoes
@@ -391,8 +384,8 @@ class HandMasker:
 
     def _landmarks_locked(self, frame, max_width, timestamp_ms):
         """O corpo de _landmarks, rodando sob o lock do masker."""
-        use_video = timestamp_ms is not None and self._ensure_video()
-        if not use_video and not self._ensure():
+        use_video = timestamp_ms is not None and self._ensure("video")
+        if not use_video and not self._ensure("image"):
             return None
         import mediapipe as mp
 
@@ -408,8 +401,8 @@ class HandMasker:
         image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
         result = None
         if use_video:
-            timestamp = max(int(timestamp_ms), self._last_video_ts + 1)
             try:
+                timestamp = max(int(timestamp_ms), self._last_video_ts + 1)
                 result = self._video_landmarker.detect_for_video(image, timestamp)
                 self._last_video_ts = timestamp
             except Exception:
@@ -428,9 +421,12 @@ class HandMasker:
                         pass
                 result = None
         if result is None:
-            if not self._ensure():
+            if not self._ensure("image"):
                 return None
-            result = self._landmarker.detect(image)
+            try:
+                result = self._landmarker.detect(image)
+            except Exception:
+                return None
         frame_h, frame_w = frame.shape[:2]
         hands = []
         for hand in result.hand_landmarks or []:
@@ -442,30 +438,85 @@ class HandMasker:
             )
         return hands
 
-    def mask(self, frame):
-        """A máscara de mão do frame, ou None se indisponível."""
-        hands = self._landmarks(frame)
-        if hands is None:
-            return None
-        mask = np.zeros(frame.shape[:2], dtype=np.uint8)
-        for points in hands:
-            for polygon in _hand_polygons(points, frame.shape):
-                cv2.fillPoly(mask, [polygon], 255)
-        if not hands:
+    def mask(self, frame, timestamp_ms=None):
+        """Máscara de mão atual, com retenção de quedas breves do detector.
+
+        Full misses are held at landmark level. If only one of multiple
+        hands remains detected, retain the previous union mask briefly so
+        the missing hand cannot expose ink during flicker.
+        """
+        with self._lock:
+            hands = self._landmarks(
+                frame,
+                max_width=_PRESENCE_MAX_WIDTH,
+                timestamp_ms=timestamp_ms,
+            )
+            if hands is None:
+                return None
+            if not hands:
+                # Ausência real (hold de marcos expirado): a pegada
+                # retida é antiga demais para valer — reatá-la numa
+                # detecção parcial futura vetaria uma região que a
+                # mão já deixou.
+                self._last_hand_mask = None
+                self._last_hand_count = 0
+                self._mask_misses = 0
+                return np.zeros(frame.shape[:2], dtype=np.uint8)
+
+            mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+            for points in hands:
+                for polygon in _hand_polygons(points, frame.shape):
+                    cv2.fillPoly(mask, [polygon], 255)
+            kernel = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE, (2 * _DILATE_PX + 1, 2 * _DILATE_PX + 1)
+            )
+            mask = cv2.dilate(mask, kernel)
+            if self.last_detection_held:
+                # Falha total: a histerese entregou os marcos
+                # retidos e a pegada REAL cresce a cada miss — a
+                # mão segue se movendo sob uma leitura que não se
+                # atualiza; o footprint fixo exporia a borda dela
+                # como papel à vista (Devin Review do PR #144).
+                self._mask_misses += 1
+                if (
+                    self._last_hand_mask is not None
+                    and self._last_hand_mask.shape == mask.shape
+                ):
+                    mask = self._merge_held(mask)
+                return mask
+            if (
+                self._last_hand_mask is not None
+                and self._last_hand_mask.shape == mask.shape
+                and len(hands) < self._last_hand_count
+                and self._mask_misses < _MASK_HOLD_FRAMES
+            ):
+                self._mask_misses += 1
+                mask = self._merge_held(mask)
+            else:
+                self._last_hand_mask = mask.copy()
+                self._last_hand_count = len(hands)
+                self._mask_misses = 0
             return mask
-        kernel = cv2.getStructuringElement(
-            cv2.MORPH_ELLIPSE, (2 * _DILATE_PX + 1, 2 * _DILATE_PX + 1)
+
+    def _merge_held(self, mask):
+        """Une a pegada retida (dilatada pelos misses) à máscara."""
+        grow = _MASK_HOLD_GROW_PX * self._mask_misses
+        hold_kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (2 * grow + 1, 2 * grow + 1)
         )
-        return cv2.dilate(mask, kernel)
+        return cv2.bitwise_or(mask, cv2.dilate(self._last_hand_mask, hold_kernel))
 
     def observe(self, packet: FramePacket, *, source_id: int) -> HandOcclusion:
-        """Publica a máscara IMAGE com a identidade da captura."""
+        """Publica a máscara da captura com identidade e timestamp."""
         if source_id != self._observed_source_id:
             # Outra fonte/vista: marcos retidos da anterior nao valem.
             if self._observed_source_id is not None:
                 self.reset_retention()
             self._observed_source_id = source_id
-        mask = self.mask(packet.image)
+        mask = self.mask(
+            packet.image,
+            timestamp_ms=packet.captured_at * 1000.0,
+        )
         return HandOcclusion(
             frame_sequence=packet.sequence,
             captured_at=packet.captured_at,

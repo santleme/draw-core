@@ -115,7 +115,10 @@ class InkConfig:
     # Intervalo minimo entre inicios de passadas ativas da tinta (s).
     # None = o piso de draw.ink.worker._PAGE_CLEAN_INTERVAL_SECONDS
     # (0,25 s); substitui apenas esse piso, mantendo sonda ociosa e
-    # descanso. Simulado em 2026-11-20 (Ryzen 7700X, draw_seg a 6 Hz em
+    # descanso. Votos de remocao pendentes furam o intervalo ate o
+    # teto da sonda ociosa (1 s) — urgencia de remocao nao espera um
+    # configurado lento (Devin Review do PR #144). Simulado em
+    # 2026-11-20 (Ryzen 7700X, draw_seg a 6 Hz em
     # quadros reais, tinta INT8 de pagina inteira em 4 threads, sem a mao
     # do MediaPipe): 0,25 s -> 4,0 passadas/s em 2,3 nucleos; 0,15 s ->
     # 6,7/s em 3,1; 0,10 s -> 9,9/s em 4,3 (o fp32 em mosaico de hoje, a
@@ -130,14 +133,27 @@ class InkConfig:
     # voto: 0 desliga (legado); None deriva do tamanho retificado em
     # grades de pagina inteira (>= 200 px).
     border_guard_px: int | None = 0
-    # Guarda fotometrica de oclusao (draw.ink.paper_evidence, issue #129):
-    # a regiao que nao parece papel exposto (mao, braco, caneta, sombra)
-    # fica congelada — sem remocao de tinta confirmada e sem voto novo —,
-    # e continua por occlusion_hold_passes passadas depois que a evidencia
-    # some (queda curta de deteccao nao libera a regiao). Independente do
-    # MediaPipe. Incerteza congela.
+    # Guarda fotometrica de oclusao (issue #129): a regiao que nao
+    # parece papel exposto (mao, braco, caneta, sombra) fica congelada —
+    # sem remocao de tinta confirmada e sem voto novo. Duas testemunhas
+    # independentes: draw.ink.occlusion (PaperExposureGuard, veto de
+    # adicao e testemunha da remocao) e draw.ink.paper_evidence
+    # (referencia de papel que alimenta p.paper_ok e o PageModel).
+    # Independente do MediaPipe. Incerteza congela.
     paper_guard: bool = True
+    # Hold de oclusor do PageModel (draw.ink.page_model): o pixel
+    # semeado que sai de oclusao segue vetado por esta quantidade de
+    # passadas — queda curta de deteccao nao libera a regiao (o hold
+    # da guarda fotometrica mora na PaperExposureGuard, nao aqui).
     occlusion_hold_passes: int = 3
+    # Hold de pixel sem referencia negado pela guarda
+    # (PageModel.covered_unseeded): fisicamente a vista mas
+    # fotometricamente negado conta para a prontidao por esta
+    # quantidade de passadas — uma mao que sai antes do prazo ainda
+    # e observada e semeada; impressao escura permanente esgota o
+    # prazo e nao segura o "pronto" para sempre (Devin Review do
+    # PR #144).
+    unseeded_hold_passes: int = 4
     # Modelo persistente da pagina limpa (draw.ink.page_model, opt-in):
     # referencia por pixel na grade da ancora, semeada por blocos que a
     # passada viu limpos. Pixels ainda sem referencia nao entregam
@@ -161,6 +177,8 @@ class InkConfig:
             raise ValueError("motion_veto_px deve ser > 0")
         if not 0 <= self.occlusion_hold_passes <= 10:
             raise ValueError("occlusion_hold_passes fora de [0, 10]")
+        if not 0 <= self.unseeded_hold_passes <= 10:
+            raise ValueError("unseeded_hold_passes fora de [0, 10]")
         if self.pass_interval_s is not None and not 0.0 < self.pass_interval_s <= 5.0:
             raise ValueError(
                 f"pass_interval_s fora de (0, 5] s: {self.pass_interval_s!r}"

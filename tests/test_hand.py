@@ -18,12 +18,18 @@ from draw import hand as hand_module
 from draw.contracts import FramePacket
 
 
-def _landmarks_result():
-    hand = [
-        SimpleNamespace(x=0.10 + 0.01 * (i % 5), y=0.10 + 0.01 * (i // 5))
-        for i in range(21)
-    ]
-    return SimpleNamespace(hand_landmarks=[hand])
+def _landmarks_result(hand_count=1):
+    hands = []
+    for hand_index in range(hand_count):
+        hand = [
+            SimpleNamespace(
+                x=0.10 + 0.45 * hand_index + 0.01 * (i % 5),
+                y=0.10 + 0.01 * (i // 5),
+            )
+            for i in range(21)
+        ]
+        hands.append(hand)
+    return SimpleNamespace(hand_landmarks=hands)
 
 
 class _StubLandmarker:
@@ -34,25 +40,30 @@ class _StubLandmarker:
         raise_video_detect=False,
         close_raises=False,
         detect_gate=None,
+        hand_count=1,
     ):
         self._mode = mode
         self._log = log
         self._raise_video_detect = raise_video_detect
         self._close_raises = close_raises
         self._detect_gate = detect_gate
+        self._hand_count = hand_count
+        self.images = []
         self.closed = 0
 
-    def detect(self, _image):
+    def detect(self, image):
         self._log.append(("image", self._mode))
+        self.images.append(image.data)
         self._gate()
-        return _landmarks_result()
+        return _landmarks_result(self._hand_count)
 
-    def detect_for_video(self, _image, timestamp_ms):
+    def detect_for_video(self, image, timestamp_ms):
         self._log.append(("video", timestamp_ms))
+        self.images.append(image.data)
         if self._raise_video_detect:
             raise RuntimeError("detect_for_video falhou neste stub")
         self._gate()
-        return _landmarks_result()
+        return _landmarks_result(self._hand_count)
 
     def _gate(self):
         if self._detect_gate is not None:
@@ -73,6 +84,7 @@ def _install_fake_mediapipe(
     close_raises=False,
     detect_gate=None,
     create_gate=None,
+    hand_count=1,
 ):
     log = []
     created = []
@@ -95,7 +107,9 @@ def _install_fake_mediapipe(
             raise_video_detect=raise_video_detect,
             close_raises=close_raises,
             detect_gate=detect_gate,
+            hand_count=hand_count,
         )
+        landmarker.options = options
         created.append(landmarker)
         return landmarker
 
@@ -323,9 +337,16 @@ def test_missing_model_never_imports_mediapipe(tmp_path, monkeypatch):
 
 def _bare_masker():
     masker = hand_module.HandMasker.__new__(hand_module.HandMasker)
+    masker._lock = threading.RLock()
     masker._held_hands = None
     masker._held_shape = None
     masker._held_misses = 0
+    masker.last_detection_held = False
+    masker._observed_source_id = None
+    masker._last_hand_mask = None
+    masker._last_hand_count = 0
+    masker._mask_misses = 0
+    masker._closed = False
     return masker
 
 
@@ -384,12 +405,7 @@ def test_a_returning_hand_resets_the_hold_budget():
 
 
 def test_reset_retention_drops_held_hand_even_for_same_size_frames():
-    masker = hand_module.HandMasker.__new__(hand_module.HandMasker)
-    masker._lock = threading.RLock()
-    masker._held_hands = None
-    masker._held_shape = None
-    masker._held_misses = 0
-    masker.last_detection_held = False
+    masker = _bare_masker()
     frame = np.zeros((120, 160, 3), np.uint8)
     hands = [np.zeros((21, 2), np.float32)]
     masker._retain(hands, frame)
@@ -417,7 +433,7 @@ def test_low_light_cutoff_uses_luminance_not_channel_mean():
 
 
 def test_observe_keeps_image_mask_and_capture_identity(monkeypatch, tmp_path):
-    _install_fake_mediapipe(monkeypatch)
+    log, _created = _install_fake_mediapipe(monkeypatch)
     frame = np.zeros((100, 150, 3), dtype=np.uint8)
     with hand_module.HandMasker(_model(tmp_path), verify=None) as masker:
         expected = masker.mask(frame) > 0
@@ -426,6 +442,61 @@ def test_observe_keeps_image_mask_and_capture_identity(monkeypatch, tmp_path):
     np.testing.assert_array_equal(result.occlusion_mask, expected)
     assert result.orientation_mask is None
     assert result.present is None
+    assert ("video", 3000) in log
+
+
+def test_dark_scene_keeps_two_hand_detection_enabled(monkeypatch, tmp_path):
+    _log, created = _install_fake_mediapipe(monkeypatch, hand_count=2)
+    frame = np.full((720, 1280, 3), 24, np.uint8)
+    with hand_module.HandMasker(_model(tmp_path), verify=None) as masker:
+        mask = masker.mask(frame, timestamp_ms=1200)
+        hands = masker._landmarks(frame, timestamp_ms=1300)
+
+    assert created[0].options.num_hands == 2
+    assert len(hands) == 2
+    assert created[0].images[0].mean() > frame.mean() * 2
+    assert np.count_nonzero(mask) > 0
+
+
+def test_partial_two_hand_detection_retains_missing_hand_mask():
+    masker = _bare_masker()
+    frame = np.zeros((120, 180, 3), dtype=np.uint8)
+    left = np.array(
+        [[20 + i % 5 * 3, 20 + i // 5 * 3] for i in range(21)], dtype=np.float32
+    )
+    right = left.copy()
+    right[:, 0] += 110
+    detections = iter([[left, right], [left]])
+    masker._landmarks = lambda *_args, **_kwargs: next(detections)
+
+    both = masker.mask(frame)
+    one = masker.mask(frame)
+    assert np.count_nonzero(one) >= np.count_nonzero(both) * 0.8
+
+
+def test_full_miss_grows_the_held_footprint():
+    """Falha total do detector: a pegada retida cresce a cada miss —
+    a mão segue se movendo sob a leitura antiga e a borda dela não
+    pode virar papel à vista antes da liberação (Devin Review do
+    PR #144)."""
+    masker = _bare_masker()
+    frame = np.zeros((120, 160, 3), dtype=np.uint8)
+    hand = np.array(
+        [[40 + i % 5 * 3, 40 + i // 5 * 3] for i in range(21)],
+        dtype=np.float32,
+    )
+    detections = iter([[hand]] + [[] for _ in range(hand_module._HOLD_FRAMES + 1)])
+    masker._landmarks_locked = lambda *_a, **_k: next(detections)
+
+    detected = masker.mask(frame)
+    assert detected is not None and detected.any()
+    counts = [
+        np.count_nonzero(masker.mask(frame)) for _ in range(hand_module._HOLD_FRAMES)
+    ]
+    assert counts[0] >= np.count_nonzero(detected)
+    assert list(counts) == sorted(counts) and counts[-1] > counts[0]
+    released = masker.mask(frame)
+    assert released is not None and not released.any()
 
 
 def test_observe_resets_retention_when_the_source_changes(monkeypatch):
@@ -445,3 +516,20 @@ def test_observe_resets_retention_when_the_source_changes(monkeypatch):
     assert masker._held_hands is not None  # mesma fonte: mantem
     masker.observe(FramePacket(frame, 3.0, 3), source_id=2)
     assert masker._held_hands is None  # outra fonte: descartada
+
+
+def test_long_absence_drops_the_held_footprint():
+    """Ausência real (hold de marcos expirado) limpa a pegada retida:
+    uma detecção parcial futura não a reata sobre a região que a mão
+    já deixou (Devin Review do PR #144)."""
+    masker = _bare_masker()
+    frame = np.zeros((120, 160, 3), dtype=np.uint8)
+    masker._landmarks = lambda *_args, **_kwargs: []
+    masker._last_hand_mask = np.full((120, 160), 255, np.uint8)
+    masker._last_hand_count = 2
+    masker._mask_misses = 1
+    empty = masker.mask(frame)
+    assert not empty.any()
+    assert masker._last_hand_mask is None
+    assert masker._last_hand_count == 0
+    assert masker._mask_misses == 0

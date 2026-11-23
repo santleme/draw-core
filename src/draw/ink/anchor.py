@@ -97,6 +97,31 @@ class _AnchorSteps:
         self._follow_streak_quads = []
         self._follow_hold = False
 
+    def _pose_displacement(self, corners, shape):
+        """Deslocamento posicional do quad contra a ancora, em px da grade."""
+        trigger_anchor = (
+            self._anchor_corners
+            if self._anchor_roll == 0
+            else np.roll(self._anchor_corners, -self._anchor_roll, axis=0)
+        )
+        matrix = registration._registration_matrix(trigger_anchor, corners, shape)
+        return _matrix_grid_displacement(matrix, shape)
+
+    def _arb_restart_streak(self):
+        confirmed = self._accumulator._confirmed
+        self._arb_snapshot = None if confirmed is None else confirmed > 0
+        self._arb_streak_quads = []
+        self._arb_scores = []
+
+    def _anchor_bookkeeping(
+        self, streak_quads, new_anchor, reg_anchor_median, reg_deadband
+    ):
+        if reg_anchor_median:
+            self._anchor_samples = [quad.copy() for quad in streak_quads]
+        if reg_deadband:
+            self._reg_frozen_corners = new_anchor.copy()
+            self._reg_deadband_over = 0
+
     def _anchor_arbitration_step(
         self,
         generation,
@@ -130,22 +155,13 @@ class _AnchorSteps:
         # fazer toda passada seguinte parecer deslocada pela
         # permutacao — o deslocamento que abre evento e o da pose,
         # nao o da rotulacao.
-        trigger_anchor = (
-            old_anchor
-            if self._anchor_roll == 0
-            else np.roll(old_anchor, -self._anchor_roll, axis=0)
-        )
-        matrix = registration._registration_matrix(trigger_anchor, corners, shape)
-        displacement = _matrix_grid_displacement(matrix, shape)
+        displacement = self._pose_displacement(corners, shape)
         if displacement <= _ANCHOR_MIGRATION_DISPLACEMENT_PX:
             self._arb_close_event()
             return "closed", None
         if not self._arb_event_open:
             self._arb_event_open = True
-            confirmed = self._accumulator._confirmed
-            self._arb_snapshot = None if confirmed is None else confirmed > 0
-            self._arb_streak_quads = []
-            self._arb_scores = []
+            self._arb_restart_streak()
         consistent = all(
             float(np.max(np.linalg.norm(corners - quad, axis=1))) <= _ARB_SETTLE_PX
             for quad in self._arb_streak_quads
@@ -154,10 +170,7 @@ class _AnchorSteps:
             # O movimento continua: a pose candidata e a mais
             # recente e o snapshot renova (o canvas nao mudou — as
             # passadas do evento nao votam).
-            confirmed = self._accumulator._confirmed
-            self._arb_snapshot = None if confirmed is None else confirmed > 0
-            self._arb_streak_quads = []
-            self._arb_scores = []
+            self._arb_restart_streak()
         self._arb_streak_quads.append(corners.copy())
         snapshot = self._arb_snapshot
         raw_total = float(np.sum(raw_prob))
@@ -276,11 +289,9 @@ class _AnchorSteps:
             # vereditos o roll parado se preserva.
             if verdict == "landing_rotated":
                 self._anchor_roll = rotation_k
-            if reg_anchor_median:
-                self._anchor_samples = [quad.copy() for quad in self._arb_streak_quads]
-            if reg_deadband:
-                self._reg_frozen_corners = new_anchor.copy()
-                self._reg_deadband_over = 0
+            self._anchor_bookkeeping(
+                self._arb_streak_quads, new_anchor, reg_anchor_median, reg_deadband
+            )
             self._arb_actions += 1
         self._arb_close_event()
         return "verdict", event
@@ -332,13 +343,7 @@ class _AnchorSteps:
             return "closed", None
         # O gatilho compara em termos POSICIONAIS, como o da
         # arbitragem: o roll parado nao e deslocamento de pose.
-        trigger_anchor = (
-            old_anchor
-            if self._anchor_roll == 0
-            else np.roll(old_anchor, -self._anchor_roll, axis=0)
-        )
-        matrix = registration._registration_matrix(trigger_anchor, corners, shape)
-        displacement = _matrix_grid_displacement(matrix, shape)
+        displacement = self._pose_displacement(corners, shape)
         if displacement <= _FOLLOW_DISPLACEMENT_PX:
             self._follow_close_event()
             return "closed", None
@@ -369,11 +374,9 @@ class _AnchorSteps:
             # pela geometria; ela recomeca contra a ancora nova.
             self._arb_close_event()
         self._anchor_corners = new_anchor
-        if reg_anchor_median:
-            self._anchor_samples = [quad.copy() for quad in self._follow_streak_quads]
-        if reg_deadband:
-            self._reg_frozen_corners = new_anchor.copy()
-            self._reg_deadband_over = 0
+        self._anchor_bookkeeping(
+            self._follow_streak_quads, new_anchor, reg_anchor_median, reg_deadband
+        )
         self._anchor_reanchors += 1
         event = {
             "generation": generation,

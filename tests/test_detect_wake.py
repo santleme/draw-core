@@ -779,14 +779,17 @@ def test_cached_hand_mask_on_hand_exit_still_confirms_final_stroke_under_product
     # Agora a deteccao acordada termina sem mao (current_hand_mask = None) e
     # as passadas limpas seguintes rodam sem nenhum movimento adicional da mao.
     det.current_hand_mask = None
-    for seq in (23, 24, 25, 26):
+    # O traco novo vira um bloco fotometrico no guarda: precisa das
+    # passadas de adocao (_FILL_RECOVERY_PASSES) e depois da janela de
+    # voto antes de confirmar.
+    for seq in range(23, 33):
         now[0] += 0.16
         pipe.step(contracts.FramePacket(with_stroke, now[0], seq))
         ink_worker.pump()
     pipe.collect_ink()
     assert int(np.count_nonzero(pipe.clean_mask)) > base_px
     # Avanca o relogio para fechar as passadas quietas e entrar em descanso.
-    for seq in range(27, 35):
+    for seq in range(33, 41):
         now[0] += 1.05
         pipe.step(contracts.FramePacket(with_stroke, now[0], seq))
         ink_worker.pump()
