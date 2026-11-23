@@ -12,6 +12,51 @@ Read `docs/MIGRATION_SPEC.md` before changing anything.
 - During iteration, run only the tests covering the touched module — locate them with `grep -rlw "<module>" tests/` (not every file is named `test_<module>.py`; `draw.paper` is covered by `test_paper_formats.py`).
 - Before finishing: `ruff check . && ruff format --check . && pytest -q`.
 
+## Test selection while iterating
+
+`pytest-testmon` and `pytest-xdist` are in the `dev` extra. They are optional
+helpers for the iteration loop; the final gate above stays the full suite.
+
+- **Scope.** For a change confined to one module, keep using the module-focused
+  rule above (`grep -rlw`). Use testmon instead when the change may reach other
+  modules (`contracts`, `config`, `ink.config` and the other hubs), or as a
+  broader check before the final gate. When in doubt, run the full suite.
+- **One map per lane.** The parallel lane and the serialized lane (the `slow`
+  and `timing` markers) keep separate histories. Sharing one `.testmondata` is
+  unsafe: a parallel pass after an edit drops the affected serialized tests from
+  the map, and the next serialized pass then selects fewer tests than it should
+  (measured: 8 instead of 22). The files are already covered by `.gitignore`
+  (`.testmondata*`).
+  - Build once:
+    `TESTMON_DATAFILE=.testmondata-fast pytest --testmon -m "not slow and not timing" -n auto --dist worksteal`
+    and `TESTMON_DATAFILE=.testmondata-serial pytest --testmon -m "slow or timing"`.
+  - Iterate:
+    `TESTMON_DATAFILE=.testmondata-fast pytest --testmon-forceselect -m "not slow and not timing" -n auto --dist worksteal`
+    and `TESTMON_DATAFILE=.testmondata-serial pytest --testmon-forceselect -m "slow or timing"`.
+  - Plain `-m`, `-k` or a test node id with `--testmon` disables testmon's
+    affected-test selection; pytest still applies its filter, and testmon reports
+    the reason in the pytest header. `--testmon-forceselect` combines impact
+    selection with that filter.
+- **Keep local lanes aligned with CI.** The CI runs `slow` and `timing` without
+  xdist, so run those markers serially. In one parallel run,
+  `test_ruling.py::test_cost_per_pass_stays_inside_the_budget` exceeded its
+  8.0 ms budget once (8.11 ms) and passed alone; treat this as evidence of load
+  sensitivity, not as a general speed or failure-rate estimate.
+- Comments never trigger selection; docstring edits do.
+- Testmon only sees executed Python. Run the full suite when you change
+  `assets/manifest.json`, `run.sh`, `pyproject.toml`, `uv.lock`,
+  `tests/conftest.py`, `tests/onnx_fixtures.py`, `tests/rr.py` or `.github/`.
+- Code that runs only in a child process can go unnoticed. Verified cases:
+  - changing the message in `src/draw/_hvcam_mjpeg.py` broke three tests in
+    `tests/test_hvcam.py` and testmon selected none: run all of
+    `tests/test_hvcam.py` when you touch that file;
+  - adding `import cv2` at the top of `src/draw/contracts.py` fails
+    `test_contracts_import_leaves_out_heavy_dependencies` (it imports the module
+    in a subprocess) and testmon did not select it: after any change to the
+    imports of `contracts`, run `tests/test_contracts.py`.
+
+  Other child-process code was not checked.
+
 ## Change philosophy
 
 The guiding style draws on *The Tao of Programming*, KISS, and YAGNI: make
