@@ -783,7 +783,7 @@ def test_fit_does_not_swallow_typeerror_from_geometry(monkeypatch):
     from draw import geometry as geometry_module
     from draw.perception import NeuralSheetDetector
 
-    def boom(mask, frame, fallback, sx, sy, contour=None):
+    def boom(mask, frame, fallback, sx, sy, **kw):
         raise TypeError("erro real do ajuste")
 
     monkeypatch.setattr(geometry_module, "_fit_quad_impl", boom)
