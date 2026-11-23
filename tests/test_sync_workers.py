@@ -216,15 +216,20 @@ def test_builder_no_hand_default_creates_no_hand_stack(seen):
     assert seen["pipeline_ctor"]["hand_presence_worker"] is None
 
 
-def test_builder_hand_none_resolves_default_masker_but_no_presence(seen):
-    """hand_model=None: masker via o gate convencional (eval/app); a
-    presença segue `is not None` (o `if hand_model` da paridade)."""
+def test_builder_hand_none_resolves_masker_and_presence_via_default(seen):
+    """hand_model=None vai SEM GATE para masker e presença — os dois
+    resolvem o default convencional via hand_model_available (o
+    comportamento do eval/app; derrubar a presença aqui apagava
+    hand_presence_samples dos relatórios)."""
     bundle = build_sync_pipeline(verify=None, config=_config(), hand_model=None)
     assert seen["masker_available"] == [None]
     assert bundle.hand_masker is not None
-    assert "presence_ctor" not in seen
-    assert bundle.presence is None and bundle.presence_worker is None
+    assert seen["presence_ctor"] == (None, None)
+    assert bundle.presence is seen["presence_obj"]
+    assert isinstance(bundle.presence_worker, SyncPresence)
+    assert bundle.presence_worker.strict is False
     assert seen["pipeline_ctor"]["hand_masker"] is bundle.hand_masker
+    assert seen["pipeline_ctor"]["hand_presence_worker"] is bundle.presence_worker
 
 
 def test_builder_hand_unavailable_model_drops_the_masker(seen):

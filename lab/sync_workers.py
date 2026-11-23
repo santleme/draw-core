@@ -226,14 +226,15 @@ def build_sync_pipeline(
     str(None) quebraria o caminho.
 
     Mão: ``hand_model=_NO_HAND`` (o default) não cria nada da pilha.
-    ``hand_model=None`` resolve o modelo convencional: o masker segue
-    o gate de ``hand_model_available`` (comportamento do eval/app); a
-    presença segue ``hand_model is not None`` — micro-alinhamento ao
-    `if hand_model` da paridade (morto via main, que sempre resolve um
-    Path, vivo nos testes): com None o masker pode existir e a
-    presença nunca nasce. ``presence_strict=True`` reprova a amostra
-    perdida como erro (a régua de paridade exige: amostra perdida não
-    pode virar "mão medida").
+    Qualquer outro valor — inclusive ``None`` — segue os gates
+    convencionais do app: o masker nasce via ``hand_model_available``
+    e a presença vai sem gate para ``make_hand_presence``, que se
+    auto-gateia pela mesma função. Com ``None`` os dois podem nascer
+    do default convencional (o comportamento antigo do eval); um Path
+    concreto (a paridade, que sempre resolve um) segue direto.
+    ``presence_strict=True`` reprova a amostra perdida como erro (a
+    régua de paridade exige: amostra perdida não pode virar "mão
+    medida").
 
     Todos os imports ``draw.*`` ficam DENTRO do corpo, resolvidos a
     cada chamada: bancadas e testes instrumentam os módulos (o
@@ -264,11 +265,7 @@ def build_sync_pipeline(
             if hand_module.hand_model_available(hand_model)
             else None
         )
-        presence = (
-            make_hand_presence(hand_model, verify=verify)
-            if hand_model is not None
-            else None
-        )
+        presence = make_hand_presence(hand_model, verify=verify)
     presence_worker = (
         SyncPresence(presence, strict=presence_strict) if presence is not None else None
     )
