@@ -14,26 +14,38 @@ Read `docs/MIGRATION_SPEC.md` before changing anything.
 
 ## Test selection while iterating
 
-`pytest-testmon` and `pytest-xdist` are in the `dev` extra. Use them for the
-iteration loop only; the final gate below stays the full suite.
+`pytest-testmon` and `pytest-xdist` are in the `dev` extra. They are optional
+helpers for the iteration loop; the final gate above stays the full suite.
 
-- Build the map once (it merges into one `.testmondata`):
-  `pytest --testmon -m "not slow" -n auto --dist worksteal`, then
-  `pytest --testmon -m slow`.
-- Iterate with `pytest --testmon-forceselect -m "not slow" -n auto --dist worksteal`.
-  Plain `-m`, `-k` or a test node id with `--testmon` silently turns selection off
-  and runs everything; `--testmon-forceselect` keeps selection and the filter.
-- Run `slow` tests serialized, never with `-n`:
-  `pytest --testmon-forceselect -m slow`. They carry timing budgets that fail
-  under parallel load (for example `test_ruling.py::test_cost_per_pass_stays_inside_the_budget`).
+- **Scope.** For a change confined to one module, keep using the module-focused
+  rule above (`grep -rlw`). Use testmon instead when the change may reach other
+  modules (`contracts`, `config`, `ink.config` and the other hubs), or as a
+  broader check before the final gate. When in doubt, run the full suite.
+- **One map per lane.** Keep the fast and slow histories in separate files.
+  Sharing one `.testmondata` is unsafe: a fast pass after an edit drops the
+  affected slow tests from the map, and the next slow pass then selects fewer
+  tests than it should (measured: 8 instead of 22). The files are already
+  covered by `.gitignore` (`.testmondata*`).
+  - Build once:
+    `TESTMON_DATAFILE=.testmondata-fast pytest --testmon -m "not slow" -n auto --dist worksteal`
+    and `TESTMON_DATAFILE=.testmondata-slow pytest --testmon -m slow`.
+  - Iterate:
+    `TESTMON_DATAFILE=.testmondata-fast pytest --testmon-forceselect -m "not slow" -n auto --dist worksteal`
+    and `TESTMON_DATAFILE=.testmondata-slow pytest --testmon-forceselect -m slow`.
+  - Plain `-m`, `-k` or a test node id with `--testmon` turns selection off and
+    runs everything, without a warning in the summary. `--testmon-forceselect`
+    keeps selection and the filter.
+- **`slow` runs serialized, never with `-n`.** That is what the marker means.
+  Run in parallel, `test_ruling.py::test_cost_per_pass_stays_inside_the_budget`
+  failed once on its timing budget (8.11 ms against 8.0) and passes alone.
 - Comments never trigger selection; docstring edits do.
 - Testmon only sees executed Python. Run the full suite when you change
   `assets/manifest.json`, `run.sh`, `pyproject.toml`, `uv.lock`,
   `tests/conftest.py`, `tests/onnx_fixtures.py`, `tests/rr.py` or `.github/`.
-- Code that only runs in a child process is invisible to it. If you touch
-  `src/draw/_hvcam_mjpeg.py`, run all of `tests/test_hvcam.py`.
-- A change to `contracts`, `config` or `ink.config` reaches most of the suite;
-  run it all.
+- Code that runs only in a child process can go unnoticed. Verified case:
+  changing the message in `src/draw/_hvcam_mjpeg.py` broke three tests in
+  `tests/test_hvcam.py` and testmon selected none. If you touch that file, run
+  all of `tests/test_hvcam.py`. Other child-process code was not checked.
 
 ## Change philosophy
 
