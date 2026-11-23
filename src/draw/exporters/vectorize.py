@@ -11,18 +11,13 @@ Pipeline:
   2. afinamento com cv2.ximgproc.thinning (Zhang-Suen ou Guo-Hall);
   3. travessia indexada O(H*W) do esqueleto como grafo (~225x mais
      rápida que varredura por nó em páginas densas);
-  4. poda opcional de esporões guiada por cv2.distanceTransform +
-     contração de junções residuais de grau 2;
-  5. costura opcional de ramos colineares em junções (ponderada por
-     ângulo tangente e continuidade temporal dos carimbos quando
-     disponíveis);
-     — no caminho limpo (topology="v2", o de vectorize_clean) os
-     passos 4-5 dão lugar à higiene topológica: poda radial de
-     esporões (1,5*r), contração de junções vizinhas (1,2*(r_u+r_v))
-     e pareamento de ramos por tangente + espessura em cada junção;
-  6. ordenação temporal (por first_seen_ms) ou espacial (vizinho mais
+  4. higiene topológica opcional (topology="v2", a de vectorize_clean):
+     poda radial de esporões (1,5*r), contração de junções vizinhas
+     (1,2*(r_u+r_v)) e pareamento de ramos por tangente + espessura
+     em cada junção;
+  5. ordenação temporal (por first_seen_ms) ou espacial (vizinho mais
      próximo com inversão de sentido para reduzir saltos de caneta);
-  7. simplificação Douglas-Peucker + classificação de primitivas
+  6. simplificação Douglas-Peucker + classificação de primitivas
      geométricas (line, circle, rectangle, polygon, polyline) e
      exportação SVG/JSON em milímetros do A4.
 
@@ -43,11 +38,13 @@ import cv2
 import numpy as np
 
 from .export_vectors import (
-    _degree,
     _dp_open,
-    _index_node_components,
     filter_microfragments,
     simplify,
+    traverse_graph,
+)
+from .export_vectors import (
+    _index_node_components as _index_node_components,
 )
 from .export_vectors import (
     make_8_minimal as _make_8_minimal,
@@ -61,21 +58,67 @@ MM_PER_PX_X = PAPER_W_MM / PAPER_W_PX
 MM_PER_PX_Y = PAPER_H_MM / PAPER_H_PX
 MM_PER_PX = 0.5 * (MM_PER_PX_X + MM_PER_PX_Y)
 
+
+# Modo de medida: False = legado A4; True = papel custom. É a FLAG que
+# distingue os dois modos, nunca o valor da escala — um papel explícito
+# pode reproduzir as razões do default (ex.: 420x594 mm em 1700x2400 px)
+# e mesmo assim pede a medida métrica por eixo.
+_PAPER_OVERRIDE = False
+
+
+def _set_paper_mm(paper_w_mm, paper_h_mm, img_w_px, img_h_px):
+    """Reaponta a escala px->mm para uma folha não-A4 (override de CLI).
+
+    Os denominadores em px vêm da imagem carregada, não das constantes
+    ``PAPER_W_PX``/``PAPER_H_PX``: uma folha paisagem chega com o canvas
+    já rotacionado (ex.: 1200x850), então a grade legada não se aplica.
+    """
+    global PAPER_W_MM, PAPER_H_MM, MM_PER_PX_X, MM_PER_PX_Y, MM_PER_PX
+    global _PAPER_OVERRIDE
+    PAPER_W_MM = float(paper_w_mm)
+    PAPER_H_MM = float(paper_h_mm)
+    MM_PER_PX_X = PAPER_W_MM / img_w_px
+    MM_PER_PX_Y = PAPER_H_MM / img_h_px
+    MM_PER_PX = 0.5 * (MM_PER_PX_X + MM_PER_PX_Y)
+    _PAPER_OVERRIDE = True
+
+
+def _reset_paper_mm():
+    """Restaura escala e modo de medida do A4 default (finally de main)."""
+    global _PAPER_OVERRIDE
+    _set_paper_mm(210.0, 297.0, PAPER_W_PX, PAPER_H_PX)
+    _PAPER_OVERRIDE = False
+
+
+def _decision_space():
+    """Espaço em que a geometria das primitivas é decidida.
+
+    Devolve ``(scale_dec, unit_mm, mm_axis)``: pontos de decisão =
+    ``pts_px * scale_dec``, medidas escalares = ``len_dec * unit_mm`` e
+    coordenadas de saída = ``p_dec * mm_axis``.
+
+    Sem override de papel, o espaço de decisão é o próprio raster em px,
+    as medidas saem pela média legada ``MM_PER_PX`` e as coordenadas pela
+    escala de cada eixo — bit a bit idêntico ao histórico. Com papel
+    custom, os pontos são normalizados para "pixels isotrópicos" — a
+    correção clássica de pixel aspect ratio, sem reamostrar o raster:
+    ``pts * (sx/ref, sy/ref)`` com ``ref = min(sx, sy)`` torna a métrica
+    uniforme (1 unidade = ``ref`` mm em qualquer direção). Nesse espaço
+    as mesmas tolerâncias do legado (gap 8, raio 6, desvios 2.5/3.5/4,
+    lado 10) medem geometria real: um círculo que o cisalhamento px->mm
+    tornou elipse no raster volta a ser redondo, e um oval do raster
+    não vira círculo na saída.
+    """
+    if not _PAPER_OVERRIDE:
+        return np.ones(2), MM_PER_PX, np.array([MM_PER_PX_X, MM_PER_PX_Y])
+    ref = min(MM_PER_PX_X, MM_PER_PX_Y)
+    return np.array([MM_PER_PX_X / ref, MM_PER_PX_Y / ref]), ref, np.full(2, ref)
+
+
 THINNING_TYPES = {
     "zhangsuen": cv2.ximgproc.THINNING_ZHANGSUEN,
     "guohall": cv2.ximgproc.THINNING_GUOHALL,
 }
-
-_NEIGHBORS = (
-    (-1, -1),
-    (-1, 0),
-    (-1, 1),
-    (0, -1),
-    (0, 1),
-    (1, -1),
-    (1, 0),
-    (1, 1),
-)
 
 
 def load_ink(path):
@@ -108,349 +151,11 @@ def thin(ink, thinning="zhangsuen"):
     return skel > 0
 
 
-def _skeleton_neighbors(flat_idx, skel_flat, width, height):
-    """Índices planos dos vizinhos de 8 que também são esqueleto."""
-    y, x = divmod(flat_idx, width)
-    out = []
-    for dy, dx in _NEIGHBORS:
-        ny, nx = y + dy, x + dx
-        if 0 <= ny < height and 0 <= nx < width:
-            nidx = ny * width + nx
-            if skel_flat[nidx]:
-                out.append(nidx)
-    return out
-
-
-def traverse_graph(skel, include_topology=False):
-    """Percorre o esqueleto como grafo e devolve as polilinhas brutas.
-
-    Cada polilinha é um dict {"points": array Nx2 (x, y) em px,
-    "closed": bool}. Com `include_topology=True`, inclui também
-    `start_node`, `end_node` e `pixel_indices` para poda e costura O(E).
-    """
-    height, width = skel.shape
-    deg = _degree(skel)
-    node_mask = skel & (deg != 2)
-    n_nodes, labels = cv2.connectedComponents(
-        node_mask.astype(np.uint8), connectivity=8
-    )
-    labels_flat = labels.ravel()
-    skel_flat = skel.ravel()
-    anchors, node_pixels = _index_node_components(labels, n_nodes)
-    node_degrees = {
-        nid: int(deg.ravel()[pix].max()) for nid, pix in node_pixels.items()
-    }
-
-    polylines = []
-    visited = set()
-
-    def walk_edge(start_pixel, first_step, start_nid, start_anchor):
-        path = [first_step]
-        visited.add((start_pixel, first_step))
-        visited.add((first_step, start_pixel))
-        prev, cur = start_pixel, first_step
-        end_anchor = None
-        end_nid = None
-        while labels_flat[cur] == 0:
-            nbrs = [
-                n
-                for n in _skeleton_neighbors(cur, skel_flat, width, height)
-                if n != prev
-            ]
-            if len(nbrs) != 1:
-                end_anchor = (float(cur % width), float(cur // width))
-                break
-            nxt = nbrs[0]
-            visited.add((cur, nxt))
-            visited.add((nxt, cur))
-            path.append(nxt)
-            prev, cur = cur, nxt
-        if end_anchor is None:
-            end_nid = int(labels_flat[cur])
-            end_anchor = anchors[end_nid]
-        points = [start_anchor]
-        points += [(float(p % width), float(p // width)) for p in path]
-        points.append(end_anchor)
-        closed = points[0] == points[-1] and len(path) >= 2
-        item = {"points": np.array(points, dtype=np.float64), "closed": closed}
-        if include_topology:
-            item["start_node"] = start_nid
-            item["end_node"] = end_nid
-            item["start_deg"] = node_degrees.get(start_nid, 0)
-            item["end_deg"] = node_degrees.get(end_nid, 0)
-            item["flat_pixels"] = [start_pixel] + path
-        return item
-
-    for nid in range(1, n_nodes):
-        if nid not in anchors:
-            continue
-        anchor = anchors[nid]
-        has_external = False
-        for p in node_pixels[nid]:
-            for q in _skeleton_neighbors(p, skel_flat, width, height):
-                if labels_flat[q] == nid:
-                    continue
-                has_external = True
-                if (p, q) in visited:
-                    continue
-                polylines.append(walk_edge(p, q, nid, anchor))
-        if not has_external:
-            item = {
-                "points": np.array([anchor], dtype=np.float64),
-                "closed": False,
-            }
-            if include_topology:
-                item["start_node"] = nid
-                item["end_node"] = nid
-                item["start_deg"] = 0
-                item["end_deg"] = 0
-                item["flat_pixels"] = list(node_pixels[nid])
-            polylines.append(item)
-
-    covered = np.zeros(skel_flat.shape, dtype=bool)
-    for a, b in visited:
-        covered[a] = True
-        covered[b] = True
-    remaining = np.nonzero(skel_flat & ~covered & (labels_flat == 0))[0]
-    seen = set()
-    for start in remaining:
-        start = int(start)
-        if start in seen:
-            continue
-        path = [start]
-        seen.add(start)
-        prev, cur = None, start
-        while True:
-            nbrs = [
-                n
-                for n in _skeleton_neighbors(cur, skel_flat, width, height)
-                if n != prev
-            ]
-            if not nbrs:
-                break
-            nxt = nbrs[0]
-            if nxt == start and len(path) >= 3:
-                break
-            if nxt in seen:
-                break
-            path.append(nxt)
-            seen.add(nxt)
-            prev, cur = cur, nxt
-        points = [(float(p % width), float(p // width)) for p in path]
-        closed = len(path) >= 3
-        item = {"points": np.array(points, dtype=np.float64), "closed": closed}
-        if include_topology:
-            item["start_node"] = None
-            item["end_node"] = None
-            item["start_deg"] = 2
-            item["end_deg"] = 2
-            item["flat_pixels"] = path
-        polylines.append(item)
-
-    return polylines
-
-
 def _polyline_arc_length(points):
     if len(points) <= 1:
         return 0.0
     diffs = np.diff(points, axis=0)
     return float(np.hypot(diffs[:, 0], diffs[:, 1]).sum())
-
-
-def prune_skeleton_spurs(skel, ink, max_spur_ratio=2.4, min_spur_px=7.0, passes=2):
-    """Remove cantos L redundantes e esporões curtos guiado por distanceTransform."""
-    dt = cv2.distanceTransform(ink.astype(np.uint8), cv2.DIST_L2, 5)
-    cleaned = _make_8_minimal(skel)
-    width = cleaned.shape[1]
-
-    for _ in range(passes):
-        edges = traverse_graph(cleaned, include_topology=True)
-        incident_count = {}
-        for e in edges:
-            if e["closed"]:
-                continue
-            for key in ("start_node", "end_node"):
-                nid = e.get(key)
-                if nid is not None:
-                    incident_count[nid] = incident_count.get(nid, 0) + 1
-
-        removed_any = False
-        flat_clean = cleaned.ravel()
-        for e in edges:
-            if e["closed"] or len(e["points"]) <= 1:
-                continue
-            u, v = e.get("start_node"), e.get("end_node")
-            if u is None or v is None or u == v:
-                continue
-            du = incident_count.get(u, 0)
-            dv = incident_count.get(v, 0)
-            if not ((du == 1 and dv >= 3) or (dv == 1 and du >= 3)):
-                continue
-            j_pt = e["points"][-1] if du == 1 else e["points"][0]
-            jx = int(np.clip(round(j_pt[0]), 0, width - 1))
-            jy = int(np.clip(round(j_pt[1]), 0, cleaned.shape[0] - 1))
-            local_r = float(dt[jy, jx])
-            limit = max(float(min_spur_px), float(max_spur_ratio) * local_r)
-            if _polyline_arc_length(e["points"]) <= limit:
-                # Apaga os pixels do ramo exceto os que pertencem à junção.
-                leaf_First = du == 1
-                pix = e["flat_pixels"]
-                to_clear = pix[:-1] if leaf_First else pix[1:]
-                for fidx in to_clear:
-                    flat_clean[fidx] = False
-                # Limpa também o pixel folha na ponta.
-                lp = e["points"][0] if leaf_First else e["points"][-1]
-                lx = int(np.clip(round(lp[0]), 0, width - 1))
-                ly = int(np.clip(round(lp[1]), 0, cleaned.shape[0] - 1))
-                flat_clean[ly * width + lx] = False
-                removed_any = True
-        if not removed_any:
-            break
-        cleaned = _make_8_minimal(cleaned)
-    return cleaned
-
-
-def _edge_stamp_At_end(points, at_end, stamp_plane):
-    """Lê carimbo mediano perto da ponta (`at_end=False` início, `True` fim)."""
-    if stamp_plane is None or len(points) == 0:
-        return None
-    h, w = stamp_plane.shape
-    sample = points[-min(6, len(points)) :] if at_end else points[: min(6, len(points))]
-    xs = np.clip(np.round(sample[:, 0]).astype(int), 0, w - 1)
-    ys = np.clip(np.round(sample[:, 1]).astype(int), 0, h - 1)
-    vals = stamp_plane[ys, xs]
-    valid = vals[vals > 0]
-    if len(valid) == 0:
-        return None
-    return float(np.median(valid))
-
-
-def _outward_tangent(points, from_end, lookahead=8):
-    """Vetor unitário apontando da ponta para DENTRO da aresta."""
-    n = len(points)
-    if n < 2:
-        return np.array([1.0, 0.0], dtype=np.float64)
-    if not from_end:
-        idx = min(n - 1, lookahead)
-        vec = points[idx] - points[0]
-    else:
-        idx = max(0, n - 1 - lookahead)
-        vec = points[idx] - points[-1]
-    norm = float(np.hypot(vec[0], vec[1]))
-    if norm < 1e-9:
-        vec = (points[-1] - points[0]) if not from_end else (points[0] - points[-1])
-        norm = max(float(np.hypot(vec[0], vec[1])), 1e-9)
-    return vec / norm
-
-
-def stitch_junctions(polylines, max_turn_deg=32.0, stamps=None):
-    """Costura pares de arestas que atravessam uma junção mantendo tangente contínua.
-
-    Dois ramos incidentes num mesmo nó que saem em sentidos quase opostos
-    (`ângulo de desvio <= max_turn_deg`, ex.: as duas metades de cada reta
-    de um 'X') são fundidos numa única polilinha contínua. Quando `stamps`
-    está disponível, desempata cruzamentos pelo menor salto temporal.
-    """
-    stamp_plane = None
-    if isinstance(stamps, dict):
-        stamp_plane = (
-            stamps.get("first_seen_ms")
-            if stamps.get("first_seen_ms") is not None
-            else stamps.get("last_update_ms")
-        )
-    elif isinstance(stamps, np.ndarray):
-        stamp_plane = stamps
-
-    open_edges = []
-    passthrough = []
-    for item in polylines:
-        if item["closed"] or len(item["points"]) < 2:
-            passthrough.append({"points": item["points"], "closed": item["closed"]})
-        else:
-            open_edges.append(
-                {
-                    "points": item["points"].copy(),
-                    "u": item.get("start_node"),
-                    "v": item.get("end_node"),
-                }
-            )
-
-    if not open_edges:
-        return passthrough
-
-    # Agrupa incidências por nó compartilhado (ou proximidade <= 2,5 px caso sem id).
-    changed = True
-    cos_min = math.cos(math.radians(float(max_turn_deg)))
-    while changed:
-        changed = False
-        by_node = {}
-        for eid, edge in enumerate(open_edges):
-            if edge is None:
-                continue
-            for is_end, nid in ((False, edge["u"]), (True, edge["v"])):
-                if nid is not None:
-                    by_node.setdefault(nid, []).append((eid, is_end))
-
-        best_pair = None
-        best_cost = 1e18
-        for inc in by_node.values():
-            if len(inc) < 2:
-                continue
-            for i in range(len(inc)):
-                eid_a, end_a = inc[i]
-                ea = open_edges[eid_a]
-                if ea is None:
-                    continue
-                tan_a = _outward_tangent(ea["points"], end_a)
-                ta = _edge_stamp_At_end(ea["points"], end_a, stamp_plane)
-                for j in range(i + 1, len(inc)):
-                    eid_b, end_b = inc[j]
-                    if eid_a == eid_b:
-                        continue
-                    eb = open_edges[eid_b]
-                    if eb is None:
-                        continue
-                    tan_b = _outward_tangent(eb["points"], end_b)
-                    # Ramos colineares que atravessam a junção apontam em sentidos opostos:
-                    # tan_a · tan_b ~ -1  =>  -tan_a · tan_b >= cos_min.
-                    align = float(-np.dot(tan_a, tan_b))
-                    if align < cos_min:
-                        continue
-                    turn_deg = math.degrees(math.acos(min(1.0, max(-1.0, align))))
-                    cost = turn_deg
-                    if stamp_plane is not None:
-                        tb = _edge_stamp_At_end(eb["points"], end_b, stamp_plane)
-                        if ta is not None and tb is not None:
-                            cost += 0.015 * min(abs(ta - tb), 2000.0)
-                    if cost < best_cost:
-                        best_cost = cost
-                        best_pair = (eid_a, end_a, eid_b, end_b)
-
-        if best_pair is not None:
-            eid_a, end_a, eid_b, end_b = best_pair
-            ea = open_edges[eid_a]
-            eb = open_edges[eid_b]
-            pts_a = ea["points"] if end_a else ea["points"][::-1]
-            u_new = ea["u"] if end_a else ea["v"]
-            pts_b = eb["points"][::-1] if end_b else eb["points"]
-            v_new = eb["u"] if end_b else eb["v"]
-            merged_pts = np.vstack([pts_a, pts_b[1:]])
-            if u_new is not None and u_new == v_new and len(merged_pts) >= 4:
-                passthrough.append({"points": merged_pts[:-1], "closed": True})
-                open_edges[eid_a] = None
-            else:
-                open_edges[eid_a] = {
-                    "points": merged_pts,
-                    "u": u_new,
-                    "v": v_new,
-                }
-            open_edges[eid_b] = None
-            changed = True
-
-    for edge in open_edges:
-        if edge is not None:
-            passthrough.append({"points": edge["points"], "closed": False})
-    return passthrough
 
 
 # --- Higiene topológica v2 (Etapas A/B/C) -------------------------------
@@ -521,10 +226,10 @@ class _TopoGraph:
             if u is None or v is None or len(pts) < 2 or item["closed"]:
                 # Laço fechado que volta ao próprio nó (o círculo com
                 # uma haste tangente) sai como traço próprio e fica
-                # fora do pareamento, como na costura legada: ligar
-                # uma ponta dele à haste trocaria um círculo e uma
-                # reta por uma polilinha aberta. As duas pontas dele
-                # seguem contando no grau do nó (ver degrees).
+                # fora do pareamento: ligar uma ponta dele à haste
+                # trocaria um círculo e uma reta por uma polilinha
+                # aberta. As duas pontas dele seguem contando no grau
+                # do nó (ver degrees).
                 self.loose.append({"points": pts, "closed": item["closed"]})
                 if item["closed"] and u is not None and u == v:
                     self._add_node(u, pts[0])
@@ -811,8 +516,7 @@ def topology_strokes(
 ):
     """Esqueleto -> traços (Etapas B e C): poda, contração e pareamento.
 
-    Substitui prune_skeleton_spurs + stitch_junctions no caminho
-    limpo. Mesmo formato de saída de traverse_graph sem topologia:
+    Mesmo formato de saída de traverse_graph sem topologia:
     lista de {"points": Nx2 (x, y) px, "closed": bool}.
     """
     dist = cv2.distanceTransform(ink.astype(np.uint8), cv2.DIST_L2, 5)
@@ -973,7 +677,8 @@ def classify_primitive(polyline):
     Retorna um dicionário com `type` em `{"point", "line", "circle",
     "rectangle", "polygon", "polyline"}` e parâmetros métricos em mm/px.
     """
-    pts = polyline["points"]
+    scale_dec, unit_mm, mm_axis = _decision_space()
+    pts = np.asarray(polyline["points"], dtype=np.float64) * scale_dec
     closed = bool(polyline["closed"])
     meta = {}
     if "t_start_ms" in polyline:
@@ -987,8 +692,8 @@ def classify_primitive(polyline):
     if len(pts) == 1:
         return {
             "type": "point",
-            "x_mm": round(float(pts[0, 0] * MM_PER_PX_X), 3),
-            "y_mm": round(float(pts[0, 1] * MM_PER_PX_Y), 3),
+            "x_mm": round(float(pts[0, 0] * mm_axis[0]), 3),
+            "y_mm": round(float(pts[0, 1] * mm_axis[1]), 3),
             **meta,
         }
 
@@ -1009,11 +714,11 @@ def classify_primitive(polyline):
             if max_dev <= max(2.5, 0.025 * chord_len):
                 return {
                     "type": "line",
-                    "x1_mm": round(float(p0[0] * MM_PER_PX_X), 3),
-                    "y1_mm": round(float(p0[1] * MM_PER_PX_Y), 3),
-                    "x2_mm": round(float(p1[0] * MM_PER_PX_X), 3),
-                    "y2_mm": round(float(p1[1] * MM_PER_PX_Y), 3),
-                    "length_mm": round(float(chord_len * MM_PER_PX), 3),
+                    "x1_mm": round(float(p0[0] * mm_axis[0]), 3),
+                    "y1_mm": round(float(p0[1] * mm_axis[1]), 3),
+                    "x2_mm": round(float(p1[0] * mm_axis[0]), 3),
+                    "y2_mm": round(float(p1[1] * mm_axis[1]), 3),
+                    "length_mm": round(float(chord_len * unit_mm), 3),
                     "max_dev_px": round(max_dev, 3),
                     **meta,
                 }
@@ -1029,22 +734,31 @@ def classify_primitive(polyline):
                 radii = np.hypot(dense[:, 0] - cx, dense[:, 1] - cy)
                 rmse = float(np.sqrt(np.mean((radii - r) ** 2)))
                 max_err = float(np.max(np.abs(radii - r)))
-                angles = np.mod(
-                    np.degrees(np.arctan2(dense[:, 1] - cy, dense[:, 0] - cx)),
-                    360.0,
-                )
-                bins = np.unique((angles // 15.0).astype(int))
+                theta = np.arctan2(dense[:, 1] - cy, dense[:, 0] - cx)
+                bins = np.unique((np.mod(np.degrees(theta), 360.0) // 15.0).astype(int))
                 # >= 21 de 24 setores de 15° cobertos (>= 315°).
-                if (
+                circle_like = (
                     len(bins) >= 21
                     and rmse / r <= 0.055
                     and max_err <= max(3.5, 0.10 * r)
-                ):
+                )
+                if circle_like and _PAPER_OVERRIDE:
+                    # No espaço normalizado a excentricidade é física: um
+                    # oval tem o desvio radial dominado pelo 2º harmônico
+                    # (polos opostos sistemáticos), ruído de raster não.
+                    # Sem essa auditoria uma elipse suave com rmse baixo
+                    # exportaria como círculo de raio único.
+                    h2 = np.column_stack([np.cos(2.0 * theta), np.sin(2.0 * theta)])
+                    coef, _, _, _ = np.linalg.lstsq(h2, radii - r, rcond=None)
+                    circle_like = float(np.hypot(coef[0], coef[1])) <= max(
+                        1.5, 0.035 * r
+                    )
+                if circle_like:
                     return {
                         "type": "circle",
-                        "cx_mm": round(cx * MM_PER_PX_X, 3),
-                        "cy_mm": round(cy * MM_PER_PX_Y, 3),
-                        "r_mm": round(r * MM_PER_PX, 3),
+                        "cx_mm": round(cx * mm_axis[0], 3),
+                        "cy_mm": round(cy * mm_axis[1], 3),
+                        "r_mm": round(r * unit_mm, 3),
                         "radial_rmse_px": round(rmse, 3),
                         **meta,
                     }
@@ -1069,45 +783,58 @@ def classify_primitive(polyline):
                         break
                 opp0 = abs(lengths[0] - lengths[2]) / max(lengths[0], lengths[2])
                 opp1 = abs(lengths[1] - lengths[3]) / max(lengths[1], lengths[3])
-                # Garante também que o contorno real segue os 4 lados do retângulo.
+                # Garante também que o contorno real segue os 4 lados.
+                # O desvio é medido com sinal sobre a normal externa de
+                # cada lado: um contorno curvo (oval simplificado a 4
+                # cantos) fica sistematicamente FORA do quadrilátero
+                # inscrito, enquanto as arestas de um retângulo real
+                # oscilam em torno da aresta (~metade dentro, metade fora).
+                center = corners.mean(axis=0)
+                normals = []
+                for i, s in enumerate(sides):
+                    n = np.array([s[1], -s[0]], dtype=np.float64) / lengths[i]
+                    if float(np.dot(n, center - corners[i])) > 0:
+                        n = -n
+                    normals.append(n)
+                # "Fora" só conta acima de uma tolerância numérica: a
+                # interpolação deixa resíduos de ~1e-14 em amostras que
+                # estão exatamente sobre a aresta, e sem o eps a fração
+                # de fora depende do sinal do último bit (posição).
+                out_eps = (
+                    64.0
+                    * np.finfo(np.float64).eps
+                    * max(1.0, float(np.abs(dense).max()))
+                )
                 rect_dev = []
+                n_out = 0
                 for p in dense:
-                    d_min = min(
-                        abs(
-                            float(
-                                (corners[(i + 1) % 4, 0] - corners[i, 0])
-                                * (corners[i, 1] - p[1])
-                                - (corners[(i + 1) % 4, 1] - corners[i, 1])
-                                * (corners[i, 0] - p[0])
-                            )
-                        )
-                        / lengths[i]
-                        for i in range(4)
-                    )
-                    rect_dev.append(d_min)
+                    ds = [float(np.dot(p - corners[i], normals[i])) for i in range(4)]
+                    j = int(np.argmin(np.abs(ds)))
+                    rect_dev.append(abs(ds[j]))
+                    n_out += ds[j] > out_eps
                 if (
                     angles_ok
                     and opp0 <= 0.12
                     and opp1 <= 0.12
                     and max(rect_dev) <= max(4.0, 0.05 * max(lengths))
+                    and (not _PAPER_OVERRIDE or n_out / len(rect_dev) <= 0.7)
                 ):
-                    w_px = 0.5 * (lengths[0] + lengths[2])
-                    h_px = 0.5 * (lengths[1] + lengths[3])
+                    w_mm = 0.5 * (lengths[0] + lengths[2]) * unit_mm
+                    h_mm = 0.5 * (lengths[1] + lengths[3]) * unit_mm
                     ang_deg = math.degrees(math.atan2(sides[0][1], sides[0][0]))
-                    center = corners.mean(axis=0)
                     return {
                         "type": "rectangle",
                         "center_mm": [
-                            round(float(center[0] * MM_PER_PX_X), 3),
-                            round(float(center[1] * MM_PER_PX_Y), 3),
+                            round(float(center[0] * mm_axis[0]), 3),
+                            round(float(center[1] * mm_axis[1]), 3),
                         ],
-                        "width_mm": round(float(w_px * MM_PER_PX), 3),
-                        "height_mm": round(float(h_px * MM_PER_PX), 3),
+                        "width_mm": round(w_mm, 3),
+                        "height_mm": round(h_mm, 3),
                         "angle_deg": round(ang_deg, 2),
                         "corners_mm": [
                             [
-                                round(float(c[0] * MM_PER_PX_X), 3),
-                                round(float(c[1] * MM_PER_PX_Y), 3),
+                                round(float(c[0] * mm_axis[0]), 3),
+                                round(float(c[1] * mm_axis[1]), 3),
                             ]
                             for c in corners
                         ],
@@ -1118,7 +845,7 @@ def classify_primitive(polyline):
         "type": "polygon" if closed else "polyline",
         "vertices": len(pts),
         "points_mm": [
-            [round(float(x * MM_PER_PX_X), 3), round(float(y * MM_PER_PX_Y), 3)]
+            [round(float(x * mm_axis[0]), 3), round(float(y * mm_axis[1]), 3)]
             for x, y in pts
         ],
         **meta,
@@ -1136,8 +863,6 @@ def vectorize_mask(
     thinning="zhangsuen",
     *,
     min_area=0,
-    prune_spurs=False,
-    stitch=False,
     stamps=None,
     order_strokes=False,
     fill_holes=False,
@@ -1145,9 +870,9 @@ def vectorize_mask(
 ):
     """Máscara de tinta -> polilinhas simplificadas (px, espaço do papel).
 
-    topology="v2" troca a poda e a costura legadas (prune_spurs,
-    stitch) pela higiene topológica (topology_strokes); os dois
-    caminhos devolvem o mesmo formato.
+    topology="v2" aplica a higiene topológica (topology_strokes);
+    "legacy" devolve a travessia crua do esqueleto. Os dois caminhos
+    devolvem o mesmo formato.
     """
     if topology not in ("legacy", "v2"):
         raise ValueError(f"topology desconhecida: {topology!r}")
@@ -1157,11 +882,7 @@ def vectorize_mask(
     if topology == "v2":
         raw = topology_strokes(skel, work)
     else:
-        if prune_spurs:
-            skel = prune_skeleton_spurs(skel, work)
-        raw = traverse_graph(skel, include_topology=stitch)
-        if stitch:
-            raw = stitch_junctions(raw, stamps=stamps)
+        raw = traverse_graph(skel)
     if order_strokes or stamps is not None:
         raw = annotate_and_order_polylines(raw, stamps=stamps)
     out = []
@@ -1421,7 +1142,7 @@ def _selfcheck():
     )
     assert dists.mean() <= 1.5, "erro médio acima do esperado"
 
-    # Bancada 2: traço real de 4 px + poeira de 1-2 px + costura + Camada 2:
+    # Bancada 2: traço real de 4 px + poeira de 1-2 px + higiene + Camada 2:
     img_thick = np.full((PAPER_H_PX, PAPER_W_PX), 255, dtype=np.uint8)
     for a, b in zip(rect, rect[1:] + rect[:1], strict=False):
         cv2.line(img_thick, a, b, 0, thickness=4)
@@ -1466,16 +1187,15 @@ def main(argv=None):
     parser.add_argument(
         "--clean",
         action="store_true",
-        help="ativa limpeza completa: remove microfragmentos, poda esporões "
-        "do esqueleto, costura junções colineares e ordena os traços",
+        help="ativa limpeza completa: remove microfragmentos, poda esporões, "
+        "contrai junções vizinhas, pareia ramos e ordena os traços",
     )
     parser.add_argument(
         "--stamps",
         default=None,
         metavar="ARQUIVO.npz",
         help="carimbos temporais (`_stamps.npz`) para orientar e ordenar os "
-        "traços na ordem real em que foram desenhados (sem --clean, também "
-        "desempatam a costura legada; o --clean não usa tempo nas junções)",
+        "traços na ordem real em que foram desenhados",
     )
     parser.add_argument(
         "--primitives",
@@ -1495,6 +1215,20 @@ def main(argv=None):
         help="imprime as distâncias nos dois sentidos",
     )
     parser.add_argument(
+        "--paper-w-mm",
+        type=float,
+        default=None,
+        help="largura da folha em mm (default A4 retrato: 210); os "
+        "denominadores em px saem da imagem carregada, então serve "
+        "também para paisagem e outras grades",
+    )
+    parser.add_argument(
+        "--paper-h-mm",
+        type=float,
+        default=None,
+        help="altura da folha em mm (default A4 retrato: 297); exige --paper-w-mm",
+    )
+    parser.add_argument(
         "--selfcheck",
         action="store_true",
         help="roda a bancada sintética e sai",
@@ -1506,8 +1240,30 @@ def main(argv=None):
         return 0
     if not args.input:
         parser.error("informe o PNG de entrada ou --selfcheck")
+    if (args.paper_w_mm is None) != (args.paper_h_mm is None):
+        parser.error("--paper-w-mm e --paper-h-mm devem ser passados juntos")
+    if args.paper_w_mm is not None and (
+        not math.isfinite(args.paper_w_mm)
+        or not math.isfinite(args.paper_h_mm)
+        or args.paper_w_mm <= 0
+        or args.paper_h_mm <= 0
+    ):
+        parser.error("--paper-w-mm/--paper-h-mm devem ser positivos finitos")
 
     ink, polarity = load_ink(args.input)
+    if args.paper_w_mm is None:
+        return _run_pipeline(args, ink, polarity)
+    # Folha não-A4: reaponta a escala a partir da imagem real e restaura
+    # o default no fim — main() nunca deixa o módulo mutado.
+    img_h_px, img_w_px = ink.shape[:2]
+    _set_paper_mm(args.paper_w_mm, args.paper_h_mm, img_w_px, img_h_px)
+    try:
+        return _run_pipeline(args, ink, polarity)
+    finally:
+        _reset_paper_mm()
+
+
+def _run_pipeline(args, ink, polarity):
     stamps = load_stamps(args.stamps) if args.stamps else None
     if args.clean:
         polylines = vectorize_clean(
@@ -1536,6 +1292,8 @@ def main(argv=None):
     summary["polaridade_tinta"] = polarity
     summary["epsilon_px"] = args.epsilon
     summary["thinning"] = args.thinning
+    if args.paper_w_mm is not None:
+        summary["paper_mm"] = [PAPER_W_MM, PAPER_H_MM]
     summary["svg"] = out
     if args.json:
         payload = {"summary": summary, "primitives": prims}

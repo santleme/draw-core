@@ -98,6 +98,19 @@ def test_identity_filter_keeps_everything_including_the_ruling(page):
     assert r["ticks_residual"] > 500
 
 
+def test_ruling_make_filter_resolves_by_dynamic_spec():
+    # Guarda do entry point dinâmico: vulture marca `make_filter` como
+    # morta, mas ela é carregada por string via `--filter`. Se alguém
+    # "limpar" a função, este teste quebra.
+    import inspect
+
+    fn = bench._load_filter("draw.ink.ruling:make_filter")
+    assert callable(fn)
+    assert list(inspect.signature(fn).parameters) == ["prob", "visible"]
+    prob = np.full((16, 16), 0.5, np.float32)
+    assert fn(prob.copy()).shape == prob.shape
+
+
 def test_oracle_filter_scores_perfectly(page):
     r = bench.score_filter(page, _oracle(page))
     assert r["ruling_removed"] == pytest.approx(1.0, abs=0.005)

@@ -3,6 +3,8 @@
 import cv2
 import numpy as np
 
+from .. import paper
+
 # Registro da evidencia na geometria ancora da geracao (medido
 # na regua desta frente, 2026-11-05, draw-lab/parallel-2026-11-05/
 # repassada): o acumulador vive numa grade fixa da pagina, mas a
@@ -43,12 +45,8 @@ def _corners_page_matrix(corners, width, height):
     mapa da passada: e nessa grade que ancora e passada
     precisam conversar.
     """
-    destination = np.array(
-        [(0, 0), (width, 0), (width, height), (0, height)],
-        dtype=np.float32,
-    )
-    source = np.asarray(corners, dtype=np.float32).reshape(4, 2)
-    return cv2.getPerspectiveTransform(source, destination)
+    destination = [(0, 0), (width, 0), (width, height), (0, height)]
+    return paper.perspective_matrix(corners, destination=destination)
 
 
 def _permute_prob(prob, k):

@@ -96,6 +96,15 @@ _STUDIO_TEMPLATES = {}
 _BASE_W, _BASE_H = 1600, 640
 
 
+def _scale(sc):
+    """Conversor de medidas da base 1600x640 para a escala sc (minimo 1 px)."""
+
+    def k(v):
+        return max(1, int(round(v * sc)))
+
+    return k
+
+
 def _studio_template(cam_shape, canvas_shape, show_base, size=(_BASE_W, _BASE_H)):
     """Cromagem estatica da janela e geometria dos dois viewports.
 
@@ -113,9 +122,7 @@ def _studio_template(cam_shape, canvas_shape, show_base, size=(_BASE_W, _BASE_H)
 
     target_w, target_h = size
     sc = min(target_w / _BASE_W, target_h / _BASE_H)
-
-    def k(v):
-        return max(1, int(round(v * sc)))
+    k = _scale(sc)
 
     header_h = k(44)
     footer_h = k(36)
@@ -280,9 +287,7 @@ def button_rects(size, show_base=False):
     """Retangulos (x, y, w, h) dos botoes do rodape no tamanho dado."""
     target_w, target_h = size
     sc = min(target_w / _BASE_W, target_h / _BASE_H)
-
-    def k(v):
-        return max(1, int(round(v * sc)))
+    k = _scale(sc)
 
     footer_h, btn_h, bw = k(36), k(22), k(94)
     y = target_h - footer_h + (footer_h - btn_h) // 2
@@ -318,11 +323,10 @@ def _draw_footer_button(studio, rect, key_label, label, p, pressed, sc):
     as bordas; com o botao pressionado ele desce de volta e acende mais.
     """
 
-    def k(v):
-        return max(1, int(round(v * sc)))
+    k = _scale(sc)
 
     x, y, w, h = rect
-    th = max(1, int(round(sc)))
+    th = k(1)
     ih, iw = studio.shape[:2]
     lift = 0 if pressed else int(round(2 * sc * p))
     top = y - lift
@@ -381,20 +385,22 @@ def _wordmark_geometry(size):
     """Posicao do nome DRAW no cabecalho: (x, base, largura, topo, escala)."""
     target_w, target_h = size
     sc = min(target_w / _BASE_W, target_h / _BASE_H)
-    th = max(1, int(round(sc)))
-    header_h = max(1, int(round(44 * sc)))
+    k = _scale(sc)
+    th = k(1)
+    header_h = k(44)
     (w, h), _ = cv2.getTextSize("DRAW", cv2.FONT_HERSHEY_DUPLEX, 0.95 * sc, th)
     x = target_w // 2 - w // 2
-    base = (header_h + h) // 2 - max(1, int(round(2 * sc)))
+    base = (header_h + h) // 2 - k(2)
     return x, base, w, base - h, sc
 
 
 def wordmark_rect(size):
     """Retangulo (x, y, w, h) justo do nome DRAW e do fio sob ele."""
     x, base, w, top, sc = _wordmark_geometry(size)
-    pad = max(1, int(round(4 * sc)))
+    k = _scale(sc)
+    pad = k(4)
     y0 = max(0, top - pad)
-    return x - pad, y0, w + 2 * pad, base + max(1, int(round(6 * sc))) + pad - y0
+    return x - pad, y0, w + 2 * pad, base + k(6) + pad - y0
 
 
 def _draw_wordmark(studio, size, p, origin):
@@ -404,9 +410,10 @@ def _draw_wordmark(studio, size, p, origin):
     mouse tocou) e se espalha por dentro das letras e do fio.
     """
     x, base, w, top, sc = _wordmark_geometry(size)
-    th = max(1, int(round(sc)))
+    k = _scale(sc)
+    th = k(1)
     pad = max(2, int(round(3 * sc)))
-    line_y = base + max(1, int(round(6 * sc)))
+    line_y = base + k(6)
     x0, x1 = max(0, x - pad), min(studio.shape[1], x + w + pad)
     y0, y1 = max(0, top - pad), line_y + pad
 
@@ -453,9 +460,7 @@ def camera_menu_layout(size, cam_shape, canvas_shape, count, first=0):
     """
     geo = _studio_template(cam_shape, canvas_shape, False, tuple(size))[1]
     sc = geo["scale"]
-
-    def k(v):
-        return max(1, int(round(v * sc)))
+    k = _scale(sc)
 
     r = k(8)
     cx = geo["cam_area_x"] + geo["cam_area_w"] - k(20)
@@ -492,16 +497,19 @@ def camera_menu_layout(size, cam_shape, canvas_shape, count, first=0):
     }
 
 
-def point_in_dot(layout, pos):
-    cx, cy, r = layout["dot"]
-    reach = r + max(1, int(round(4 * layout["scale"])))
+def _point_in_circle(layout, key, pos):
+    """pos dentro do circulo (cx, cy, r) de layout[key], com folga de 4 px."""
+    cx, cy, r = layout[key]
+    reach = r + _scale(layout["scale"])(4)
     return (pos[0] - cx) ** 2 + (pos[1] - cy) ** 2 <= reach**2
+
+
+def point_in_dot(layout, pos):
+    return _point_in_circle(layout, "dot", pos)
 
 
 def point_in_gear(layout, pos):
-    cx, cy, r = layout["gear"]
-    reach = r + max(1, int(round(4 * layout["scale"])))
-    return (pos[0] - cx) ** 2 + (pos[1] - cy) ** 2 <= reach**2
+    return _point_in_circle(layout, "gear", pos)
 
 
 def scroll_hit(layout, pos):
@@ -526,8 +534,7 @@ def row_at(layout, pos):
 def _draw_camera_dot(studio, layout, hover, opened):
     """Bolinha minimalista de cameras; o centro acende em amarelo no hover."""
     cx, cy, r = layout["dot"]
-    sc = layout["scale"]
-    th = max(1, int(round(sc)))
+    th = _scale(layout["scale"])(1)
     x0, y0 = cx - r - 2, cy - r - 2
     size = 2 * r + 5
     if x0 < 0 or y0 < 0 or x0 + size > studio.shape[1] or y0 + size > studio.shape[0]:
@@ -554,8 +561,7 @@ def _draw_camera_dot(studio, layout, hover, opened):
 def _menu_card(studio, card, sc, progress):
     """Cartao escuro de menu com sombra e fio; devolve o deslocamento vertical."""
 
-    def k(v):
-        return max(1, int(round(v * sc)))
+    k = _scale(sc)
 
     ih, iw = studio.shape[:2]
     left, top, width, height = card
@@ -606,12 +612,10 @@ def _draw_camera_menu(studio, layout, items, progress):
     if progress <= 0.01 or not items:
         return
     sc = layout["scale"]
-
-    def k(v):
-        return max(1, int(round(v * sc)))
+    k = _scale(sc)
 
     dy = _menu_card(studio, layout["card"], sc, progress)
-    th = max(1, int(round(sc)))
+    th = k(1)
     for (rx, ry, rw, rh), item in zip(layout["rows"], items, strict=False):
         ry += dy
         hp = item["hover"]
@@ -666,9 +670,7 @@ def settings_menu_layout(size, count):
     """Engrenagem no canto inferior direito do rodape e o menu acima dela."""
     target_w, target_h = size
     sc = min(target_w / _BASE_W, target_h / _BASE_H)
-
-    def k(v):
-        return max(1, int(round(v * sc)))
+    k = _scale(sc)
 
     footer_h = k(36)
     r = k(9)
@@ -801,12 +803,10 @@ def _draw_settings_menu(studio, layout, items, progress):
     if progress <= 0.01 or not items:
         return
     sc = layout["scale"]
-
-    def k(v):
-        return max(1, int(round(v * sc)))
+    k = _scale(sc)
 
     dy = _menu_card(studio, layout["card"], sc, progress)
-    th = max(1, int(round(sc)))
+    th = k(1)
     bg = (26, 28, 27)
     for (rx, ry, rw, rh), item in zip(layout["rows"], items, strict=False):
         ry += dy
@@ -834,14 +834,13 @@ def _draw_settings_menu(studio, layout, items, progress):
         _draw_toggle(studio, (tx, ty, tw, tg), on_p, direction, progress, bg)
 
 
-def _draw_hud_footer(studio, geo, sc, lines, size):
+def _draw_hud_footer(studio, geo, sc, lines, size, show_base=False):
     """Painel numa linha so no rodape, quando nao ha margem ao lado da camera."""
 
-    def k(v):
-        return max(1, int(round(v * sc)))
+    k = _scale(sc)
 
-    font, th = cv2.FONT_HERSHEY_SIMPLEX, max(1, int(round(sc)))
-    left = button_rects(size)[-1]
+    font, th = cv2.FONT_HERSHEY_SIMPLEX, k(1)
+    left = button_rects(size, show_base)[-1]
     left = left[0] + left[2] + k(24)
     right = settings_menu_layout(size, 1)["gear"]
     right = right[0] - right[2] - k(20)
@@ -865,7 +864,7 @@ def _draw_hud_footer(studio, geo, sc, lines, size):
         tx += cv2.getTextSize(text, font, fs, th)[0][0]
 
 
-def _draw_hud(studio, geo, sc, lines, size):
+def _draw_hud(studio, geo, sc, lines, size, show_base=False):
     """Informacoes no canto superior esquerdo da area escura da camera.
 
     O painel nunca passa da margem escura a esquerda da imagem: se o texto
@@ -875,10 +874,9 @@ def _draw_hud(studio, geo, sc, lines, size):
     if not lines:
         return
 
-    def k(v):
-        return max(1, int(round(v * sc)))
+    k = _scale(sc)
 
-    font, th = cv2.FONT_HERSHEY_SIMPLEX, max(1, int(round(sc)))
+    font, th = cv2.FONT_HERSHEY_SIMPLEX, k(1)
     x = geo["cam_area_x"] + k(10)
     y = geo["panel_y"] + k(10)
     pad = k(8)
@@ -894,7 +892,7 @@ def _draw_hud(studio, geo, sc, lines, size):
     needed = width(base_fs)
     factor = min(1.0, avail / needed) if needed > 0 else 1.0
     if factor < 0.6:
-        _draw_hud_footer(studio, geo, sc, lines, size)
+        _draw_hud_footer(studio, geo, sc, lines, size, show_base)
         return
     fs = base_fs * factor
     line_h = max(1, int(round(18 * sc * factor)))
@@ -1018,9 +1016,7 @@ def compose_view(
     )
     studio = template.copy()
     sc = geo["scale"]
-
-    def k(v):
-        return max(1, int(round(v * sc)))
+    k = _scale(sc)
 
     # Preview da camera em INTER_LINEAR: ~10x mais barato que AREA
     # no downscale e a diferenca e invisivel numa vista ao vivo
@@ -1074,7 +1070,7 @@ def compose_view(
         cv2.FONT_HERSHEY_SIMPLEX,
         0.32 * sc,
         COLOR_TEXT_BRIGHT,
-        max(1, int(round(sc))),
+        k(1),
         cv2.LINE_AA,
     )
 
@@ -1111,7 +1107,7 @@ def compose_view(
     _draw_camera_dot(studio, layout, menu.get("dot", 0.0), menu.get("opened", False))
     _draw_camera_menu(studio, layout, menu.get("items", ()), menu.get("progress", 0.0))
 
-    _draw_hud(studio, geo, sc, _hud_lines(studio, hud or {}), size)
+    _draw_hud(studio, geo, sc, _hud_lines(studio, hud or {}), size, show_base)
 
     settings = settings_menu or {}
     gear = settings_menu_layout(size, len(settings.get("items", ())))

@@ -14,16 +14,70 @@ Read `docs/MIGRATION_SPEC.md` before changing anything.
 
 ## Change philosophy
 
-- No code golf: a low line count is a guiding light, but the real goal is reducing complexity and increasing readability. Deleting `\n`s does nothing to help.
-- No docs-only or whitespace-only changes: they are useless and carry a risk of introducing bugs.
-- Anything claimed as a "speedup" must be benchmarked. Even a marginal speedup must be weighed against maintainability and readability — the goal is simplicity.
-- Code outside the core (`src/draw/`) is not well tested: don't touch it unless it's actually broken.
-- A PR that looks complex, is a big diff, or adds lots of lines won't be reviewed or merged. Break work into smaller PRs that are each a clear win. A common pattern: prerequisite refactors until the feature becomes a 3-line change that's easy to review.
+The guiding style draws on *The Tao of Programming*, KISS, and YAGNI: make
+behavior, ownership, and invariants easy to see, and choose the smallest
+complete design. These are simplicity heuristics, not a contest to minimize
+line count.
+
+- **No code golf.** A short diff is useful when it reduces concepts and makes
+  the design easier to understand. Deleting newlines, compressing branches, or
+  hiding control flow does not help.
+- **Avoid routine docs-only and whitespace-only changes.** A requested update
+  to repository instructions is a valid standalone maintenance change when it
+  materially improves how the project is developed or reviewed.
+- **Benchmark performance claims.** Measure old and new behavior on a
+  representative workload. Report the setup, baseline, result, and relevant
+  variance or latency percentiles. Profile before optimizing. Weigh even a
+  marginal speedup against its cost in maintainability, memory, and latency.
+- **Keep changes reviewable and independently useful.** Give each PR one clear
+  purpose and keep it based on `main`, CI-green, and independent of other open
+  PRs. Keep the one-module-per-migration rule above. A prerequisite refactor is
+  welcome when it is a clear improvement by itself and makes the later feature
+  easier to review; turning a feature into a three-line change is a good result
+  when the prerequisite work is valuable on its own.
+- Code outside the core (`src/draw/`) is not well tested: don't touch it unless
+  it's actually broken.
 
 What's welcome:
 
-- Bug fixes, always with a regression test.
-- Features, always with a regression test, weighing the line tradeoff: a 3-line change has a lower usefulness bar than a 30- or 300-line one. With no other constraints, a feature's API should match torch or numpy. All new code must be high quality and well tested.
-- Refactors that are clear wins — e.g. two 100-line functions that become one parametrized 110-line function while also improving readability. Moving whitespace or functions around is useless. Refactors must pass process replay / the existing test suite.
-- Non-brittle tests and fuzzers. Finding bugs is progress — even a broken test that should pass is valuable, marked `@unittest.expectedFailure`.
-- Dead code removal from the core (`src/draw/`).
+- **Bug fixes** with a regression test that fails before the fix and passes
+  afterward.
+- **Features** with regression coverage and a usefulness case proportional to
+  their implementation and maintenance cost. All new code must be high quality
+  and well tested. Prefer familiar NumPy API conventions when they fit the
+  runtime and the contracts in this repository.
+- **Refactors** that clearly improve readability, ownership, or invariants.
+  Whitespace changes or moving functions without improving the design are not
+  wins. Behavior-preserving refactors must pass process replay and relevant
+  tests.
+- **Non-brittle tests and fuzzers.** Prefer deterministic reproductions. An
+  `@unittest.expectedFailure` marker must identify a tracked defect and have a
+  clear condition for removal.
+- **Dead-code removal** from the core (`src/draw/`) after checking supported
+  callers and entry points.
+
+## State and concurrency changes
+
+Before changing shared state or thread boundaries, write down the state owner,
+readers and writers, object lifetime, mutable-array aliases, invalidation epochs,
+commit points, lock order, expected lock hold time, progress requirements, and
+exception policy. Keep this proportional to the change; the checklist is not a
+reason to add locks or counters without need.
+
+- A stale-work check at publication does not undo mutations made earlier.
+  Validate at the boundary that permits the mutation, or keep work private
+  until it can be committed.
+- Make concurrency regressions deterministic. Use events or barriers to pause
+  immediately before the shared mutation, not after the real mutation has
+  already happened. Assert both authoritative state and the public result; do
+  not use sleeps to manufacture an interleaving.
+- Do not rely on the GIL to protect NumPy buffers. Frozen dataclasses and
+  read-only array views do not make the underlying data deeply immutable. State
+  whether inputs are copied, transferred, or promised not to change while in
+  use.
+- Give every generation or revision token a distinct invalidation meaning. Do
+  not add a counter when an existing generation or epoch already covers that
+  change.
+- Extract a collaborator only when its inputs, outputs, and state ownership
+  become clearer. A helper that still reaches into and mutates its parent
+  object's state has not created a useful boundary.
