@@ -35,7 +35,7 @@ def _corners_float32(value, name):
 
 
 def _readonly(value, copy=False):
-    """Devolve visão (ou cópia) somente-leitura do array."""
+    """Devolve visão (ou cópia própria) somente-leitura do array."""
     out = value.copy() if copy else value.view()
     out.flags.writeable = False
     return out
@@ -196,8 +196,10 @@ class WarpedPage:
     """Uma página retificada entregue à trabalhadora de tinta.
 
     image é o warp: ndarray 2D ou (H, W, 3) uint8 — a saída de
-    warp_sheet sobre o quadro da câmera — guardada como visão
-    somente-leitura do buffer recebido. generation é a geração de
+    warp_sheet sobre o quadro da câmera — copiada para um buffer
+    próprio somente-leitura. O mesmo vale para visible e coverage:
+    depois da construção, o produtor pode reutilizar os arrays de
+    entrada sem alterar uma passada enfileirada. generation é a geração de
     sessão da folha, >= 0. corners é o quad (4, 2) float32
     somente-leitura que retificou ESTE warp, ou None. visible é a
     máscara de visibilidade do FRAME que originou este warp
@@ -227,7 +229,7 @@ class WarpedPage:
             self.image.shape[2] != 3 or self.image.dtype != np.uint8
         ):
             raise ValueError(f"image (H, W, 3) precisa ser uint8: {self.image.dtype}")
-        object.__setattr__(self, "image", _readonly(self.image))
+        object.__setattr__(self, "image", _readonly(self.image, copy=True))
         if self.generation < 0:
             raise ValueError(f"generation precisa ser >= 0: {self.generation}")
         _corners_field(self, "corners")
@@ -235,7 +237,7 @@ class WarpedPage:
             mask = getattr(self, name)
             if mask is None:
                 continue
-            _mask_2d(self, name, dtypes=(bool, np.uint8))
+            _mask_2d(self, name, copy=True, dtypes=(bool, np.uint8))
             if self.corners is None and mask.shape != self.image.shape[:2]:
                 raise ValueError(
                     f"{name} sem corners segue a grade do warp: "
