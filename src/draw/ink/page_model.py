@@ -538,36 +538,34 @@ class PageModel:
         kernel = np.ones((cells, cells), np.uint8)
         gray_grid = gray_f[::step, ::step]
         gray_peak = cv2.dilate(gray_grid, kernel)
+        bg_cells = max(1, 4 * cells)
+        local_bg = cv2.boxFilter(
+            gray_grid, -1, (bg_cells, bg_cells), borderType=cv2.BORDER_REPLICATE
+        )
         if not self._has_seeded:
-            vis_grid = input_vis[::step, ::step]
-            paper_luma = (
-                float(np.percentile(gray_grid[vis_grid], 80))
-                if np.any(vis_grid)
-                else 0.0
-            )
-            if paper_luma < 24.0:
+            if float(gray_peak.max()) < 24.0:
                 self._recovering_px = 0
                 self._hold_mask.fill(False)
                 return np.zeros(self.shape, dtype=bool)
-            ref_peak = np.full(gray_grid.shape, paper_luma, dtype=np.float32)
-            has_ref = np.ones(gray_grid.shape, dtype=bool)
+            ref_peak = local_bg
             eff_gain = 1.0
         else:
-            paper_luma = float(np.percentile(self._norm_ref[self._seeded], 75))
             ref_grid = np.where(
                 self._seeded[::step, ::step],
                 self._norm_ref[::step, ::step],
-                paper_luma,
+                local_bg,
             )
             ref_peak = cv2.dilate(ref_grid, kernel)
-            has_ref = ref_peak > 1.0
             gain, chroma_ok, chroma_shift = self._estimate_gain(
                 gray_f, bgr=bgr, visible=input_vis, chroma_tol=chroma_tol
             )
             self._last_chroma_ok = chroma_ok
             self._last_chroma_shift = chroma_shift
             eff_gain = min(gain, 1.0)
-        ok = ~has_ref | (gray_peak >= (min_ratio * eff_gain) * ref_peak)
+        has_ref = ref_peak > 1.0
+        ok = (~has_ref | (gray_peak >= (min_ratio * eff_gain) * ref_peak)) & (
+            gray_peak >= 24.0
+        )
         vis_peak = cv2.dilate(input_vis.astype(np.uint8)[::step, ::step], kernel)
         if (
             self._has_chroma_ref

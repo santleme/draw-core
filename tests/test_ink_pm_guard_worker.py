@@ -836,3 +836,38 @@ def test_sketch_worker_confirms_faint_graphite_between_20_and_30_contrast(monkey
 
     assert _run_contrast(0.20).all()
     assert not _run_contrast(0.30).any()
+
+
+def test_uneven_lighting_at_startup_seeds_darker_paper_and_captures_stroke(monkeypatch):
+    """Regressao PR #189 (Devin Review): faixa clara (235) em 25% da folha
+    nao pode fixar o corte de abertura acima do papel mais escuro (180)
+    nos outros 75%; traco fino desenhado no interior escuro precisa confirmar."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(worker_mod, "_IDLE_PROBE_SECONDS", 0.02)
+    ink = _Scripted()
+    config = dataclasses.replace(InkConfig.production(), pass_interval_s=0.02)
+    worker = worker_mod.PageCleanWorker(ink, config=config).start()
+    generation = worker.new_generation()
+    try:
+        uneven = np.full((H, W, 3), 180, dtype=np.uint8)
+        uneven[:, : W // 4] = (235, 235, 235)
+        for _ in range(3):
+            _pass(worker, generation, uneven)
+        assert worker._page_model.seeded[:, W // 2 :].all()
+
+        stroke = (slice(120, 128), slice(W // 2 + 20, W // 2 + 100))
+        scene = uneven.copy()
+        scene[stroke] = (80, 80, 80)
+        prob = _prob()
+        prob[stroke] = 0.95
+        ink.content = prob
+        _pass_until(
+            worker,
+            generation,
+            scene,
+            lambda snap: snap.confirmed[stroke].all(),
+            6,
+        )
+        assert worker.poll(generation, 0).confirmed[stroke].all()
+    finally:
+        worker.stop()
