@@ -2,7 +2,7 @@
 
 Read `docs/MIGRATION_SPEC.md` before changing anything.
 
-- `src/draw/` is the runtime: only numpy, opencv-headless, onnxruntime (mediapipe optional). Never import torch/pandas.
+- `src/draw/` is the runtime: only numpy, opencv-headless, onnxruntime (mediapipe optional), plus first-party workspace packages under `packages/` (currently `draw-dral`). Never import torch/pandas.
 - Stages exchange frozen dataclasses from `src/draw/contracts.py`, not dicts or tuples. During the migration, modules keep their legacy return shapes (tuples) until the integration PR adapts them to `contracts`; do not widen those shapes.
 - Migrate one module per PR, with its tests; the PR must be CI-green. Modules with a hard mutual dependency (for example `geometry` needs `paper`/`config`, the ink engine's parts) may share a PR; say so in the description.
 - Every migration PR is based on `main` and must pass CI on its own: no imports from, and no reliance on, other open PRs. Files two PRs must both change (for example `pyproject.toml`) get byte-identical edits.

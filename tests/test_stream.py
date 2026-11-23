@@ -11,8 +11,9 @@ import time
 import numpy as np
 import pytest
 
-from draw import contracts, stream
-from draw.protocol import (
+from draw import contracts
+from draw_dral import stream
+from draw_dral.wire import (
     ProtocolError,
     client_handshake,
 )

@@ -643,7 +643,7 @@ def run(
         tracker = None
         if not markers_mode:
             if stream_port is not None or stream_record is not None:
-                from .stream import InkStreamPublisher
+                from draw_dral.stream import InkStreamPublisher
 
                 ink_stream = InkStreamPublisher(
                     port=stream_port,

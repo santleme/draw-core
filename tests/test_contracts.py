@@ -307,7 +307,15 @@ def test_warped_page_read_only_fields():
         assert not field.flags.writeable
     with pytest.raises(ValueError):
         page.visible[0, 0] = False
-    image[0, 0, 0] = 9  # a fonte segue gravável
+    image[0, 0, 0] = 9  # a fonte segue gravavel e nao altera o pacote
+    visible[0, 0] = False
+    coverage[0, 0] = 255
+    assert page.image[0, 0, 0] == 0
+    assert page.visible[0, 0]
+    assert page.coverage[0, 0] == 0
+    assert not np.shares_memory(page.image, image)
+    assert not np.shares_memory(page.visible, visible)
+    assert not np.shares_memory(page.coverage, coverage)
 
 
 def test_warped_page_rejects_bad_fields():

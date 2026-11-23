@@ -37,6 +37,8 @@ class _BlockingInk:
 @pytest.mark.slow
 def test_telemetry_counts_replaced_pending_and_stamps_stages(monkeypatch):
     monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    # A sonda ociosa de producao (1 s) nao pode vazar para o arnes.
+    monkeypatch.setattr(worker_mod, "_IDLE_PROBE_SECONDS", 0.01)
     fake = _BlockingInk()
     worker = worker_mod.PageCleanWorker(fake).start()
     try:
@@ -94,6 +96,8 @@ def test_telemetry_counts_replaced_pending_and_stamps_stages(monkeypatch):
 @pytest.mark.slow
 def test_telemetry_snapshot_is_a_copy(monkeypatch):
     monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    # A sonda ociosa de producao (1 s) nao pode vazar para o arnes.
+    monkeypatch.setattr(worker_mod, "_IDLE_PROBE_SECONDS", 0.01)
     fake = _BlockingInk()
     fake.release.set()
     worker = worker_mod.PageCleanWorker(fake).start()
