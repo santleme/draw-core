@@ -124,6 +124,23 @@ def _static_confirmed(passes):
     return result["confirmed"]
 
 
+@pytest.mark.parametrize("width,height", [(W, H), (128, 96), (850, 1200)])
+def test_corners_page_matrix_uses_the_requested_page_grid(width, height):
+    from draw.paper import perspective_matrix
+
+    corners = np.array([(11, 9), (72, 6), (77, 54), (8, 57)], dtype=np.float32)
+    destination = np.array(
+        [(0, 0), (width, 0), (width, height), (0, height)], dtype=np.float32
+    )
+
+    matrix = registration_mod._corners_page_matrix(corners, width, height)
+    expected = perspective_matrix(corners, destination=destination)
+    mapped = cv2.perspectiveTransform(corners.reshape(1, 4, 2), matrix)[0]
+
+    np.testing.assert_array_equal(matrix, expected)
+    np.testing.assert_allclose(mapped, destination, atol=1e-4)
+
+
 def test_registration_matrix_identity_for_same_corners():
     matrix = registration_mod._registration_matrix(Q0, Q0, (H, W))
     assert registration_mod._registration_is_identity(matrix)
