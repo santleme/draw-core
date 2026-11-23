@@ -483,6 +483,37 @@ def test_arc_gap_decided_in_paper_space():
         vectorize._reset_paper_mm()
 
 
+def test_rotated_rectangle_outside_count_tolerates_roundoff():
+    # A guarda de "fração fora" só pode contar desvio acima de uma
+    # tolerância numérica: a interpolação deixa resíduos de ~1e-14 em
+    # amostras sobre a aresta, e sem o eps a mesma forma virava polygon
+    # ou rectangle conforme a posição (review #197).
+    vectorize._set_paper_mm(170.0, 200.0, 850, 1200)
+    try:
+        sq = np.array(
+            [
+                [175.0, 189.0],
+                [195.0, 209.0],
+                [184.0, 225.0],
+                [164.0, 205.0],
+            ]
+        )
+        low = vectorize.classify_primitive({"points": sq, "closed": True})
+        high = vectorize.classify_primitive(
+            {"points": sq + [0.0, 10.0], "closed": True}
+        )
+        assert low["type"] == high["type"] == "rectangle"
+
+        # Um oval simplificado a 4 cantos continua polygon: as amostras
+        # abaulam para fora do quadrilátero muito acima da tolerância.
+        t = np.linspace(0.0, 2.0 * np.pi, 200, endpoint=False)
+        oval = np.stack([425.0 + 90.0 * np.cos(t), 600.0 + 130.0 * np.sin(t)], axis=1)
+        prim = vectorize.classify_primitive({"points": oval, "closed": True})
+        assert prim["type"] == "polygon"
+    finally:
+        vectorize._reset_paper_mm()
+
+
 def main():
     test_node_indexing_matches_naive_and_scales_linearly()
     test_thick_shapes_axis_aligned_rect_circle_lines_and_freehand_wave()
@@ -497,6 +528,7 @@ def main():
     test_explicit_paper_at_a4_ratio_still_measures_per_axis()
     test_anisotropic_paper_does_not_export_ellipse_as_circle()
     test_arc_gap_decided_in_paper_space()
+    test_rotated_rectangle_outside_count_tolerates_roundoff()
     print("TESTES DE VECTORIZE V2 E CAMADA 2 OK.")
     return 0
 

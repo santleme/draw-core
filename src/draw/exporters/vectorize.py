@@ -796,13 +796,22 @@ def classify_primitive(polyline):
                     if float(np.dot(n, center - corners[i])) > 0:
                         n = -n
                     normals.append(n)
+                # "Fora" só conta acima de uma tolerância numérica: a
+                # interpolação deixa resíduos de ~1e-14 em amostras que
+                # estão exatamente sobre a aresta, e sem o eps a fração
+                # de fora depende do sinal do último bit (posição).
+                out_eps = (
+                    64.0
+                    * np.finfo(np.float64).eps
+                    * max(1.0, float(np.abs(dense).max()))
+                )
                 rect_dev = []
                 n_out = 0
                 for p in dense:
                     ds = [float(np.dot(p - corners[i], normals[i])) for i in range(4)]
                     j = int(np.argmin(np.abs(ds)))
                     rect_dev.append(abs(ds[j]))
-                    n_out += ds[j] > 0
+                    n_out += ds[j] > out_eps
                 if (
                     angles_ok
                     and opp0 <= 0.12
