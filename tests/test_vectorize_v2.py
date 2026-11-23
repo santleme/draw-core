@@ -176,6 +176,17 @@ def test_paper_mm_flags_repoint_scale_and_restore_defaults():
         assert payload["summary"]["paper_mm"] == [297.0, 210.0]
         svg_txt = svg_path.read_text(encoding="utf-8")
         assert 'viewBox="0 0 297.0 210.0"' in svg_txt
+        # Sem as flags, o summary não carrega paper_mm — o output A4
+        # default permanece bit a bit idêntico ao de antes das flags.
+        json_default = Path(tmp) / "default.json"
+        assert (
+            vectorize.main([str(png_path), "--primitives", "--json", str(json_default)])
+            == 0
+        )
+        assert (
+            "paper_mm"
+            not in json.loads(json_default.read_text(encoding="utf-8"))["summary"]
+        )
     # O run não vaza escala para o módulo: defaults A4 restaurados.
     assert vectorize.PAPER_W_MM == 210.0
     assert vectorize.PAPER_H_MM == 297.0
@@ -183,7 +194,7 @@ def test_paper_mm_flags_repoint_scale_and_restore_defaults():
     assert vectorize.MM_PER_PX_Y == 297.0 / 1200.0
 
 
-def test_paper_mm_flags_must_come_in_pairs():
+def test_paper_mm_flags_must_come_in_pairs_and_be_finite():
     img = np.full((850, 1200), 255, dtype=np.uint8)
     cv2.line(img, (60, 425), (1140, 425), 0, thickness=3)
     with tempfile.TemporaryDirectory() as tmp:
@@ -191,8 +202,66 @@ def test_paper_mm_flags_must_come_in_pairs():
         cv2.imwrite(str(png_path), img)
         with pytest.raises(SystemExit):
             vectorize.main([str(png_path), "--paper-w-mm", "297"])
-        with pytest.raises(SystemExit):
-            vectorize.main([str(png_path), "--paper-w-mm", "0", "--paper-h-mm", "210"])
+        for bad in ("0", "-1", "nan", "inf"):
+            with pytest.raises(SystemExit):
+                vectorize.main(
+                    [str(png_path), "--paper-w-mm", bad, "--paper-h-mm", "210"]
+                )
+
+
+def test_anisotropic_paper_measures_geometry_in_mm():
+    # Folha 200x200 mm sobre canvas 850x1200 px: SX != SY. Comprimentos
+    # e ângulos são medidos no espaço mm; um círculo em px vira elipse
+    # em mm e cai no contorno escalado (o schema não comporta elipse).
+    vectorize._set_paper_mm(200.0, 200.0, 850, 1200)
+    try:
+        sx, sy = 200.0 / 850.0, 200.0 / 1200.0
+        prim = vectorize.classify_primitive(
+            {"points": np.array([[0.0, 0.0], [400.0, 0.0]]), "closed": False}
+        )
+        assert prim["type"] == "line"
+        assert prim["length_mm"] == pytest.approx(400.0 * sx, abs=0.001)
+        prim = vectorize.classify_primitive(
+            {"points": np.array([[0.0, 0.0], [0.0, 600.0]]), "closed": False}
+        )
+        assert prim["type"] == "line"
+        assert prim["length_mm"] == pytest.approx(600.0 * sy, abs=0.001)
+
+        theta = np.linspace(0.0, 2.0 * np.pi, 200, endpoint=False)
+        circle_px = np.stack(
+            [425.0 + 100.0 * np.cos(theta), 600.0 + 100.0 * np.sin(theta)],
+            axis=1,
+        )
+        prim = vectorize.classify_primitive({"points": circle_px, "closed": True})
+        assert prim["type"] == "polygon"
+        xs = [p[0] for p in prim["points_mm"]]
+        ys = [p[1] for p in prim["points_mm"]]
+        assert (max(xs) - min(xs)) / 2 == pytest.approx(100.0 * sx, rel=0.05)
+        assert (max(ys) - min(ys)) / 2 == pytest.approx(100.0 * sy, rel=0.05)
+    finally:
+        vectorize._set_paper_mm(
+            210.0, 297.0, vectorize.PAPER_W_PX, vectorize.PAPER_H_PX
+        )
+
+
+def test_isotropic_paper_still_classifies_circle():
+    # A4 legado já é ~0,2% anisotrópico (210/850 vs 297/1200) e sempre
+    # classificou círculo com r_mm médio — o comportamento se mantém.
+    vectorize._set_paper_mm(210.0, 297.0, vectorize.PAPER_W_PX, vectorize.PAPER_H_PX)
+    try:
+        theta = np.linspace(0.0, 2.0 * np.pi, 200, endpoint=False)
+        circle_px = np.stack(
+            [425.0 + 100.0 * np.cos(theta), 600.0 + 100.0 * np.sin(theta)],
+            axis=1,
+        )
+        prim = vectorize.classify_primitive({"points": circle_px, "closed": True})
+        assert prim["type"] == "circle"
+        r_mean = 0.5 * (210.0 / 850.0 + 297.0 / 1200.0)
+        assert prim["r_mm"] == pytest.approx(100.0 * r_mean, rel=0.02)
+    finally:
+        vectorize._set_paper_mm(
+            210.0, 297.0, vectorize.PAPER_W_PX, vectorize.PAPER_H_PX
+        )
 
 
 def main():
@@ -200,7 +269,9 @@ def main():
     test_thick_shapes_axis_aligned_rect_circle_lines_and_freehand_wave()
     test_stamps_order_strokes_chronologically_and_orient_direction()
     test_paper_mm_flags_repoint_scale_and_restore_defaults()
-    test_paper_mm_flags_must_come_in_pairs()
+    test_paper_mm_flags_must_come_in_pairs_and_be_finite()
+    test_anisotropic_paper_measures_geometry_in_mm()
+    test_isotropic_paper_still_classifies_circle()
     print("TESTES DE VECTORIZE V2 E CAMADA 2 OK.")
     return 0
 

@@ -74,6 +74,25 @@ def _set_paper_mm(paper_w_mm, paper_h_mm, img_w_px, img_h_px):
     MM_PER_PX = 0.5 * (MM_PER_PX_X + MM_PER_PX_Y)
 
 
+def _isotropic_scale():
+    """Escala px->mm isotrópica o bastante para ``circle`` (<=1% relativo).
+
+    O A4 legado já é ~0,2% anisotrópico (210/850 vs 297/1200) e sempre
+    classificou círculos com ``r_mm`` médio — o 1% preserva isso e os
+    specs isotrópicos que o OCRE emite, enquanto uma folha de razão
+    claramente diferente (ex.: o exemplo de ~9% do review) transforma
+    o círculo em elipse. O schema ``circle`` não comporta elipse, então
+    nesse caso o classificador cai no contorno escalado, que preserva
+    a geometria exata ponto a ponto.
+    """
+    return abs(MM_PER_PX_X - MM_PER_PX_Y) <= 0.01 * max(MM_PER_PX_X, MM_PER_PX_Y)
+
+
+def _mm_dist(dx_px, dy_px):
+    """Distância euclidiana px->mm eixo a eixo (segura p/ escala anisotrópica)."""
+    return math.hypot(dx_px * MM_PER_PX_X, dy_px * MM_PER_PX_Y)
+
+
 THINNING_TYPES = {
     "zhangsuen": cv2.ximgproc.THINNING_ZHANGSUEN,
     "guohall": cv2.ximgproc.THINNING_GUOHALL,
@@ -676,7 +695,7 @@ def classify_primitive(polyline):
                     "y1_mm": round(float(p0[1] * MM_PER_PX_Y), 3),
                     "x2_mm": round(float(p1[0] * MM_PER_PX_X), 3),
                     "y2_mm": round(float(p1[1] * MM_PER_PX_Y), 3),
-                    "length_mm": round(float(chord_len * MM_PER_PX), 3),
+                    "length_mm": round(float(_mm_dist(chord_vec[0], chord_vec[1])), 3),
                     "max_dev_px": round(max_dev, 3),
                     **meta,
                 }
@@ -698,10 +717,13 @@ def classify_primitive(polyline):
                 )
                 bins = np.unique((angles // 15.0).astype(int))
                 # >= 21 de 24 setores de 15° cobertos (>= 315°).
+                # Escala anisotrópica transforma o círculo em elipse —
+                # sem representação no schema, cai no contorno escalado.
                 if (
                     len(bins) >= 21
                     and rmse / r <= 0.055
                     and max_err <= max(3.5, 0.10 * r)
+                    and _isotropic_scale()
                 ):
                     return {
                         "type": "circle",
@@ -754,9 +776,18 @@ def classify_primitive(polyline):
                     and opp1 <= 0.12
                     and max(rect_dev) <= max(4.0, 0.05 * max(lengths))
                 ):
-                    w_px = 0.5 * (lengths[0] + lengths[2])
-                    h_px = 0.5 * (lengths[1] + lengths[3])
-                    ang_deg = math.degrees(math.atan2(sides[0][1], sides[0][0]))
+                    # Lados/ângulo medidos já em mm: com escala
+                    # anisotrópica os comprimentos px não se convertem
+                    # por uma média única e o ângulo também muda.
+                    sides_mm = [_mm_dist(float(s[0]), float(s[1])) for s in sides]
+                    w_mm = 0.5 * (sides_mm[0] + sides_mm[2])
+                    h_mm = 0.5 * (sides_mm[1] + sides_mm[3])
+                    ang_deg = math.degrees(
+                        math.atan2(
+                            float(sides[0][1]) * MM_PER_PX_Y,
+                            float(sides[0][0]) * MM_PER_PX_X,
+                        )
+                    )
                     center = corners.mean(axis=0)
                     return {
                         "type": "rectangle",
@@ -764,8 +795,8 @@ def classify_primitive(polyline):
                             round(float(center[0] * MM_PER_PX_X), 3),
                             round(float(center[1] * MM_PER_PX_Y), 3),
                         ],
-                        "width_mm": round(float(w_px * MM_PER_PX), 3),
-                        "height_mm": round(float(h_px * MM_PER_PX), 3),
+                        "width_mm": round(w_mm, 3),
+                        "height_mm": round(h_mm, 3),
                         "angle_deg": round(ang_deg, 2),
                         "corners_mm": [
                             [
@@ -1178,8 +1209,13 @@ def main(argv=None):
         parser.error("informe o PNG de entrada ou --selfcheck")
     if (args.paper_w_mm is None) != (args.paper_h_mm is None):
         parser.error("--paper-w-mm e --paper-h-mm devem ser passados juntos")
-    if args.paper_w_mm is not None and (args.paper_w_mm <= 0 or args.paper_h_mm <= 0):
-        parser.error("--paper-w-mm/--paper-h-mm devem ser positivos")
+    if args.paper_w_mm is not None and (
+        not math.isfinite(args.paper_w_mm)
+        or not math.isfinite(args.paper_h_mm)
+        or args.paper_w_mm <= 0
+        or args.paper_h_mm <= 0
+    ):
+        parser.error("--paper-w-mm/--paper-h-mm devem ser positivos finitos")
 
     ink, polarity = load_ink(args.input)
     if args.paper_w_mm is None:
@@ -1223,7 +1259,8 @@ def _run_pipeline(args, ink, polarity):
     summary["polaridade_tinta"] = polarity
     summary["epsilon_px"] = args.epsilon
     summary["thinning"] = args.thinning
-    summary["paper_mm"] = [PAPER_W_MM, PAPER_H_MM]
+    if args.paper_w_mm is not None:
+        summary["paper_mm"] = [PAPER_W_MM, PAPER_H_MM]
     summary["svg"] = out
     if args.json:
         payload = {"summary": summary, "primitives": prims}
