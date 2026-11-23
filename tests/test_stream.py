@@ -869,3 +869,44 @@ def test_clear_after_orientation_change_keeps_grid_and_mm_together(tmp_path):
         canvas.apply(rec)
     assert canvas.mask.shape == (40, 30)
     assert canvas.paper_mm == pytest.approx((210.0, 297.0))
+
+
+def test_random_full_delta_roundtrip_reproduces_final_mask():
+    # Fuzz com seed fixa: FULL + DELTAs via diff_box têm que reproduzir
+    # a máscara final byte a byte no InkCanvas.
+    rng = np.random.default_rng(20261122)
+    current = _mask(48, 64)
+    data = stream.pack_full(1, 1, 0, current, (210.0, 297.0))
+    version = 1
+    for _ in range(30):
+        nxt = current.copy()
+        for _ in range(int(rng.integers(1, 5))):
+            y = int(rng.integers(0, 44))
+            x = int(rng.integers(0, 60))
+            nxt[y : y + 4, x : x + 4] = int(rng.integers(0, 2)) * 255
+        box = stream.diff_box(current, nxt)
+        if box is None:
+            continue
+        version += 1
+        data += stream.pack_delta(1, version, version, nxt, box)
+        current = nxt
+    canvas, _ = _canvas_from(data)
+    assert np.array_equal(canvas.mask, current)
+    assert canvas.ink_version == version
+
+
+def test_corrupt_stream_raises_and_keeps_mask():
+    # Stream corrompido (payload truncado ou byte trocado no meio)
+    # levanta ProtocolError sem alterar a máscara já aplicada.
+    a = _mask()
+    a[5:9, 3:12] = 255
+    good = stream.pack_full(1, 1, 0, a, (210.0, 297.0))
+    canvas, _ = _canvas_from(good)
+    before = canvas.mask.copy()
+    flipped = bytearray(good)
+    flipped[-1] ^= 0xFF
+    for bad in (good[:-3], bytes(flipped)):
+        with pytest.raises(ProtocolError):
+            for rec in stream.iter_records(io.BytesIO(bad).read):
+                canvas.apply(rec)
+        assert np.array_equal(canvas.mask, before)
