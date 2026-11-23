@@ -202,15 +202,16 @@ def test_main_combines_ink_vote_gain_and_rotation(monkeypatch):
     assert kwargs["rotation"] == 180
 
 
-def test_sketch_profile_keeps_the_legacy_vote_and_drops_ruling_removal():
+def test_sketch_profile_keeps_the_legacy_vote_with_page_model():
     """Esboço/lápis: campos de voto idênticos ao legado (fidelidade do
-    grafite fino), com os mecanismos de produção ligados e a remoção de
-    pauta desligada (PR #56: ela pode comer lápis sobre a linha)."""
+    grafite fino), com o PageModel ligado e a razão de novidade mais
+    baixa (0,20 — o contraste do grafite fino é menor que o da caneta)."""
     cfg = InkConfig.sketch()
     legacy = InkConfig()
     for field in ("vote_hit", "vote_score", "vote_score_strong", "seen_threshold"):
         assert getattr(cfg, field) == getattr(legacy, field)
-    assert cfg.ruling_removal is False
+    assert cfg.page_model is True
+    assert cfg.page_model_novel_ratio == 0.20
     # Sem hysteresis: o portão de âncora mata traço de lápis isolado
     # (Devin Review PR #122) — ver teste de acumulador abaixo.
     assert cfg.hysteresis is False
@@ -235,7 +236,7 @@ def test_technical_profile_uses_the_measured_092_vote_level():
     cfg = InkConfig.technical()
     shift = TECHNICAL_VOTE_LEVEL - LEGACY_VOTE_LEVEL
     assert cfg.vote_score_strong == pytest.approx(1.9 + 3 * shift)
-    assert cfg.ruling_removal is True
+    assert cfg.page_model is True
     assert cfg.hysteresis is True
     assert cfg.motion_veto is True
     assert cfg.pass_interval_s == PRODUCTION_PASS_INTERVAL_S
@@ -271,15 +272,14 @@ def test_main_preset_rejects_conflicting_flags(monkeypatch):
         assert error.value.code == 2
 
 
-def test_production_preset_keeps_paper_and_border_guards():
-    # page_model nao substitui as guardas: paper_ok segura a janela
-    # pre-sementeira e a remocao sob oclusor nao mascarado; o inset
-    # automatico (None -> resolve_border_guard_px) e a unica exclusao
-    # de borda nao-papel sem mascara de cobertura. Default do campo e
-    # 0 (InkConfig() e a pilha legada), entao o preset precisa do None
-    # explicito.
+def test_production_preset_keeps_page_model_and_border_guard():
+    # O PageModel subsumiu as guardas de papel e de pauta: ele e a
+    # unica referencia de pagina limpa. O inset automatico (None ->
+    # resolve_border_guard_px) PERMANECE — e a unica exclusao de
+    # borda nao-papel sem mascara de cobertura. Default do campo e
+    # 0 (InkConfig() e a pilha legada), entao o preset precisa do
+    # None explicito.
     cfg = InkConfig.production()
     assert cfg.page_model is True
-    assert cfg.ruling_removal is False
-    assert cfg.paper_guard is True
+    assert cfg.page_model_novel_ratio == 0.30
     assert cfg.border_guard_px is None

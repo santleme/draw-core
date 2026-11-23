@@ -1,6 +1,5 @@
 """Preset de producao do motor de tinta (o que as flags Tier A/B liam do ambiente)."""
 
-import dataclasses
 from dataclasses import dataclass
 
 # Nivel de voto que reproduz o legado: a media das 3 passadas que fecha a
@@ -73,11 +72,6 @@ class InkConfig:
     vote_hit: float = 0.5
     vote_score: float = 1.4
     vote_score_strong: float = 1.9
-    # Remocao de pauta por programacao dinamica no mapa de probabilidade
-    # (draw.ink.ruling), antes do registro e do voto. Opt-in: o default
-    # fica desligado ate a regua (lab/bench_ink.py) e o uso ao vivo
-    # provarem o ganho.
-    ruling_removal: bool = False
     # Histerese espaco-temporal (draw.ink.accumulator): poeira isolada nao
     # confirma nem aparece. Escala: media da janela de votos (0-1).
     #  - confirmacao: um pixel que a regra de voto confirmaria so entra se a
@@ -134,18 +128,16 @@ class InkConfig:
     # voto: 0 desliga (legado); None deriva do tamanho retificado em
     # grades de pagina inteira (>= 200 px).
     border_guard_px: int | None = 0
-    # Guarda fotometrica de oclusao (issue #129): a regiao que nao
-    # parece papel exposto (mao, braco, caneta, sombra) fica congelada —
-    # sem remocao de tinta confirmada e sem voto novo. Duas testemunhas
-    # independentes: draw.ink.occlusion (PaperExposureGuard, veto de
-    # adicao e testemunha da remocao) e draw.ink.paper_evidence
-    # (referencia de papel que alimenta p.paper_ok e o PageModel).
-    # Independente do MediaPipe. Incerteza congela.
-    paper_guard: bool = True
-    # Hold de oclusor do PageModel (draw.ink.page_model): o pixel
-    # semeado que sai de oclusao segue vetado por esta quantidade de
-    # passadas — queda curta de deteccao nao libera a regiao (o hold
-    # da guarda fotometrica mora na PaperExposureGuard, nao aqui).
+    # Retencao da guarda fotometrica do PageModel (pm.exposed): a regiao
+    # semeada que deixa de parecer papel exposto (mao, braco, caneta,
+    # sombra — com ou sem a mascara do MediaPipe) fica congelada e
+    # continua por occlusion_hold_passes passadas depois que a evidencia
+    # some — uma queda curta de deteccao nao pode liberar a regiao cedo.
+    # Alimenta pm.exposed(hold_passes=) e o teto de re-arme da janela
+    # pos-saida. O pixel ainda SEM referencia tem retencao propria
+    # (unseeded_hold_passes), e o veto/testemunha fotometrico de tiles
+    # mora na PaperExposureGuard (draw.ink.occlusion), permanente como o
+    # modelo — nao ha flag para desligar.
     occlusion_hold_passes: int = 3
     # Hold de pixel sem referencia negado pela guarda
     # (PageModel.covered_unseeded): fisicamente a vista mas
@@ -160,10 +152,15 @@ class InkConfig:
     # passada viu limpos. Pixels ainda sem referencia nao entregam
     # evidencia (regiao pendente) e evidencia que nao e conteudo novo
     # contra a referencia e suprimida — pauta impressa, desenho antigo
-    # e sombra de vinco deixam de parecer tinta sem depender da regra
-    # de pauta (#132) nem de o modelo ver a mao (#129). Ligado no
-    # preset de producao; InkConfig() puro (legado) segue sem ele.
+    # e sombra de vinco deixam de parecer tinta sem depender de regra
+    # de pauta nem de o modelo ver a mao (#129). Ligado no preset de
+    # producao; InkConfig() puro (legado) segue sem ele.
     page_model: bool = False
+    # Razao de Weber do predicado de "conteudo novo" do PageModel
+    # (page_model._NOVEL_RATIO): (ref - I) / ref. 0,30 e o calibrado na
+    # folha escrita; o perfil sketch baixa para 0,20 porque traco de
+    # lapis fraco tem contraste menor que o da caneta.
+    page_model_novel_ratio: float = 0.30
 
     def __post_init__(self):
         if not 0.0 < self.t_low < self.t_high <= 1.0:
@@ -177,6 +174,11 @@ class InkConfig:
             raise ValueError("motion_veto_px deve ser > 0")
         if not 0 <= self.occlusion_hold_passes <= 10:
             raise ValueError("occlusion_hold_passes fora de [0, 10]")
+        if not 0.0 < self.page_model_novel_ratio < 1.0:
+            raise ValueError(
+                f"page_model_novel_ratio deve estar em (0, 1): "
+                f"{self.page_model_novel_ratio!r}"
+            )
         if not 0 <= self.unseeded_hold_passes <= 10:
             raise ValueError("unseeded_hold_passes fora de [0, 10]")
         if self.pass_interval_s is not None and not 0.0 < self.pass_interval_s <= 5.0:
@@ -246,23 +248,20 @@ class InkConfig:
 
         E o que `PipelineConfig()` usa; `InkConfig()` continua sendo o
         legado (paridade byte a byte com os campos desligados). O
-        PageModel subsumiu o removedor de pauta no caminho da
-        evidencia — a referencia da propria pagina suprime a linha
-        impressa, entao `ruling_removal` vai desligado aqui (o perfil
-        `technical` o religa ate o modulo morrer). `paper_guard` e
-        `border_guard_px` PERMANECEM: nao sao redundantes. A guarda
-        fotometrica e a unica rejeicao de oclusao antes da referencia
-        existir (sem ref o PM nao tem com que comparar) e, pos-
-        sementeira, congela via `paper_ok`/`pm.exposed` a regiao que a
-        mascara de mao perdeu — sem ela, um oclusor escuro com prob
-        baixa apaga traco confirmado por voto de remocao (limite
+        PageModel subsumiu o removedor de pauta e a guarda de papel do
+        caminho da evidencia: a referencia da propria pagina suprime a
+        linha impressa, e `pm.exposed` — a guarda fotometrica agora
+        permanente e desacoplada de flag — congela a regiao que a
+        mascara de mao perdeu (sem ela, um oclusor escuro com prob
+        baixa apagaria traco confirmado por voto de remocao; limite
         documentado: oclusores mais finos que a janela de 32 px seguem
-        invisiveis para ela). O inset automatico da borda e a unica
-        exclusao de pixels nao-papel quando o detector nao entrega
-        mascara de cobertura: sem ele, uma faixa de mesa escura mais
-        escura que a referencia confirma como linha de margem. Risco
-        medido que segue: o voto 0,85 afina o traco (-27% a -48%,
-        PR #53) e so funciona com `ink_auto_gain`.
+        invisiveis para ela). `border_guard_px` PERMANECE: o inset
+        automatico da borda e a unica exclusao de pixels nao-papel
+        quando o detector nao entrega mascara de cobertura — sem ele,
+        uma faixa de mesa escura mais escura que a referencia confirma
+        como linha de margem. Risco medido que segue: o voto 0,85
+        afina o traco (-27% a -48%, PR #53) e so funciona com
+        `ink_auto_gain`.
         """
         return cls.strict_vote(
             vote_level,
@@ -270,7 +269,6 @@ class InkConfig:
             motion_veto=True,
             pass_interval_s=pass_interval_s,
             page_model=True,
-            ruling_removal=False,
             border_guard_px=None,
         )
 
@@ -285,20 +283,23 @@ class InkConfig:
         t_high (0,90) ou contato com tinta confirmada, e um traço de
         lápis isolado a ~0,75 por três passadas passa o voto legado
         (2,25 >= 1,9) mas morre sem âncora (Devin Review PR #122).
-        ruling_removal desligado: o removedor pode comer lápis
-        deitado sobre a linha impressa (PR #56, recall do braço 8,6%).
-        post_exit_full_window: o atalho de 1 passada pos-saida assume
-        uma leitura com a mao presente; traco so revelado depois da
-        saida precisa da janela inteira (Devin Review PR #122).
+        PageModel ligado com razao de novidade mais baixa (0,20): o
+        contraste do grafite fino e menor que o da caneta — na 0,30 da
+        folha escrita o traco de lapis leria como sombra e seria
+        suprimido. post_exit_full_window: o atalho de 1 passada
+        pos-saida assume uma leitura com a mao presente; traco so
+        revelado depois da saida precisa da janela inteira (Devin
+        Review PR #122).
         """
         return cls.strict_vote(
             LEGACY_VOTE_LEVEL,
-            ruling_removal=False,
             hysteresis=False,
             motion_veto=True,
             pass_interval_s=pass_interval_s,
             post_exit_full_window=True,
             border_guard_px=None,
+            page_model=True,
+            page_model_novel_ratio=0.20,
         )
 
     @classmethod
@@ -307,19 +308,14 @@ class InkConfig:
         *,
         vote_level=TECHNICAL_VOTE_LEVEL,
         pass_interval_s=PRODUCTION_PASS_INTERVAL_S,
-        ruling_removal=True,
     ):
         """Perfil técnico/CAD: vetores mais limpos para export DXF.
 
-        Voto mais estrito (0,92 medido: escrita 109%, pauta 48% — quase
-        zera a pauta residual); o traço mais fino é desejado em linhas
-        de construção. `ruling_removal` soma o removedor de pauta ao
-        preset de producao ate o modulo ser descontinuado.
+        O preset de producao com o voto mais estrito (0,92 medido:
+        escrita 109%, pauta 48% — quase zera a pauta residual); o
+        traço mais fino é desejado em linhas de construção.
         """
-        return dataclasses.replace(
-            cls.production(
-                vote_level=vote_level,
-                pass_interval_s=pass_interval_s,
-            ),
-            ruling_removal=ruling_removal,
+        return cls.production(
+            vote_level=vote_level,
+            pass_interval_s=pass_interval_s,
         )

@@ -283,9 +283,19 @@ def test_run_new_pins_legacy_tier_a_config(monkeypatch, tmp_path):
     class _FakeWorker:
         error = None
 
-        def __init__(self, _pc, _hm, *, clock=None, config=None, ink_divnorm=False):
+        def __init__(
+            self,
+            _pc,
+            _hm,
+            *,
+            clock=None,
+            config=None,
+            ink_divnorm=False,
+            exposure_guard=True,
+        ):
             seen["worker_config"] = config
             seen["worker_ink_divnorm"] = ink_divnorm
+            seen["worker_exposure_guard"] = exposure_guard
 
         def pump(self):
             return False
@@ -322,11 +332,10 @@ def test_run_new_pins_legacy_tier_a_config(monkeypatch, tmp_path):
         hand_model=None,
         verify=None,
     )
-    expected = PipelineConfig(
-        ink=InkConfig(paper_guard=False), ink_auto_gain=False, detect_wake=False
-    )
+    expected = PipelineConfig(ink=InkConfig(), ink_auto_gain=False, detect_wake=False)
     assert seen["pipeline_config"] == expected
     assert seen["worker_config"] == expected.ink
+    assert seen["worker_exposure_guard"] is False
 
 
 def test_parity_frame_time_matches_legacy_reciprocal_rounding():

@@ -260,8 +260,8 @@ def test_cli_default_is_production_and_flag_overrides(monkeypatch):
 
 def test_default_is_the_full_live_stack(monkeypatch):
     # A pilha do teste de mesa: ganho, PageModel, histerese, portao e
-    # cadencia — pauta e suprimida pelo modelo persistente; papel e
-    # borda seguem guardados porque o PageModel nao os subsumiu.
+    # cadencia — pauta e suprimida pelo modelo persistente e a borda
+    # segue guardada porque o PageModel nao a subsumiu.
     seen = []
     monkeypatch.setattr(app_module, "run", lambda **kw: seen.append(kw))
     monkeypatch.setattr(sys, "argv", ["draw"])
@@ -270,5 +270,5 @@ def test_default_is_the_full_live_stack(monkeypatch):
     ink = config.ink
     assert config.ink_auto_gain
     assert ink.page_model and ink.hysteresis and ink.motion_veto
-    assert not ink.ruling_removal and ink.paper_guard
+    assert ink.border_guard_px is None
     assert ink.pass_interval_s == 0.15

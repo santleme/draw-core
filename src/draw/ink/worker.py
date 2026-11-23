@@ -17,9 +17,7 @@ from . import (
     motion,
     occlusion,
     page_model,
-    paper_evidence,
     registration,
-    ruling,
     votes,
 )
 from . import anchor as anchor_mod
@@ -1206,7 +1204,6 @@ class _Pass:
     coverage_page: object = None
     coverage_anchor: object = None
     prob: object = None
-    paper_ok_page: object = None
     exposure: object = None
     exposure_guard: object = None
     exposure_confirmed_ink: object = None
@@ -1260,7 +1257,6 @@ class _Pass:
     confirmed_ink: object = None
     pm_baseline_ink: object = None
     next_baseline_ink: object = None
-    paper_ok: object = None
     paper_exposed: object = None
     reg_coverage: object = None
     coverage_matches_last_reg: bool = False
@@ -1338,6 +1334,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         history=_WORKER_HISTORY,
         config=None,
         ink_divnorm=False,
+        exposure_guard=True,
     ):
         self._page_clean = page_clean
         self._config = config if config is not None else InkConfig()
@@ -1347,9 +1344,10 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         # porque a passada tem folga de cadência; o laço principal
         # não paga o blur de página inteira (~42 ms/submit, #101).
         self._ink_divnorm = bool(ink_divnorm)
-        # Filtro de pauta (InkConfig.ruling_removal, opt-in): modelo em cache
-        # por folha; zerado quando a geracao vira (outra folha, outro quad).
-        self._ruling = ruling.RulingFilter() if self._config.ruling_removal else None
+        # Guarda fotometrica permanente em producao; o replay de
+        # paridade contra o laco legado (lab/parity_e2e) a abstém na
+        # construcao — o laco validado nunca teve a guarda.
+        self._exposure_guard = bool(exposure_guard)
         # Veto por movimento residual (InkConfig.motion_veto, opt-in):
         # ver draw.ink.motion.
         self._motion = (
@@ -1362,7 +1360,6 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         self._motion_corrections_total = 0
         self._motion_fail_open_total = 0
         self._motion_unregistered_total = 0
-        self._ruling_generation = None
         # Modelo persistente da pagina limpa (InkConfig.page_model,
         # opt-in): mantido por epoca (canvas_epoch, pm_reset_seq) e
         # propriedade exclusiva da thread trabalhadora — ver draw.ink.page_model.
@@ -1465,7 +1462,6 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         # Degrau entre quads consecutivos (a entrada de cadencia
         # geometrica do follow e do portao de remocao).
         self._previous_corners = None
-        self._paper_ref = None
         self._spent_confirm_pass = False
         self._accumulator = accumulator.LayeredInkAccumulator(
             threshold=self._config.seen_threshold, config=self._config
@@ -1568,7 +1564,6 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 self._pm_rezero_seeding = False
             self._guard_memo.clear()
             self._previous_corners = None
-            self._paper_ref = None
             if preserve_identity:
                 if self._identity_reference is None:
                     # MOVER (nao copiar) o desenho confirmado para a
@@ -2681,25 +2676,6 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             p.prob = ink_prob(p.warped)
         else:
             p.prob = (self._page_clean.ink_mask(p.warped) > 0).astype(np.float32)
-        if self._config.paper_guard and p.warped.dtype == np.uint8:
-            # Guarda fotometrica (issue #129): so papel exposto
-            # pode apagar ou votar; mao/sombra/caneta congelam,
-            # com ou sem a deteccao do MediaPipe. So imagem
-            # fotometrica (uint8): mapa float nao e foto.
-            reference = paper_evidence.paper_reference(p.warped, p.visible)
-            if reference is not None:
-                self._paper_ref = reference
-            # Sem NENHUMA referencia de papel (imagem preta desde o
-            # inicio da geracao) nao ha o que comparar: a guarda se
-            # abstem como antes. Com referencia previa, incerteza
-            # (reference None) congela a pagina inteira.
-            if self._paper_ref is not None:
-                p.paper_ok_page = paper_evidence.paper_exposed(p.warped, reference)
-        if self._ruling is not None:
-            if p.generation != self._ruling_generation:
-                self._ruling.reset()
-                self._ruling_generation = p.generation
-            p.prob = self._ruling.apply(p.prob, p.visible)
         # O suporte de preenchimento conta a evidência no nível que
         # o voto confirma (vote_hit), não num piso fixo: um bloco
         # sustentado em [vote_hit, 0,7) confirmaria no voto mas
@@ -2734,7 +2710,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 ink_support_threshold=self._config.vote_hit,
                 confirmed_ink=confirmed_ink,
             )
-            if self._config.paper_guard
+            if self._exposure_guard and p.exposure_guard is not None
             else None
         )
         # Cobertura de folha (cobertura de folha do loop) viaja em
@@ -3631,46 +3607,15 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             )
 
     def _pass_paper_and_page_model(self, p):
-        """Registro da guarda de papel e PageModel, fora do lock."""
-        paper_ok = p.paper_ok_page
+        """Guarda fotometrica (PaperExposureGuard) e PageModel, fora do lock."""
         registration_used = p.last_reg
-        if (
-            paper_ok is not None
-            and registration_used is not None
-            and registration_used[0] is not None
-            and p.used_registered_prob
-        ):
-            # Mesma transformacao da probabilidade; so o que sobrevive
-            # inteiro ao resample (== 1) conta como papel.
-            paper_ok = (
-                registration._register_ink_probability(
-                    paper_ok.astype(np.float32),
-                    registration_used[0],
-                    registration_used[1],
-                    None,
-                )[0]
-                > 0.999
-            )
-            if p.motion_decision == "correct":
-                # A evidencia de papel segue o mesmo modelo afim da
-                # probabilidade e da visibilidade.
-                paper_ok = (
-                    p.motion_fix.warp_back(paper_ok.astype(np.uint8), nearest=True) > 0
-                )
-        p.paper_ok = paper_ok
-        # Sem a guarda o comportamento é o legado: a evidência
-        # de papel exposto não rege a remoção — mas também não há
-        # avaliação fotométrica, então o opt-out entrega None (sem
-        # avaliação), não True: com True o acumulador lia "avaliação
-        # aprovada" e um streak de remoção armado drenava sem
-        # testemunha nem prova de papel (Devin Review do PR #144).
-        # Guarda ligada sem avaliação na passada (imagem fora do
-        # contrato fotométrico) falha fechada para a remoção: nada
-        # prova papel, a ausência não pode ser testemunhada —
-        # incerteza congela.
-        paper_exposed = None
-        if self._config.paper_guard:
-            paper_exposed = False
+        # A guarda e permanente: sem avaliacao na passada (imagem
+        # fora do contrato fotometrico) falha fechada para a
+        # remocao — nada prova papel, a ausencia nao pode ser
+        # testemunhada, incerteza congela. Desligada na construcao
+        # (replay de paridade) o acumulador volta a abstencao
+        # legada: None deixa a ausencia contar sem prova de papel.
+        paper_exposed = None if not self._exposure_guard else False
         physical_visible = p.visible
         if p.exposure is not None:
             # O par de registro é o da passada que VOTA
@@ -3699,16 +3644,6 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 p.visible = (
                     photo_visible if p.visible is None else p.visible & photo_visible
                 )
-        if p.paper_ok is not None:
-            # As duas testemunhas de papel votam juntas na remocao:
-            # so conta onde a guarda fotometrica E a referencia de
-            # papel provam exposicao — fail-closed. Quem se abstem
-            # (paper_ok None, sem referencia ainda, ou a guarda
-            # desligada no modo legado) deixa o outro falar sozinho;
-            # quem nega papel congela a regiao.
-            paper_exposed = (
-                p.paper_ok if paper_exposed is None else paper_exposed & p.paper_ok
-            )
         p.paper_exposed = paper_exposed
         last_reg = registration_used
         if self._config.page_model and p.pass_voted:
@@ -3727,7 +3662,10 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 or self._page_model is None
                 or self._page_model.shape != p.prob.shape
             ):
-                self._page_model = page_model.PageModel(p.prob.shape)
+                self._page_model = page_model.PageModel(
+                    p.prob.shape,
+                    novel_ratio=self._config.page_model_novel_ratio,
+                )
                 self._pm_epoch = p.pm_epoch
                 p.next_baseline_ink = np.zeros(p.prob.shape, dtype=bool)
             elif (
@@ -3898,7 +3836,12 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             # nao viu e que ainda nao tem referencia conta para a
             # prontidao com prazo curto (Devin Review do PR #144).
             obs_domain = obs_visible
-            if self._config.paper_guard and p.warped.dtype == np.uint8:
+            if p.warped.dtype == np.uint8:
+                # Guarda fotometrica do PageModel (issue #129), fixa
+                # quando o modelo esta ativo: so papel exposto pode
+                # apagar ou votar; mao/sombra/caneta congelam, com ou
+                # sem a deteccao do MediaPipe. So imagem fotometrica
+                # (uint8): mapa float nao e foto.
                 exposed_mask = pm.exposed(
                     gray,
                     bgr=reg_bgr,
@@ -3921,16 +3864,15 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     if obs_visible is None
                     else (obs_visible & exposed_mask)
                 )
-            if p.paper_ok is not None:
-                obs_visible = (
-                    p.paper_ok if obs_visible is None else (obs_visible & p.paper_ok)
-                )
             if p.pm_rezero and (obs_visible is None or bool(np.any(obs_visible))):
                 # Papel utilizavel nesta passada: o modelo recomeca aqui e
                 # o canvas e zerado no commit. Sem papel (sombra, mao,
                 # guarda rejeitando tudo) o pedido segue pendente e o
                 # canvas atual fica intacto.
-                pm = page_model.PageModel(p.prob.shape)
+                pm = page_model.PageModel(
+                    p.prob.shape,
+                    novel_ratio=self._config.page_model_novel_ratio,
+                )
                 self._page_model = pm
                 p.pm_epoch = (p.pm_epoch[0] + 1, p.pm_epoch[1] + 1)
                 self._pm_epoch = p.pm_epoch

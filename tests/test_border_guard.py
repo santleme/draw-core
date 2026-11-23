@@ -64,10 +64,27 @@ class _Clock:
         return self.now
 
 
-def _drive_with_worker(script, frame, *, pipeline_config, ink_config, steps=18):
+class _MarginInkPageClean:
+    """Stub: tinta so na faixa fina da margem de papel limpo.
+
+    A faixa e fotometricamente papel — a guarda de exposicao
+    permanente nao a ve como anomalia (e nao pode segura-la); so a
+    guarda de borda, geometrica, segura o voto ali."""
+
+    threshold = 0.7
+
+    def ink_prob(self, image):
+        prob = np.zeros(image.shape[:2], np.float32)
+        prob[:6, :] = 0.95
+        return prob
+
+
+def _drive_with_worker(
+    script, frame, *, pipeline_config, ink_config, steps=18, ink=None
+):
     clock = _Clock()
     worker = PageCleanWorker(
-        _DarkInkPageClean(),
+        ink if ink is not None else _DarkInkPageClean(),
         config=ink_config,
         clock=clock,
     )
@@ -164,7 +181,6 @@ def test_jitter_against_dark_desk_does_not_confirm_or_provisional_border_ink(
 
     ink_cfg = dataclasses.replace(
         InkConfig.production(),
-        paper_guard=False,
         page_model=False,
         border_guard_px=None,
     )
@@ -215,7 +231,6 @@ def test_empty_page_with_jitter_against_dark_desk_stays_empty():
 
     ink_cfg = dataclasses.replace(
         InkConfig.production(),
-        paper_guard=False,
         page_model=False,
         border_guard_px=None,
     )
@@ -242,15 +257,18 @@ def test_empty_page_with_jitter_against_dark_desk_stays_empty():
 
 
 def test_border_guard_disabled_discriminates_dark_border_jitter():
-    """Sem guarda (border_guard_px=0 e sem cobertura), o jitter contra
-    fundo escuro vaza para as margens — prova que o teste discrimina."""
+    """Sem a guarda de borda (border_guard_px=0 e sem cobertura), tinta
+    votada na faixa do inset vaza para as margens — prova que o teste
+    discrimina. A faixa e fotometricamente papel, entao a guarda de
+    exposicao permanente nao tem anomalia para vetar: o que segura a
+    margem e so o dominio geometrico da guarda de borda."""
     frame = np.full((720, 1280, 3), 20, np.uint8)
     frame[100:600, 200:560] = 215
     quad = np.array(
-        [[197, 97], [563, 97], [563, 603], [197, 603]],
+        [[200, 100], [560, 100], [560, 600], [200, 600]],
         dtype=np.float32,
     )
-    ink_cfg = InkConfig.strict_vote(0.85, border_guard_px=0, paper_guard=False)
+    ink_cfg = InkConfig.strict_vote(0.85, border_guard_px=0)
     pipe_cfg = PipelineConfig(
         coverage=False,
         ink_auto_gain=False,
@@ -261,6 +279,7 @@ def test_border_guard_disabled_discriminates_dark_border_jitter():
         frame,
         pipeline_config=pipe_cfg,
         ink_config=ink_cfg,
+        ink=_MarginInkPageClean(),
     )
     assert loop.clean_mask is not None
     assert int(np.count_nonzero(loop.clean_mask[:5, :])) > 0
@@ -276,7 +295,6 @@ def test_empty_coverage_mask_still_gates_votes():
     empty_cov = np.zeros((720, 1280), np.uint8)
     ink_cfg = dataclasses.replace(
         InkConfig.production(),
-        paper_guard=False,
         page_model=False,
         border_guard_px=None,
     )
@@ -301,7 +319,6 @@ def test_empty_coverage_mask_still_gates_votes():
     [
         dataclasses.replace(
             InkConfig.production(),
-            paper_guard=False,
             page_model=False,
             border_guard_px=None,
         ),
@@ -357,7 +374,6 @@ def test_near_edge_stroke_survives_persistent_inward_quad_shift():
 
     ink_cfg = dataclasses.replace(
         InkConfig.production(),
-        paper_guard=False,
         page_model=False,
         border_guard_px=None,
     )
@@ -413,9 +429,7 @@ def test_confirmed_stroke_survives_reanchor_that_widens_guard():
 
     def run_case(border_guard_px):
         clock = _Clock()
-        cfg = InkConfig.strict_vote(
-            0.85, border_guard_px=border_guard_px, paper_guard=False
-        )
+        cfg = InkConfig.strict_vote(0.85, border_guard_px=border_guard_px)
         worker = PageCleanWorker(_DarkInkPageClean(), config=cfg, clock=clock)
         for _ in range(5):
             clock.now += 1.1
@@ -458,17 +472,18 @@ def test_erased_interior_stroke_removed_without_visibility_mask():
     """Sem mascara de visibilidade (deteccao classica sem modelo de
     mao), a guarda delimita o dominio de remocao: o traco interior
     apagado sai do canvas enquanto a testemunha permanece. O controle
-    (guarda desligada e sem mascara) mantem a abstencao legada."""
+    mantem a abstencao: com a regiao apagada ainda coberta, a guarda
+    de exposicao permanente nao prova papel ali e a remocao congela —
+    nao e mais a mascara de visibilidade que segura o traco, e a
+    testemunha fotometrica."""
     quad = np.array([[200, 100], [560, 100], [560, 600], [200, 600]], dtype=np.float32)
     img = np.full((1200, 850, 3), 215, np.uint8)
     img[300:700, 300:500] = 25  # testemunha no miolo (permanece)
     img[200:500, 100:110] = 25  # traco interior, apagado depois
 
-    def run_case(border_guard_px):
+    def run_case(occlude_erased):
         clock = _Clock()
-        cfg = InkConfig.strict_vote(
-            0.85, border_guard_px=border_guard_px, paper_guard=False
-        )
+        cfg = InkConfig.strict_vote(0.85, border_guard_px=None)
         worker = PageCleanWorker(_DarkInkPageClean(), config=cfg, clock=clock)
         for _ in range(5):
             clock.now += 1.1
@@ -480,10 +495,20 @@ def test_erased_interior_stroke_removed_without_visibility_mask():
 
         img_erased = img.copy()
         img_erased[200:500, 100:110] = 215
+        visible = None
+        if occlude_erased:
+            # A faixa continua coberta (sem amostra fotometrica):
+            # nada prova papel onde o traco sumiu. A mascara e na
+            # grade da CAMERA: o traco nas cols 100:110 da pagina
+            # corresponde a ~cols 242:247 do quad.
+            visible = np.ones(img.shape[:2], dtype=bool)
+            visible[:, 230:275] = False
         for _ in range(10):
             clock.now += 1.1
             worker.submit(
-                contracts.WarpedPage(img_erased, 0, quad, captured_at=clock.now)
+                contracts.WarpedPage(
+                    img_erased, 0, quad, visible, captured_at=clock.now
+                )
             )
             worker.pump()
         snap_after = worker.poll_display(0, 0)
@@ -491,8 +516,8 @@ def test_erased_interior_stroke_removed_without_visibility_mask():
         assert int(np.count_nonzero(snap_after.confirmed[300:700, 300:500])) > 0
         return int(np.count_nonzero(snap_after.confirmed[200:500, 100:110]))
 
-    assert run_case(None) == 0
-    assert run_case(0) > 0
+    assert run_case(False) == 0
+    assert run_case(True) > 0
 
 
 def test_unsampled_edge_strip_does_not_count_as_erasure():
@@ -512,7 +537,7 @@ def test_unsampled_edge_strip_does_not_count_as_erasure():
     img[300:700, 300:500] = 25  # testemunha no miolo (permanece)
 
     clock = _Clock()
-    cfg = InkConfig.strict_vote(0.85, border_guard_px=None, paper_guard=False)
+    cfg = InkConfig.strict_vote(0.85, border_guard_px=None)
     worker = PageCleanWorker(_DarkInkPageClean(), config=cfg, clock=clock)
     for _ in range(5):
         clock.now += 1.1
@@ -558,9 +583,7 @@ def test_deadband_frozen_registration_does_not_erase_unsampled_edge():
     img[300:700, 300:500] = 25  # testemunha no miolo (permanece)
 
     clock = _Clock()
-    cfg = InkConfig.strict_vote(
-        0.85, border_guard_px=None, paper_guard=False, reg_deadband=True
-    )
+    cfg = InkConfig.strict_vote(0.85, border_guard_px=None, reg_deadband=True)
     worker = PageCleanWorker(_DarkInkPageClean(), config=cfg, clock=clock)
     for _ in range(5):
         clock.now += 1.1
@@ -639,11 +662,16 @@ def test_border_noise_does_not_reset_returning_page_identity():
     e preservado."""
     quad = np.array([[200, 100], [560, 100], [560, 600], [200, 600]], dtype=np.float32)
     img = np.full((1200, 850, 3), 215, np.uint8)
-    img[200:400, 200:320] = 25  # A1: reaparece na volta
+    # A1 fino (< 3 tiles): a guarda de exposicao permanente nao
+    # bloqueia tracos finos — e o que resta de evidencia para o
+    # reencontro resolver same_page. Um traco grosso seguiria
+    # vetado como anomalia nao adotada e a janela de adiamento
+    # fecharia antes da adocao (PR #144).
+    img[200:400, 200:240] = 25  # A1: reaparece na volta
     img[200:400, 400:440] = 25  # A2: nao reaparece na volta
 
     clock = _Clock()
-    cfg = InkConfig.strict_vote(0.85, border_guard_px=None, paper_guard=False)
+    cfg = InkConfig.strict_vote(0.85, border_guard_px=None)
     worker = PageCleanWorker(_DarkInkPageClean(), config=cfg, clock=clock)
     for _ in range(5):
         clock.now += 1.1
@@ -652,21 +680,31 @@ def test_border_noise_does_not_reset_returning_page_identity():
     gen = worker.new_generation(preserve_identity=True)
 
     img_return = np.full((1200, 850, 3), 215, np.uint8)
-    img_return[200:400, 200:320] = 25  # A1 reaparece
+    img_return[200:400, 200:240] = 25  # A1 reaparece
     img_return[:8, :] = 25  # ruido escuro nas 4 faixas de borda
     img_return[-8:, :] = 25
     img_return[:, :8] = 25
     img_return[:, -8:] = 25
+    # A regiao do traco que nao reaparece segue coberta na volta:
+    # sem prova fotometrica de papel a remocao abstem — e isso, nao
+    # o ruido de borda, e o que a contencao precisa segurar. A
+    # mascara e na grade da CAMERA: a faixa A2 (linhas 200:400,
+    # cols 400:440 da pagina) corresponde a ~linhas 183:267 e
+    # ~cols 369:386 do quad.
+    visible_return = np.ones(img_return.shape[:2], dtype=bool)
+    visible_return[165:290, 355:400] = False
     for _ in range(6):
         clock.now += 1.1
         worker.submit(
-            contracts.WarpedPage(img_return, gen, quad, captured_at=clock.now)
+            contracts.WarpedPage(
+                img_return, gen, quad, visible_return, captured_at=clock.now
+            )
         )
         worker.pump()
     snap = worker.poll(gen, 0)
     assert snap is not None
     assert int(np.count_nonzero(snap.confirmed[200:400, 400:440])) > 0
-    assert int(np.count_nonzero(snap.confirmed[200:400, 200:320])) > 0
+    assert int(np.count_nonzero(snap.confirmed[200:400, 200:240])) > 0
 
 
 def test_saved_ink_under_guard_does_not_time_out_page_recovery():
@@ -684,7 +722,7 @@ def test_saved_ink_under_guard_does_not_time_out_page_recovery():
     img[100:1100, 9:13] = 25  # traco rente a borda esquerda
 
     clock = _Clock()
-    cfg = InkConfig.strict_vote(0.85, border_guard_px=None, paper_guard=False)
+    cfg = InkConfig.strict_vote(0.85, border_guard_px=None)
     worker = PageCleanWorker(_DarkInkPageClean(), config=cfg, clock=clock)
     for _ in range(5):
         clock.now += 1.1
@@ -725,7 +763,7 @@ def test_occluded_replacement_sheet_does_not_keep_old_ink():
     img_old[100:1100, 9:13] = 25  # traco da folha velha (sob a guarda nova)
 
     clock = _Clock()
-    cfg = InkConfig.strict_vote(0.85, border_guard_px=None, paper_guard=False)
+    cfg = InkConfig.strict_vote(0.85, border_guard_px=None)
     worker = PageCleanWorker(_DarkInkPageClean(), config=cfg, clock=clock)
     for _ in range(5):
         clock.now += 1.1
@@ -789,9 +827,7 @@ def test_allclear_unsampled_strip_does_not_erase_saved_ink():
 
     def run_case(border_guard_px, img_return, quad_return):
         clock = _Clock()
-        cfg = InkConfig.strict_vote(
-            0.85, border_guard_px=border_guard_px, paper_guard=False
-        )
+        cfg = InkConfig.strict_vote(0.85, border_guard_px=border_guard_px)
         worker = PageCleanWorker(_DarkInkPageClean(), config=cfg, clock=clock)
         for _ in range(5):
             clock.now += 1.1
@@ -842,9 +878,7 @@ def test_disjoint_replacement_sheet_does_not_keep_old_ink():
 
     def run_case(border_guard_px, visible):
         clock = _Clock()
-        cfg = InkConfig.strict_vote(
-            0.85, border_guard_px=border_guard_px, paper_guard=False
-        )
+        cfg = InkConfig.strict_vote(0.85, border_guard_px=border_guard_px)
         worker = PageCleanWorker(_DarkInkPageClean(), config=cfg, clock=clock)
         for _ in range(5):
             clock.now += 1.1
@@ -902,9 +936,7 @@ def test_deferred_partial_overlap_does_not_mix_ink():
 
     def run_case(border_guard_px):
         clock = _Clock()
-        cfg = InkConfig.strict_vote(
-            0.85, border_guard_px=border_guard_px, paper_guard=False
-        )
+        cfg = InkConfig.strict_vote(0.85, border_guard_px=border_guard_px)
         worker = PageCleanWorker(_DarkInkPageClean(), config=cfg, clock=clock)
         for _ in range(5):
             clock.now += 1.1
@@ -982,9 +1014,7 @@ def test_blank_overlap_replacement_does_not_inherit_old_ink():
 
     def run_case(border_guard_px):
         clock = _Clock()
-        cfg = InkConfig.strict_vote(
-            0.85, border_guard_px=border_guard_px, paper_guard=False
-        )
+        cfg = InkConfig.strict_vote(0.85, border_guard_px=border_guard_px)
         worker = PageCleanWorker(_DarkInkPageClean(), config=cfg, clock=clock)
         for _ in range(5):
             clock.now += 1.1
@@ -1040,7 +1070,7 @@ def test_occluded_blank_patch_hold_keeps_reference_recoverable():
 
     def run_case(reveal_img):
         clock = _Clock()
-        cfg = InkConfig.strict_vote(0.85, border_guard_px=None, paper_guard=False)
+        cfg = InkConfig.strict_vote(0.85, border_guard_px=None)
         worker = PageCleanWorker(_DarkInkPageClean(), config=cfg, clock=clock)
         for _ in range(5):
             clock.now += 1.1
@@ -1092,8 +1122,8 @@ def test_occluded_blank_patch_hold_keeps_reference_recoverable():
     assert new_px > 0
 
 
-@pytest.mark.parametrize("paper_guard", [False, True])
-def test_held_recovery_does_not_publish_saved_ink(paper_guard):
+@pytest.mark.parametrize("page_model", [False, True])
+def test_held_recovery_does_not_publish_saved_ink(page_model):
     """Caso do review: durante o hold a tinta salva mora so na
     referencia — nenhuma versao publicada (poll/collect_ink) pode
     carrega-la para a folha substituta. Mesma folha revelada:
@@ -1116,9 +1146,19 @@ def test_held_recovery_does_not_publish_saved_ink(paper_guard):
 
     def run_case(reveal_img):
         clock = _Clock()
-        cfg = InkConfig.strict_vote(0.85, border_guard_px=None, paper_guard=paper_guard)
+        cfg = InkConfig.strict_vote(0.85, border_guard_px=None, page_model=page_model)
         worker = PageCleanWorker(_DarkInkPageClean(), config=cfg, clock=clock)
-        for _ in range(5):
+        # Com o PageModel a referencia semeia na folha limpa e os tracos
+        # entram como novidade depois; sem o modelo as passadas limpas
+        # sao inertes (nao ha pixel escuro para votar).
+        img_clean = np.full((1200, 850, 3), 215, np.uint8)
+        for _ in range(4):
+            clock.now += 1.1
+            worker.submit(
+                contracts.WarpedPage(img_clean, 0, quad_wide, captured_at=clock.now)
+            )
+            worker.pump()
+        for _ in range(8):
             clock.now += 1.1
             worker.submit(
                 contracts.WarpedPage(img, 0, quad_wide, captured_at=clock.now)
@@ -1178,17 +1218,19 @@ def test_held_recovery_does_not_publish_saved_ink(paper_guard):
     assert old_px > 0
     old_px, new_px, marks = run_case(img_marked)
     assert old_px == 0
-    if paper_guard:
-        # A folha marcada falha a leitura de papel exposto: a guarda
-        # bloqueia a região como oclusor nas primeiras passadas — a
-        # tinta nova NÃO confirma de cara. O modelo lendo tinta forte
-        # de forma persistente faz a recuperação por preenchimento
-        # adotar o bloco (draw.ink.occlusion, PR #144): confirmar ela
-        # confirma, mas só depois do veto fotométrico — ao contrário
-        # do caminho sem guarda, que vota imediatamente.
-        assert max(marks[:4]) == 0
-        assert new_px > 0
+    if page_model:
+        # A folha marcada nao e papel exposto para o PageModel: a
+        # tinta nova congela sob a guarda fotometrica em vez de
+        # confirmar.
+        assert new_px == 0
     else:
+        # Sem o PageModel resta a guarda de tiles, permanente: a
+        # folha marcada falha a leitura de papel exposto nas
+        # primeiras passadas — a tinta nova NAO confirma de cara.
+        # O modelo lendo tinta forte de forma persistente faz a
+        # recuperacao por preenchimento adotar o bloco
+        # (draw.ink.occlusion, PR #144): confirma depois do veto.
+        assert max(marks[:4]) == 0
         assert new_px > 0
 
 
@@ -1209,7 +1251,7 @@ def test_second_tracking_drop_preserves_pending_reference():
     all_clear = np.ones(img.shape[:2], bool)
 
     clock = _Clock()
-    cfg = InkConfig.strict_vote(0.85, border_guard_px=None, paper_guard=False)
+    cfg = InkConfig.strict_vote(0.85, border_guard_px=None)
     worker = PageCleanWorker(_DarkInkPageClean(), config=cfg, clock=clock)
     for _ in range(5):
         clock.now += 1.1
@@ -1265,7 +1307,7 @@ def test_blank_partial_overlap_without_masks_defers_recovery():
     img_blank = np.full((1200, 850, 3), 215, np.uint8)
 
     clock = _Clock()
-    cfg = InkConfig.strict_vote(0.85, border_guard_px=0, paper_guard=False)
+    cfg = InkConfig.strict_vote(0.85, border_guard_px=0)
     worker = PageCleanWorker(_DarkInkPageClean(), config=cfg, clock=clock)
     for _ in range(5):
         clock.now += 1.1
@@ -1318,12 +1360,19 @@ def test_cropped_provisional_clears_with_visibility_mask():
     img[100:1100, 300:340] = 25  # provisorio interior (sera ocluido)
 
     clock = _Clock()
-    cfg = InkConfig.strict_vote(0.85, border_guard_px=None, paper_guard=False)
+    cfg = InkConfig.strict_vote(0.85, border_guard_px=None)
     worker = PageCleanWorker(_DarkInkPageClean(), config=cfg, clock=clock)
-    for _ in range(2):
+    # A guarda de exposicao permanente segura o provisorio interior
+    # ate adotar o bloco (~_FILL_RECOVERY_PASSES de suporte): a
+    # janela entre adocao e confirmacao e curta, entao a fase corta
+    # assim que a provisoria aparece.
+    for _ in range(10):
         clock.now += 1.1
         worker.submit(contracts.WarpedPage(img, 0, quad_wide, captured_at=clock.now))
         worker.pump()
+        snap = worker.poll_display(0, 0)
+        if snap is not None and np.count_nonzero(snap.provisional[100:1100, 300:340]):
+            break
 
     hand = np.ones(img.shape[:2], bool)
     hand[:, 300:400] = False  # mao cobre o traco interior na camera
@@ -1345,7 +1394,6 @@ def test_stale_provisional_ink_clears_when_reanchor_widens_guard():
     clock = _Clock()
     cfg = dataclasses.replace(
         InkConfig.production(),
-        paper_guard=False,
         page_model=False,
         border_guard_px=None,
     )
@@ -1395,15 +1443,22 @@ def test_corrupt_quad_guard_abstains_instead_of_wiping_provisional():
     img[100:1100, 300:340] = 25
 
     clock = _Clock()
-    cfg = InkConfig.strict_vote(0.85, border_guard_px=None, paper_guard=False)
+    cfg = InkConfig.strict_vote(0.85, border_guard_px=None)
     worker = PageCleanWorker(_DarkInkPageClean(), config=cfg, clock=clock)
-    for _ in range(2):
+    # A guarda de exposicao permanente so libera o voto do traco
+    # depois de adotar o bloco (~_FILL_RECOVERY_PASSES de suporte):
+    # a provisoria existe entre a adocao e a confirmacao — a fase
+    # corta assim que ela aparece.
+    before = 0
+    for _ in range(10):
         clock.now += 1.1
         worker.submit(contracts.WarpedPage(img, 0, quad, captured_at=clock.now))
         worker.pump()
-    snap = worker.poll_display(0, 0)
-    assert snap is not None
-    before = int(np.count_nonzero(snap.provisional))
+        snap = worker.poll_display(0, 0)
+        assert snap is not None
+        before = int(np.count_nonzero(snap.provisional))
+        if before:
+            break
     assert before > 0
 
     clock.now += 1.1

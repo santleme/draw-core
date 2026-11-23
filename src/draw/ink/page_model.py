@@ -50,8 +50,6 @@ calibracao nas capturas reais esta registrada na constante.
 import cv2
 import numpy as np
 
-from . import paper_evidence
-
 # Bloco da grade de semeadura: a mesma ordem do 32 px medido na
 # guarda fotometrica (#129). Fino o bastante para a mao nao
 # contaminar a pagina inteira; grosso o bastante para a fracao por
@@ -99,6 +97,29 @@ _NOVEL_DELTA = 24.0
 # e o fundo de volta, e entre os dois e incerto e nao decide nada. Sem
 # isso um traco que perdeu contraste (reflexo) pareceria apagado.
 _RETURN_TOL = 8.0
+# Evidencia de deslocamento GLOBAL de iluminacao (lampada, nao oclusor):
+# uma mudanca de luz nao poupa regiao nenhuma — quase todas as celulas
+# referenciadas visiveis falham a razao B/R guardada de uma vez e as
+# falhas concordam numa unica razao nova. Abaixo disso e oclusao local,
+# mesmo que o oclusor domine a folha (ele sempre deixa testemunhas com
+# a razao antiga — e elas, nao a maioria, vetam a leitura "global").
+_SHIFT_FAIL_MIN = 0.9
+_SHIFT_WITNESS_MIN = 0.1
+_SHIFT_COHERENCE = 0.9
+
+# Constantes da guarda fotometrica da issue #129, inlinadas quando o
+# modulo dela morreu: `exposed` e `_estimate_gain` leem daqui. A
+# estatistica e o MAXIMO por janela de `block` px — traco de caneta
+# cobre poucos % da janela; mao, braco e sombra derrubam ate o pixel
+# mais claro dela.
+_SAMPLE_STRIDE = 8
+_MIN_SAMPLES = 64
+_MIN_RATIO = 0.78
+# Reducao previa por area (px por lado) antes do maximo por bloco.
+_REDUCE_PX = 4
+# Cor: pele tem B/R bem abaixo do papel (que e quase neutro). Tolera
+# desvio relativo do B/R do bloco contra a referencia.
+_CHROMA_TOL = 0.18
 
 
 def _block_fraction(mask, block, raw=False):
@@ -194,6 +215,7 @@ class PageModel:
         self._has_seeded = False
         self._all_seeded = False
         self._last_chroma_ok = True
+        self._last_chroma_shift = False
         self._last_visible = None
         # Ultima aparencia normalizada VISTA por pixel (NaN = nunca
         # visto): o que a mao cobriu na ultima passada guarda o tom
@@ -306,8 +328,11 @@ class PageModel:
             ready = _expand(streak >= self.confirm_obs, self.shape, self.block)
             seed_now = ready & visible & ~self._seeded
             has_seed_now = bool(np.any(seed_now))
-        gain, chroma_ok = self._estimate_gain(gray, bgr=bgr, visible=visible)
+        gain, chroma_ok, chroma_shift = self._estimate_gain(
+            gray, bgr=bgr, visible=visible
+        )
         self._last_chroma_ok = chroma_ok
+        self._last_chroma_shift = chroma_shift
         self._last_visible = visible
         norm_gray = gray if abs(gain - 1.0) <= 1e-4 else (gray / np.float32(gain))
         if visible.all():
@@ -385,12 +410,20 @@ class PageModel:
         *,
         bgr=None,
         visible=None,
-        chroma_tol=paper_evidence._CHROMA_TOL,
+        chroma_tol=_CHROMA_TOL,
     ):
-        """Estima (gain, chroma_valid) da iluminacao global contra _norm_ref."""
+        """Estima (gain, chroma_valid, global_shift) da iluminacao contra _norm_ref.
+
+        O veto de croma existe para oclusor LOCAL dominando a amostra —
+        so entao a estimativa de luminancia nao e confiavel. Quando a
+        reprovacao e global e coerente (mudanca de lampada), devolve
+        (gain, False, True): a luminancia segue utilizavel para o cutoff
+        de exposicao e para a normalizacao do `novel`. Oclusor local ou
+        evidencia mista devolve (1.0, False, False) — o veto classico.
+        """
         if not self._has_seeded:
-            return 1.0, True
-        stride = paper_evidence._SAMPLE_STRIDE
+            return 1.0, True, False
+        stride = _SAMPLE_STRIDE
         seeded_s = self._seeded[::stride, ::stride]
         ref_s = self._norm_ref[::stride, ::stride]
         gray_s = gray_f[::stride, ::stride]
@@ -400,24 +433,25 @@ class PageModel:
             seeded_vis_grid = seeded_s & visible[::stride, ::stride] & (ref_s > 1.0)
         seeded_total = int(np.count_nonzero(seeded_s))
         min_samples = min(
-            paper_evidence._MIN_SAMPLES,
+            _MIN_SAMPLES,
             max(8, seeded_total // 2),
         )
         if int(np.count_nonzero(seeded_vis_grid)) < min_samples:
-            return 1.0, True
+            return 1.0, True, False
         ref_cut = float(np.percentile(ref_s[seeded_vis_grid], 50))
         paper_keep = seeded_vis_grid & (ref_s >= ref_cut)
         if int(np.count_nonzero(paper_keep)) < max(4, min_samples // 2):
-            return 1.0, True
+            return 1.0, True, False
         ratios = gray_s[paper_keep] / ref_s[paper_keep]
         gain_p90 = float(np.percentile(ratios, 90))
         gray_p90 = float(np.percentile(gray_s[paper_keep], 90))
         if not (0.35 <= gain_p90 <= 2.0 and gray_p90 >= 60.0):
-            return 1.0, True
+            return 1.0, True, False
         plateau = (ratios >= 0.85 * gain_p90) & (ratios <= 1.15 * gain_p90)
         if int(np.count_nonzero(plateau)) < 0.25 * ratios.size:
-            return 1.0, True
+            return 1.0, True, False
         chroma_valid = True
+        global_shift = False
         if (
             self._has_chroma_ref
             and bgr is not None
@@ -439,9 +473,39 @@ class PageModel:
                 chroma_valid = (r_mean > 1.0) and (
                     abs(cur_ratio - ref_ratio) <= spread_g
                 )
+                if not chroma_valid:
+                    # Deslocamento global ou oclusor dominante? A
+                    # lampada nao poupa ninguem: quase todas as celulas
+                    # falham a razao guardada E concordam numa razao
+                    # nova so. Testemunha suficiente com a razao antiga
+                    # (_SHIFT_WITNESS_MIN) ou falha incoerente e
+                    # oclusao local — o veto fica.
+                    cur_c = b_s / np.maximum(r_s, 1.0)
+                    ref_c = b_ref_s / np.maximum(r_ref_s, 1.0)
+                    tol_c = chroma_tol * np.maximum(ref_c, 1e-3) + 1e-6
+                    cell_ok = (r_s > 1.0) & (np.abs(cur_c - ref_c) <= tol_c)
+                    tested_n = cell_ok.size
+                    witness_n = int(np.count_nonzero(cell_ok))
+                    if witness_n < max(4, _SHIFT_WITNESS_MIN * tested_n):
+                        sample_c = cur_c[~cell_ok]
+                    else:
+                        sample_c = cur_c
+                    if sample_c.size > 0:
+                        cand = (
+                            float(np.median(sample_c))
+                            if witness_n < max(4, _SHIFT_WITNESS_MIN * tested_n)
+                            else float(np.median(cur_c[cell_ok]))
+                        )
+                        cand_spread = chroma_tol * max(cand, 1e-3) + 1e-6
+                        coherent_n = int(
+                            np.count_nonzero(np.abs(sample_c - cand) <= cand_spread)
+                        )
+                        global_shift = coherent_n >= _SHIFT_COHERENCE * sample_c.size
+        if global_shift:
+            return gain_p90, False, True
         if not chroma_valid:
-            return 1.0, False
-        return gain_p90, True
+            return 1.0, False, False
+        return gain_p90, True, False
 
     def exposed(
         self,
@@ -449,8 +513,8 @@ class PageModel:
         bgr=None,
         *,
         visible=None,
-        min_ratio=paper_evidence._MIN_RATIO,
-        chroma_tol=paper_evidence._CHROMA_TOL,
+        min_ratio=_MIN_RATIO,
+        chroma_tol=_CHROMA_TOL,
         hold_passes=0,
     ):
         """Mascara bool HxW: True onde a regiao semeada parece papel exposto.
@@ -472,27 +536,55 @@ class PageModel:
             raise ValueError(
                 f"visible na grade {input_vis.shape}, modelo na {self.shape}"
             )
-        if not self._has_seeded:
-            self._recovering_px = 0
-            self._hold_mask.fill(False)
-            return np.ones(self.shape, dtype=bool)
         height, width = self.shape
-        step = paper_evidence._REDUCE_PX
+        step = _REDUCE_PX
         cells = max(1, self.block // step)
         kernel = np.ones((cells, cells), np.uint8)
-        ref_grid = np.where(
-            self._seeded[::step, ::step], self._norm_ref[::step, ::step], 0.0
-        )
         gray_grid = gray_f[::step, ::step]
-        ref_peak = cv2.dilate(ref_grid, kernel)
         gray_peak = cv2.dilate(gray_grid, kernel)
-        has_ref = ref_peak > 1.0
-        gain, chroma_ok = self._estimate_gain(
-            gray_f, bgr=bgr, visible=input_vis, chroma_tol=chroma_tol
+        bg_cells = max(1, 4 * cells)
+        vis_grid_f = input_vis[::step, ::step].astype(np.float32)
+        vis_weight = cv2.boxFilter(
+            vis_grid_f, -1, (bg_cells, bg_cells), borderType=cv2.BORDER_REPLICATE
         )
-        self._last_chroma_ok = chroma_ok
-        eff_gain = min(gain, 1.0)
-        ok = ~has_ref | (gray_peak >= (min_ratio * eff_gain) * ref_peak)
+        vis_sum = cv2.boxFilter(
+            gray_grid * vis_grid_f,
+            -1,
+            (bg_cells, bg_cells),
+            borderType=cv2.BORDER_REPLICATE,
+        )
+        raw_bg = cv2.boxFilter(
+            gray_grid, -1, (bg_cells, bg_cells), borderType=cv2.BORDER_REPLICATE
+        )
+        local_bg = np.where(
+            vis_weight > 1e-6, vis_sum / np.maximum(vis_weight, 1e-6), raw_bg
+        )
+        if not self._has_seeded:
+            if float(gray_peak.max()) < 24.0:
+                self._recovering_px = 0
+                self._hold_mask.fill(False)
+                return np.zeros(self.shape, dtype=bool)
+            ref_peak = local_bg
+            eff_gain = 1.0
+        else:
+            gain, chroma_ok, chroma_shift = self._estimate_gain(
+                gray_f, bgr=bgr, visible=input_vis, chroma_tol=chroma_tol
+            )
+            self._last_chroma_ok = chroma_ok
+            self._last_chroma_shift = chroma_shift
+            eff_gain = min(gain, 1.0)
+            unseeded_ref = local_bg / max(eff_gain, 1e-3)
+            ref_grid = np.where(
+                self._seeded[::step, ::step],
+                self._norm_ref[::step, ::step],
+                unseeded_ref,
+            )
+            ref_peak = cv2.dilate(ref_grid, kernel)
+        has_ref = ref_peak > 1.0
+        ok = (~has_ref | (gray_peak >= (min_ratio * eff_gain) * ref_peak)) & (
+            gray_peak >= 24.0
+        )
+        vis_peak = cv2.dilate(input_vis.astype(np.uint8)[::step, ::step], kernel)
         if (
             self._has_chroma_ref
             and bgr is not None
@@ -518,9 +610,63 @@ class PageModel:
                 & (blue_f >= (paper_ratio - spread) * red_f)
                 & (blue_f <= (paper_ratio + spread) * red_f)
             )
-            ok &= ~has_ref | (r_ref_peak <= 1.0) | chroma_ok
+            # A porta aceita duas razoes: a guardada por celula
+            # (`chroma_ok`) e a razao DOMINANTE do quadro (`shifted_ok`)
+            # — esta ultima so quando ha evidencia coerente dela:
+            #
+            # - testemunhas: celulas referenciadas visiveis suficientes
+            #   (_SHIFT_WITNESS_MIN) confirmando a razao guardada. A
+            #   razao delas e a do papel sob a luz atual; janela que
+            #   falha nas duas e oclusor local e fica fora da
+            #   evidencia — mesmo sendo maioria (a manga clara que
+            #   cobre 3/4 das janelas e apagava tracos cobertos,
+            #   review do #175). E o que destrava a regiao que estava
+            #   sob a mao durante a troca de lampada: revelada, ela
+            #   casa com a razao dominante, entrega evidencia e adapta
+            #   os refs ate convergir — antes, o gate religado na
+            #   folha inteira a condenava ao mismatch permanente.
+            # - ou quase tudo falha (_SHIFT_FAIL_MIN) de forma
+            #   coerente (_SHIFT_COHERENCE): deslocamento global de
+            #   iluminacao — a lampada nao poupa ninguem. A razao nova
+            #   vem das proprias falhas; janela fora dela E da
+            #   guardada (objeto local) segue mascarada, enquanto
+            #   observe() adapta os refs ate convergir.
+            #
+            # Sem nenhum dos dois (evidencia mista/incoerente), vale
+            # so a razao guardada — o modo mais estrito.
+            gated = has_ref & (r_ref_peak > 1.0) & (vis_peak > 0)
+            gated_n = int(np.count_nonzero(gated))
+            shifted_ok = np.zeros(chroma_ok.shape, dtype=bool)
+            if gated_n:
+                cur_ratio = blue_f / np.maximum(red_f, 1.0)
+                witness = gated & chroma_ok
+                frame_ratio = None
+                if int(np.count_nonzero(witness)) >= max(
+                    4, _SHIFT_WITNESS_MIN * gated_n
+                ):
+                    frame_ratio = float(np.median(cur_ratio[witness]))
+                else:
+                    failing = gated & ~chroma_ok
+                    fail_n = int(np.count_nonzero(failing))
+                    if fail_n >= _SHIFT_FAIL_MIN * gated_n:
+                        cand = float(np.median(cur_ratio[failing]))
+                        cand_spread = chroma_tol * max(cand, 1e-3) + 1e-6
+                        coherent_n = int(
+                            np.count_nonzero(
+                                failing & (np.abs(cur_ratio - cand) <= cand_spread)
+                            )
+                        )
+                        if coherent_n >= _SHIFT_COHERENCE * fail_n:
+                            frame_ratio = cand
+                if frame_ratio is not None:
+                    frame_spread = chroma_tol * max(frame_ratio, 1e-3) + 1e-6
+                    shifted_ok = (
+                        (red_f > 1.0)
+                        & (blue_f >= (frame_ratio - frame_spread) * red_f)
+                        & (blue_f <= (frame_ratio + frame_spread) * red_f)
+                    )
+            ok &= ~has_ref | (r_ref_peak <= 1.0) | chroma_ok | shifted_ok
         if visible is not None:
-            vis_peak = cv2.dilate(input_vis.astype(np.uint8)[::step, ::step], kernel)
             ok |= vis_peak == 0
         half = max(1, cells // 2) + 1
         ok = cv2.erode(
@@ -540,12 +686,12 @@ class PageModel:
                 hold[release] -= 1
             self._recovering_px = int(np.count_nonzero(release))
             self._hold_mask = release
-            return ~self._seeded | (raw_exposed & ~release)
+            return raw_exposed & ~release
         if np.any(hold):
             hold.fill(0)
         self._recovering_px = 0
         self._hold_mask.fill(False)
-        return ~self._seeded | raw_exposed
+        return raw_exposed
 
     def admissible(self, visible=None):
         """Pixels que podem entregar evidencia: os que tem referencia.
@@ -573,8 +719,15 @@ class PageModel:
         if gray.shape != self.shape:
             raise ValueError(f"gray na grade {gray.shape}, modelo na {self.shape}")
         vis = self._last_visible if visible is None else visible
+        # O ganho de luminancia vale sob deslocamento global de cor
+        # (`_last_chroma_shift`): e mudanca de luz de verdade e o
+        # `novel` precisa do dominio normalizado. So o veto local
+        # (`_last_chroma_ok` False sem shift) o descarta — ai a
+        # estimativa veio do oclusor.
         gain = (
-            self._estimate_gain(gray, visible=vis)[0] if self._last_chroma_ok else 1.0
+            self._estimate_gain(gray, visible=vis)[0]
+            if (self._last_chroma_ok or self._last_chroma_shift)
+            else 1.0
         )
         return gray if abs(gain - 1.0) <= 1e-4 else (gray / np.float32(gain))
 
