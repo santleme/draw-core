@@ -628,7 +628,7 @@ def test_unmasked_dark_occluder_does_not_erase_confirmed_ink(ink):
 # ------------------------------------------------------------------
 
 
-def test_startup_occluder_never_seeds_nor_inks(ink):
+def test_startup_occluder_never_seeds_nor_inks(ink, regime):
     worker, clock = ink
     generation = worker.new_generation()
     scene = _Scene()
@@ -646,6 +646,10 @@ def test_startup_occluder_never_seeds_nor_inks(ink):
     worker.set_hand_presence(False)
 
     pm = getattr(worker, "_page_model", None)
+    if REGIMES[regime].page_model:
+        # Com o PageModel ligado o modelo EXISTE: se sumir, a asserção de
+        # semeadura nao pode sumir junto em silencio.
+        assert pm is not None, f"{regime}: sem PageModel apos a abertura"
     if pm is not None:
         assert np.count_nonzero(pm.seeded & cover) == 0, (
             "oclusor sem mascara virou referencia de pagina"
