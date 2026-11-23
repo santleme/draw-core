@@ -19,7 +19,8 @@ Uso:
       [--flags coverage=0,ink.reg_deadband=1]
 Corpus: diretório com imagens, ou diretório de sessão gravada
 (com subpasta raw/). Modelos: os de models/ do repo, verificados
-pelo manifesto (integrity estrita — mesma regra do app).
+pelo manifesto (integrity estrita — mesma regra do app); a flag
+--allow-unverified desliga a verificação (bancadas fora dele).
 """
 
 import argparse
@@ -446,8 +447,14 @@ def main(argv=None):
     ap.add_argument("--stride", type=int, default=1)
     ap.add_argument("--fps-cena", type=float, default=2.0)
     ap.add_argument("--flags", default="")
+    ap.add_argument(
+        "--allow-unverified",
+        action="store_true",
+        help="desliga a verificacao sha256 dos modelos",
+    )
     args = ap.parse_args(argv)
     flags = [f for f in args.flags.split(",") if f.strip()]
+    verify = None if args.allow_unverified else "manifest"
     out = Path(args.out)
     records = run_replay(
         args.corpus,
@@ -456,6 +463,7 @@ def main(argv=None):
         stride=args.stride,
         scene_fps=args.fps_cena,
         flags=flags,
+        verify=verify,
     )
     worst = select_worst(records, args.top_k)
     # 2ª passagem determinística: artefatos só dos selecionados.
@@ -470,6 +478,7 @@ def main(argv=None):
         scene_fps=args.fps_cena,
         flags=flags,
         panel_frames=wanted,
+        verify=verify,
     )
     by_idx = {r["frame"]: r for r in records}
     index = [

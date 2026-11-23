@@ -619,6 +619,11 @@ def main(argv=None):
     parser.add_argument(
         "--hand-model", help="modelo .task de mão (opcional, como no app)"
     )
+    parser.add_argument(
+        "--allow-unverified",
+        action="store_true",
+        help="desliga a verificacao sha256 dos modelos",
+    )
     args = parser.parse_args(argv)
     try:
         pipeline = None
@@ -640,6 +645,7 @@ def main(argv=None):
                         neural_model=args.neural_model,
                         page_clean_model=args.page_clean_model,
                         hand_model=args.hand_model,
+                        verify=None if args.allow_unverified else "manifest",
                     )
             finally:
                 capture.release()

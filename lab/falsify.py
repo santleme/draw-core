@@ -318,6 +318,7 @@ def run_trial(
     tag: str,
     models: dict,
     keep_artifacts: bool,
+    verify="manifest",
 ) -> dict:
     """Gera o vídeo do cenário, roda a bancada real e pontua.
 
@@ -336,7 +337,11 @@ def run_trial(
         masks_dir = workdir / f"{tag}_masks" if keep_artifacts else None
         try:
             report = audit(
-                video, video.with_suffix(".gt.npz"), models=models, save_masks=masks_dir
+                video,
+                video.with_suffix(".gt.npz"),
+                models=models,
+                save_masks=masks_dir,
+                verify=verify,
             )
         except Exception as error:
             # Crash do pipeline (worker de tinta, laço, modelo): cenário
@@ -452,6 +457,11 @@ def main(argv=None):
     parser.add_argument("--neural-model")
     parser.add_argument("--page-clean-model")
     parser.add_argument("--hand-model")
+    parser.add_argument(
+        "--allow-unverified",
+        action="store_true",
+        help="desliga a verificacao sha256 dos modelos",
+    )
     args = parser.parse_args(argv)
     if args.trials < 1 or args.rounds < 0 or args.elite < 1 or args.keep < 0:
         parser.exit(2, "erro: trials/elite/keep/rounds fora da faixa\n")
@@ -465,6 +475,7 @@ def main(argv=None):
         "page_clean": args.page_clean_model,
         "hand": args.hand_model,
     }
+    verify = None if args.allow_unverified else "manifest"
 
     results = []
     batch = [sample_config(rng, i, texts) for i in range(args.trials)]
@@ -475,7 +486,9 @@ def main(argv=None):
             tag = f"r{round_index}_t{tag_seq:03d}"
             tag_seq += 1
             try:
-                result = run_trial(cfg, workdir, tag, models, keep_artifacts=False)
+                result = run_trial(
+                    cfg, workdir, tag, models, keep_artifacts=False, verify=verify
+                )
             except (ValueError, RuntimeError, OSError, cv2.error) as error:
                 result = {
                     "tag": tag,
@@ -513,7 +526,12 @@ def main(argv=None):
         tag = result["tag"]
         try:
             rerun = run_trial(
-                result["config"], workdir, f"{tag}_keep", models, keep_artifacts=True
+                result["config"],
+                workdir,
+                f"{tag}_keep",
+                models,
+                keep_artifacts=True,
+                verify=verify,
             )
             result["artifacts"] = rerun["artifacts"]
         except (ValueError, RuntimeError, OSError, cv2.error) as error:
