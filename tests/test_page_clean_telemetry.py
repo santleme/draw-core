@@ -157,3 +157,76 @@ def test_telemetry_pass_s_includes_page_model_and_registration_work(monkeypatch)
         <= record["pass_ended_at"]
         <= record["published_at"]
     )
+
+
+_PM_STATS_KEYS = (
+    "pm_seeded_frac",
+    "pm_novel_px",
+    "pm_suppressed_px",
+    "pm_pending_px",
+    "pm_unseeded_px",
+)
+
+
+def test_stats_exposes_page_model_fields_from_the_last_pass():
+    """stats() espelha os campos pm_* do registro da ultima passada —
+    e o caminho pelo qual o soak 4A/4B ve o PageModel (o app so le
+    stats(), nao telemetry_snapshot)."""
+    from draw.ink.config import InkConfig
+
+    class _InstantInk:
+        threshold = 0.7
+
+        def ink_mask(self, _warped):
+            return np.zeros((H, W), dtype=np.uint8)
+
+    worker = worker_mod.PageCleanWorker(
+        _InstantInk(),
+        config=InkConfig(page_model=True),
+    )
+    # Sem passada ainda: ausente sai None, como pass_ms.
+    stats = worker.stats()
+    for key in _PM_STATS_KEYS:
+        assert key in stats
+        assert stats[key] is None
+    generation = worker.new_generation()
+    warp = np.full((H, W, 3), 235, dtype=np.uint8)
+    worker.submit(WarpedPage(warp, generation))
+    assert worker.pump()
+    stats = worker.stats()
+    assert isinstance(stats["pm_seeded_frac"], float)
+    assert 0.0 <= stats["pm_seeded_frac"] <= 1.0
+    for key in (
+        "pm_novel_px",
+        "pm_suppressed_px",
+        "pm_pending_px",
+        "pm_unseeded_px",
+    ):
+        assert isinstance(stats[key], int)
+        assert stats[key] >= 0
+    # Primeira passada: nada semeado ainda, a regiao observada
+    # inteira conta como pendente.
+    assert stats["pm_seeded_frac"] == 0.0
+    assert 0 < stats["pm_pending_px"] <= H * W
+    assert stats["pm_unseeded_px"] > 0
+
+
+def test_stats_page_model_fields_are_none_without_the_model():
+    """Com page_model desligado o registro nao tem pm_*: stats() emite
+    None em vez de quebrar (mesma regra do pass_ms ausente)."""
+
+    class _InstantInk:
+        threshold = 0.7
+
+        def ink_mask(self, _warped):
+            return np.zeros((H, W), dtype=np.uint8)
+
+    worker = worker_mod.PageCleanWorker(_InstantInk())
+    generation = worker.new_generation()
+    warp = np.full((H, W, 3), 235, dtype=np.uint8)
+    worker.submit(WarpedPage(warp, generation))
+    assert worker.pump()
+    stats = worker.stats()
+    for key in _PM_STATS_KEYS:
+        assert key in stats
+        assert stats[key] is None
