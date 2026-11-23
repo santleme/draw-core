@@ -285,6 +285,21 @@ def test_anisotropic_paper_decides_rectangle_in_mm():
         )
         prim = vectorize.classify_primitive({"points": px_diamond, "closed": True})
         assert prim["type"] == "polygon"
+
+        # Borda arqueada (review #197): em px o desvio máximo (27.81)
+        # cabia na tolerância (28.65) e a caixa exportava achatada; no
+        # espaço escalado o desvio (6.24 mm) excede o piso — polygon.
+        bowed = np.array(
+            [
+                [361.0, 210.0],
+                [475.0, 466.0],
+                [541.0, 754.0],
+                [310.0, 906.0],
+                [130.0, 362.0],
+            ]
+        )
+        prim = vectorize.classify_primitive({"points": bowed, "closed": True})
+        assert prim["type"] == "polygon"
     finally:
         vectorize._set_paper_mm(
             210.0, 297.0, vectorize.PAPER_W_PX, vectorize.PAPER_H_PX
@@ -356,6 +371,13 @@ def test_default_a4_measurements_stay_legacy():
     assert prim["type"] == "line"
     assert prim["length_mm"] == round(400.0 * vectorize.MM_PER_PX, 3)
     assert prim["length_mm"] == 98.912
+
+    # A decisão de forma também fica no espaço legado: este quadrilátero
+    # fica a ~11.9° do corte de 12.0° em px — com escala por eixo o erro
+    # passaria a ~12.006° e ele viraria polygon (review #197).
+    near_cut = np.array([[280.0, 31.0], [460.0, 574.0], [215.0, 717.0], [35.0, 174.0]])
+    prim = vectorize.classify_primitive({"points": near_cut, "closed": True})
+    assert prim["type"] == "rectangle"
 
 
 def main():
