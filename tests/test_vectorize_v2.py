@@ -143,10 +143,64 @@ def test_stamps_order_strokes_chronologically_and_orient_direction():
         assert "<line " in svg_txt
 
 
+def test_paper_mm_flags_repoint_scale_and_restore_defaults():
+    # A4-PAISAGEM: canvas 1200x850 px mapeado para uma folha 297x210 mm;
+    # os denominadores em px saem da imagem, não das constantes legadas.
+    img = np.full((850, 1200), 255, dtype=np.uint8)
+    cv2.line(img, (60, 425), (1140, 425), 0, thickness=3)
+    with tempfile.TemporaryDirectory() as tmp:
+        png_path = Path(tmp) / "paisagem.png"
+        svg_path = Path(tmp) / "out.svg"
+        json_path = Path(tmp) / "out.json"
+        cv2.imwrite(str(png_path), img)
+        rc = vectorize.main(
+            [
+                str(png_path),
+                "--primitives",
+                "--paper-w-mm",
+                "297",
+                "--paper-h-mm",
+                "210",
+                "--out",
+                str(svg_path),
+                "--json",
+                str(json_path),
+            ]
+        )
+        assert rc == 0
+        payload = json.loads(json_path.read_text(encoding="utf-8"))
+        line = next(p for p in payload["primitives"] if p["type"] == "line")
+        # ~1080 px de largura a 297 mm/1200 px = 267.3 mm (aprox., após
+        # simplificação/traversal).
+        assert abs(line["length_mm"] - 1080 * 297.0 / 1200.0) < 3.0
+        assert payload["summary"]["paper_mm"] == [297.0, 210.0]
+        svg_txt = svg_path.read_text(encoding="utf-8")
+        assert 'viewBox="0 0 297.0 210.0"' in svg_txt
+    # O run não vaza escala para o módulo: defaults A4 restaurados.
+    assert vectorize.PAPER_W_MM == 210.0
+    assert vectorize.PAPER_H_MM == 297.0
+    assert vectorize.MM_PER_PX_X == 210.0 / 850.0
+    assert vectorize.MM_PER_PX_Y == 297.0 / 1200.0
+
+
+def test_paper_mm_flags_must_come_in_pairs():
+    img = np.full((850, 1200), 255, dtype=np.uint8)
+    cv2.line(img, (60, 425), (1140, 425), 0, thickness=3)
+    with tempfile.TemporaryDirectory() as tmp:
+        png_path = Path(tmp) / "paisagem.png"
+        cv2.imwrite(str(png_path), img)
+        with pytest.raises(SystemExit):
+            vectorize.main([str(png_path), "--paper-w-mm", "297"])
+        with pytest.raises(SystemExit):
+            vectorize.main([str(png_path), "--paper-w-mm", "0", "--paper-h-mm", "210"])
+
+
 def main():
     test_node_indexing_matches_naive_and_scales_linearly()
     test_thick_shapes_axis_aligned_rect_circle_lines_and_freehand_wave()
     test_stamps_order_strokes_chronologically_and_orient_direction()
+    test_paper_mm_flags_repoint_scale_and_restore_defaults()
+    test_paper_mm_flags_must_come_in_pairs()
     print("TESTES DE VECTORIZE V2 E CAMADA 2 OK.")
     return 0
 

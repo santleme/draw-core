@@ -58,6 +58,22 @@ MM_PER_PX_X = PAPER_W_MM / PAPER_W_PX
 MM_PER_PX_Y = PAPER_H_MM / PAPER_H_PX
 MM_PER_PX = 0.5 * (MM_PER_PX_X + MM_PER_PX_Y)
 
+
+def _set_paper_mm(paper_w_mm, paper_h_mm, img_w_px, img_h_px):
+    """Reaponta a escala px->mm para uma folha não-A4 (override de CLI).
+
+    Os denominadores em px vêm da imagem carregada, não das constantes
+    ``PAPER_W_PX``/``PAPER_H_PX``: uma folha paisagem chega com o canvas
+    já rotacionado (ex.: 1200x850), então a grade legada não se aplica.
+    """
+    global PAPER_W_MM, PAPER_H_MM, MM_PER_PX_X, MM_PER_PX_Y, MM_PER_PX
+    PAPER_W_MM = float(paper_w_mm)
+    PAPER_H_MM = float(paper_h_mm)
+    MM_PER_PX_X = PAPER_W_MM / img_w_px
+    MM_PER_PX_Y = PAPER_H_MM / img_h_px
+    MM_PER_PX = 0.5 * (MM_PER_PX_X + MM_PER_PX_Y)
+
+
 THINNING_TYPES = {
     "zhangsuen": cv2.ximgproc.THINNING_ZHANGSUEN,
     "guohall": cv2.ximgproc.THINNING_GUOHALL,
@@ -1135,6 +1151,20 @@ def main(argv=None):
         help="imprime as distâncias nos dois sentidos",
     )
     parser.add_argument(
+        "--paper-w-mm",
+        type=float,
+        default=None,
+        help="largura da folha em mm (default A4 retrato: 210); os "
+        "denominadores em px saem da imagem carregada, então serve "
+        "também para paisagem e outras grades",
+    )
+    parser.add_argument(
+        "--paper-h-mm",
+        type=float,
+        default=None,
+        help="altura da folha em mm (default A4 retrato: 297); exige --paper-w-mm",
+    )
+    parser.add_argument(
         "--selfcheck",
         action="store_true",
         help="roda a bancada sintética e sai",
@@ -1146,8 +1176,25 @@ def main(argv=None):
         return 0
     if not args.input:
         parser.error("informe o PNG de entrada ou --selfcheck")
+    if (args.paper_w_mm is None) != (args.paper_h_mm is None):
+        parser.error("--paper-w-mm e --paper-h-mm devem ser passados juntos")
+    if args.paper_w_mm is not None and (args.paper_w_mm <= 0 or args.paper_h_mm <= 0):
+        parser.error("--paper-w-mm/--paper-h-mm devem ser positivos")
 
     ink, polarity = load_ink(args.input)
+    if args.paper_w_mm is None:
+        return _run_pipeline(args, ink, polarity)
+    # Folha não-A4: reaponta a escala a partir da imagem real e restaura
+    # o default no fim — main() nunca deixa o módulo mutado.
+    img_h_px, img_w_px = ink.shape[:2]
+    _set_paper_mm(args.paper_w_mm, args.paper_h_mm, img_w_px, img_h_px)
+    try:
+        return _run_pipeline(args, ink, polarity)
+    finally:
+        _set_paper_mm(210.0, 297.0, PAPER_W_PX, PAPER_H_PX)
+
+
+def _run_pipeline(args, ink, polarity):
     stamps = load_stamps(args.stamps) if args.stamps else None
     if args.clean:
         polylines = vectorize_clean(
@@ -1176,6 +1223,7 @@ def main(argv=None):
     summary["polaridade_tinta"] = polarity
     summary["epsilon_px"] = args.epsilon
     summary["thinning"] = args.thinning
+    summary["paper_mm"] = [PAPER_W_MM, PAPER_H_MM]
     summary["svg"] = out
     if args.json:
         payload = {"summary": summary, "primitives": prims}
