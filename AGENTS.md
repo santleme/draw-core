@@ -12,6 +12,29 @@ Read `docs/MIGRATION_SPEC.md` before changing anything.
 - During iteration, run only the tests covering the touched module — locate them with `grep -rlw "<module>" tests/` (not every file is named `test_<module>.py`; `draw.paper` is covered by `test_paper_formats.py`).
 - Before finishing: `ruff check . && ruff format --check . && pytest -q`.
 
+## Test selection while iterating
+
+`pytest-testmon` and `pytest-xdist` are in the `dev` extra. Use them for the
+iteration loop only; the final gate below stays the full suite.
+
+- Build the map once (it merges into one `.testmondata`):
+  `pytest --testmon -m "not slow" -n auto --dist worksteal`, then
+  `pytest --testmon -m slow`.
+- Iterate with `pytest --testmon-forceselect -m "not slow" -n auto --dist worksteal`.
+  Plain `-m`, `-k` or a test node id with `--testmon` silently turns selection off
+  and runs everything; `--testmon-forceselect` keeps selection and the filter.
+- Run `slow` tests serialized, never with `-n`:
+  `pytest --testmon-forceselect -m slow`. They carry timing budgets that fail
+  under parallel load (for example `test_ruling.py::test_cost_per_pass_stays_inside_the_budget`).
+- Comments never trigger selection; docstring edits do.
+- Testmon only sees executed Python. Run the full suite when you change
+  `assets/manifest.json`, `run.sh`, `pyproject.toml`, `uv.lock`,
+  `tests/conftest.py`, `tests/onnx_fixtures.py`, `tests/rr.py` or `.github/`.
+- Code that only runs in a child process is invisible to it. If you touch
+  `src/draw/_hvcam_mjpeg.py`, run all of `tests/test_hvcam.py`.
+- A change to `contracts`, `config` or `ink.config` reaches most of the suite;
+  run it all.
+
 ## Change philosophy
 
 The guiding style draws on *The Tao of Programming*, KISS, and YAGNI: make
