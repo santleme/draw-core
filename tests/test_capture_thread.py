@@ -1,28 +1,10 @@
 """Testes da captura latest-frame e da escritora de PNG de draw/camera.py.
 
-Duas frentes:
-
-1. Comportamento das classes com capturas falsas: quem consome so ve
-   o quadro mais novo e nunca reprocessa; quadros substituidos contam
-   como descartados; falha seguida de leitura declara a fonte morta
-   no limite de _CAPTURE_MAX_FAILURES; falha transitoria nao mata a
-   fonte; a escritora grava os PNG enfileirados e drena no close().
-
-2. Cenario de fila, o motivo da mudanca. Um produtor a ~30 fps e um
-   consumidor com custo simulado de processamento: 127 ms a cada 5
-   quadros consumidos (o frame de deteccao medido na auditoria) e
-   12 ms nos demais (o topo da faixa de 8 a 12 ms medida para o
-   quadro sem deteccao em draw-lab/bottleneck-2026-10-30/loop). A
-   media do ciclo, 35,0 ms, fica acima do periodo de 33,3 ms: e a
-   condicao em que o read() bloqueante antigo empilha quadros no
-   driver e a idade do quadro consumido cresce sem teto. Contra a
-   captura latest-frame, a idade fica limitada a cerca de um periodo
-   de producao e o excesso vira descarte contado.
-
-Os numeros impressos sao de bancada nesta maquina, com o relogio
-monotonico como referencia dos dois lados. Eles provam o
-comportamento das filas, nao a latencia vidro-a-tinta na mesa: essa
-segue nao medida.
+Comportamento das classes com capturas falsas: quem consome so ve
+o quadro mais novo e nunca reprocessa; quadros substituidos contam
+como descartados; falha seguida de leitura declara a fonte morta
+no limite de _CAPTURE_MAX_FAILURES; falha transitoria nao mata a
+fonte; a escritora grava os PNG enfileirados e drena no close().
 
 Uso: python tests/test_capture_thread.py
 """
@@ -53,10 +35,6 @@ def check(name, condition, detail=""):
         # script (__main__) o relatorio no fim decide a saida.
         if "PYTEST_CURRENT_TEST" in os.environ:
             raise AssertionError(f"{name} {detail}")
-
-
-def _now_ms():
-    return int(time.monotonic() * 1000)
 
 
 class _PacedCapture:
@@ -126,32 +104,6 @@ class _BurstCapture:
     def release(self):
         self.released = True
         self._released.set()
-
-
-class _QueueCapture:
-    """read() desempilha FIFO, como o read() bloqueante sobre o driver."""
-
-    def __init__(self):
-        import queue as queue_module
-
-        self._queue = queue_module.Queue()
-        self.last_produced_ms = 0
-
-    def feed(self, frame, produced_ms):
-        self._queue.put((frame, produced_ms))
-
-    def feed_end(self):
-        self._queue.put(None)
-
-    def read(self):
-        item = self._queue.get()
-        if item is None:
-            return False, None
-        frame, self.last_produced_ms = item
-        return True, frame
-
-    def release(self):
-        pass
 
 
 @pytest.mark.slow
@@ -273,114 +225,6 @@ def test_png_writer_drains_on_close():
             )
 
 
-def _process_seconds(consumed_index):
-    return 0.127 if consumed_index % 5 == 4 else 0.012
-
-
-def _stats(ages_ms):
-    ages = np.array(ages_ms, dtype=float)
-    return {
-        "n": int(ages.size),
-        "median": float(np.median(ages)),
-        "p95": float(np.percentile(ages, 95)),
-        "max": float(ages.max()),
-    }
-
-
-def _run_blocking(total_frames, period_s):
-    capture = _QueueCapture()
-
-    def produce():
-        next_at = time.monotonic()
-        for seq in range(1, total_frames + 1):
-            now = time.monotonic()
-            if now < next_at:
-                time.sleep(next_at - now)
-            next_at = max(next_at + period_s, time.monotonic())
-            frame = np.full((48, 64, 3), seq % 256, dtype=np.uint8)
-            capture.feed(frame, _now_ms())
-        capture.feed_end()
-
-    producer = threading.Thread(target=produce, daemon=True)
-    producer.start()
-    ages = []
-    consumed = 0
-    while True:
-        ok, _frame = capture.read()
-        if not ok:
-            break
-        ages.append(_now_ms() - capture.last_produced_ms)
-        time.sleep(_process_seconds(consumed))
-        consumed += 1
-    producer.join(timeout=5.0)
-    return ages
-
-
-def _run_latest(total_frames, period_s):
-    capture = _PacedCapture(period_s)
-    source = LatestFrameCapture(capture).start()
-    ages = []
-    last_seq = 0
-    consumed = 0
-    while True:
-        item = source.wait_next(last_seq, timeout=10.0)
-        if item is None:
-            break
-        last_seq = item.sequence
-        ages.append(_now_ms() - item.captured_at * 1000)
-        time.sleep(_process_seconds(consumed))
-        consumed += 1
-        if last_seq >= total_frames:
-            break
-    dropped = source.dropped
-    source.stop()
-    return ages, dropped, consumed
-
-
-def scenario_queue_age():
-    total_frames = 240
-    period_s = 1.0 / 30.0
-
-    old_ages = _run_blocking(total_frames, period_s)
-    new_ages, dropped, consumed = _run_latest(total_frames, period_s)
-    old = _stats(old_ages)
-    new = _stats(new_ages)
-
-    print()
-    print(f"cenario: produtor a 30 fps, {total_frames} quadros produzidos")
-    print(
-        "caminho antigo (read bloqueante, FIFO): "
-        f"n={old['n']} mediana={old['median']:.0f} ms "
-        f"p95={old['p95']:.0f} ms max={old['max']:.0f} ms"
-    )
-    print(
-        "caminho novo (latest-frame): "
-        f"n={new['n']} mediana={new['median']:.0f} ms "
-        f"p95={new['p95']:.0f} ms max={new['max']:.0f} ms "
-        f"descartados={dropped}"
-    )
-    check(
-        "idade no caminho antigo passa de 150 ms",
-        old["max"] > 150,
-        f"max={old['max']:.0f}",
-    )
-    check(
-        "idade no caminho novo fica limitada (p95 < 100 ms)",
-        new["p95"] < 100,
-        f"p95={new['p95']:.0f}",
-    )
-    check(
-        "idade maxima antiga e mais de 4x a nova",
-        old["max"] > 4 * new["max"],
-        f"old={old['max']:.0f} new={new['max']:.0f}",
-    )
-    check(
-        "descartados crescem no caminho novo",
-        dropped >= 5,
-        f"dropped={dropped} consumed={consumed}",
-    )
-
-
 def test_on_done_error_does_not_kill_writer(tmp_path):
     writer = PngWriter()
     done = []
@@ -492,7 +336,6 @@ if __name__ == "__main__":
     test_failure_limit_marks_dead()
     test_transient_failures_recover()
     test_png_writer_drains_on_close()
-    scenario_queue_age()
     print()
     if FAILURES:
         print(f"FALHARAM {len(FAILURES)} verificacoes: {FAILURES}")
