@@ -820,3 +820,50 @@ def test_new_stroke_after_a_return_with_residual_confirms_in_place(ink, residual
     got = _confirmed(worker, gen2) > 0
     assert _frac(got, want) >= 0.9
     assert _beyond(got, want | old, 1) == 0
+
+
+def _return_with_residual(worker, clock, residual, strokes=_F11_STROKES):
+    generation = worker.new_generation()
+    scene = _Scene()
+    _passes(worker, clock, generation, scene, 4, dt=_DT_IDLE)
+    for stroke in strokes:
+        _write_stroke(worker, clock, generation, scene, stroke)
+    drawn = _stroke_mask(scene)
+    returned = _Scene()
+    for y0, y1, x0, x1 in strokes:
+        returned.draw((y0 + residual, y1 + residual, x0, x1))
+    gen2 = worker.new_generation(preserve_identity=True)
+    _passes(worker, clock, gen2, returned, 6, dt=_DT_IDLE)
+    return gen2, drawn, returned
+
+
+@pytest.mark.parametrize(
+    "residual",
+    [6, 9, 12],  # 6 funcionava; 9 e 12 passam do limite de 8 px do portao
+)
+def test_eraser_removes_a_stroke_after_a_return_with_residual(ink, residual):
+    worker, clock = ink
+    stroke_a, stroke_b = (90, 96, 60, 260), (150, 156, 60, 200)
+    gen2, drawn, returned = _return_with_residual(
+        worker, clock, residual, (stroke_a, stroke_b)
+    )
+    want_a = np.zeros_like(drawn)
+    want_a[stroke_a[0] : stroke_a[1], stroke_a[2] : stroke_a[3]] = True
+    y0, y1, x0, x1 = stroke_a
+    cut = x0 + (x1 - x0) // 3
+    ya, yb = y0 + residual, y1 + residual
+    returned.hand_on((ya, yb, x0, x1))
+    worker.set_hand_presence(True, moved=True)
+    _passes(worker, clock, gen2, returned, 2)
+    returned.page[ya:yb, x0:cut] = PAPER
+    returned.hand_on((ya, yb, x0, cut))
+    _passes(worker, clock, gen2, returned, 2)
+    returned.hand_off()
+    worker.set_hand_presence(False)
+    _passes(worker, clock, gen2, returned, 8, dt=_DT_IDLE)
+
+    got = _confirmed(worker, gen2) > 0
+    erased = want_a.copy()
+    erased[:, cut:] = False
+    assert np.count_nonzero(got & erased) <= 0.05 * np.count_nonzero(erased)
+    assert _frac(got, drawn & ~erased) >= 0.90  # a testemunha segue confirmada

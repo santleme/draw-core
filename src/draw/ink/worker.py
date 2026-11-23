@@ -1342,6 +1342,7 @@ class _Pass:
     identity_hold_seen_snap: bool = False
     identity_precomputed: object = None
     identity_residual: tuple = (0, 0)
+    anchor_unshifted: object = None
     identity_decision: object = None
     identity_recall: object = None
     identity_containment: object = None
@@ -3026,6 +3027,8 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         """
         if p.anchor is None or p.registration_corners is None:
             return
+        # A ancora SEM o residuo: e dela que se mede o movimento da pose.
+        p.anchor_unshifted = p.anchor
         if p.identity_reference_snap is not None:
             sampled = self._pass_sampled(
                 p.anchor, p.registration_corners, p.prob.shape, live_corners=p.corners
@@ -3278,8 +3281,17 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             matrix = registration._registration_matrix(
                 p.anchor, p.registration_corners, p.prob.shape
             )
+            # Duas grandezas distintas: o resíduo corrige o REGISTRO (alinha a
+            # observação ao canvas) e não é movimento da página. O portão de
+            # remoção pergunta se a pose está estável, então o deslocamento
+            # é medido contra a âncora sem o resíduo.
+            pose_matrix = registration._registration_matrix(
+                p.anchor if p.anchor_unshifted is None else p.anchor_unshifted,
+                p.registration_corners,
+                p.prob.shape,
+            )
             p.reg_info["registration_displacement_px"] = (
-                anchor_mod._matrix_grid_displacement(matrix, p.prob.shape)
+                anchor_mod._matrix_grid_displacement(pose_matrix, p.prob.shape)
             )
             p.reg_info["registration_is_identity"] = (
                 registration._registration_is_identity(matrix)
