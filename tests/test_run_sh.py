@@ -11,6 +11,18 @@ pytestmark = pytest.mark.skipif(
     os.name != "posix" or not BASH, reason="requires a POSIX shell environment"
 )
 
+# Stub dos pythons de sistema (python3/python/py): a linha "-c" responde
+# a sonda de versao do _find_python; "-3" cobre o `py -3` — o word-split
+# de "py -3" no run.sh entrega o flag como $1.
+_PY_STUB = (
+    "#!/bin/sh\n"
+    '[ "$1" = -3 ] && shift\n'
+    '[ "$1" = -c ] && exit 0\n'
+    'if [ "$3" != .venv ]; then\n'
+    '    mkdir -p "$3/bin" && cp .venv/bin/python .venv/bin/draw "$3/bin/"\n'
+    "fi\n"
+)
+
 
 @pytest.fixture
 def launcher(tmp_path):
@@ -96,12 +108,7 @@ def launcher(tmp_path):
     draw.write_text('#!/bin/sh\nprintf "%s\\n" "$0" >> launches\n[ "$1" = --check ]\n')
     draw.chmod(0o755)
     python3 = tools / "python3"
-    python3.write_text(
-        "#!/bin/sh\n"
-        'if [ "$3" != .venv ]; then\n'
-        '    mkdir -p "$3/bin" && cp .venv/bin/python .venv/bin/draw "$3/bin/"\n'
-        "fi\n"
-    )
+    python3.write_text(_PY_STUB)
     python3.chmod(0o755)
     return tools
 
@@ -559,6 +566,92 @@ def test_pip_repair_keeps_single_cv2_provider(tmp_path, launcher):
     assert providers == ["opencv_contrib_python-5.0.0.93.dist-info"]
     launched = (tmp_path / "launches").read_text().strip()
     assert tmp_path / launched == tmp_path / ".venv/bin/draw"
+
+
+def _setup_pip_fallback(tmp_path, launcher, *names):
+    """Cenario de primeiro setup via pip: base com GUI quebrada,
+    pacotes disponiveis e so os pythons de sistema listados."""
+    (launcher / "python3").unlink()
+    for name in names:
+        stub = launcher / name
+        stub.write_text(_PY_STUB)
+        stub.chmod(0o755)
+    (tmp_path / "gui-available").touch()
+    (tmp_path / "hand-available").touch()
+    (tmp_path / ".venv" / "gui-broken").touch()
+
+
+def test_falls_back_to_python_when_no_python3(tmp_path, launcher):
+    """Sem python3 no PATH (Git Bash/MSYS sem MSYS2): o fallback usa
+    `python` para criar o venv e o lancamento segue normal."""
+    _setup_pip_fallback(tmp_path, launcher, "python")
+
+    subprocess.run(
+        [BASH, "run.sh", "--check"],
+        cwd=tmp_path,
+        env={"PATH": str(launcher)},
+        check=True,
+        timeout=10,
+    )
+    launched = (tmp_path / "launches").read_text().strip()
+    assert tmp_path / launched == tmp_path / ".venv/bin/draw"
+
+
+def test_falls_back_to_py_launcher(tmp_path, launcher):
+    """Git Bash so com o launcher `py` do Windows: `py -3` passa na
+    sonda `-c` e cria o venv — o word-split de "py -3" e intencional."""
+    _setup_pip_fallback(tmp_path, launcher, "py")
+
+    subprocess.run(
+        [BASH, "run.sh", "--check"],
+        cwd=tmp_path,
+        env={"PATH": str(launcher)},
+        check=True,
+        timeout=10,
+    )
+    launched = (tmp_path / "launches").read_text().strip()
+    assert tmp_path / launched == tmp_path / ".venv/bin/draw"
+
+
+def test_no_python_aborts_with_error(tmp_path, launcher):
+    """Nenhum Python >= 3.11 no PATH: erro claro com rc 1 em vez do
+    127 seco do `python3` ausente — e nada lanca."""
+    _setup_pip_fallback(tmp_path, launcher)
+
+    result = subprocess.run(
+        [BASH, "run.sh", "--check"],
+        cwd=tmp_path,
+        env={"PATH": str(launcher)},
+        check=False,
+        timeout=10,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1
+    assert "erro" in result.stderr
+    assert not (tmp_path / "launches").exists()
+
+
+def test_missing_draw_executable_aborts_with_error(tmp_path, launcher):
+    """Venv sem o executavel do Draw (instalacao truncada): erro claro
+    com rc 1 em vez do 127 do exec num arquivo inexistente."""
+    (tmp_path / "gui-available").touch()
+    (tmp_path / "hand-available").touch()
+    (tmp_path / ".venv" / "bin" / "draw").unlink()
+    (tmp_path / ".venv" / "gui-broken").touch()
+
+    result = subprocess.run(
+        [BASH, "run.sh", "--check"],
+        cwd=tmp_path,
+        env={"PATH": str(launcher)},
+        check=False,
+        timeout=10,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1
+    assert "erro" in result.stderr
+    assert not (tmp_path / "launches").exists()
 
 
 @pytest.mark.slow

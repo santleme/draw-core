@@ -129,8 +129,10 @@ from pathlib import Path
 try:
     age = time.time() - (Path(sys.prefix) / ".no_hand").stat().st_mtime
 except FileNotFoundError:
+    # sem marcador: nunca tentou, retry liberado
     sys.exit(0)
-sys.exit(0 <= age < 24 * 60 * 60)
+# Convenção bash: exit 0 = retry devido; exit 1 = ainda no cooldown de 24h.
+sys.exit(0 if not (0 <= age < 24 * 60 * 60) else 1)
 '
 }
 
@@ -157,9 +159,30 @@ _install_gui() {
     fi
 }
 
+_find_python() {
+    # A sonda `-c` e obrigatoria: `command -v` nao distingue os stubs da
+    # MS Store, que constam no PATH mas abortam ao executar. O piso
+    # (3, 11) espelha o requires-python do pyproject.toml.
+    # $candidate e $SYS_PYTHON ficam SEM aspas de proposito: o
+    # word-split transforma "py -3" em launcher + flag.
+    for candidate in python3 python "py -3"; do
+        if $candidate -c \
+            'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' \
+            >/dev/null 2>&1; then
+            SYS_PYTHON="$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
 _prepare_pip() {
     if [ "$USE_UV" = 0 ]; then
-        python3 -m venv "$VENV_DIR" || return "$?"
+        if ! _find_python; then
+            echo "erro: nenhum Python >= 3.11 no PATH (python3, python, py)" >&2
+            return 1
+        fi
+        $SYS_PYTHON -m venv "$VENV_DIR" || return "$?"
         _resolve_venv_paths
         "$VENV_PYTHON" -m pip install --upgrade pip
     fi
@@ -187,6 +210,14 @@ _repair_opencv() {
     _drop_extra_cv2_providers
 }
 
+_exec_draw() {
+    if [ ! -x "$VENV_DRAW" ]; then
+        echo "erro: o ambiente '$VENV_DIR' nao tem o executavel do Draw" >&2
+        exit 1
+    fi
+    exec "$VENV_DRAW" "$@"
+}
+
 if _gui_ready; then
     _drop_extra_cv2_providers
     if ! _hand_ready; then
@@ -194,7 +225,7 @@ if _gui_ready; then
         VENV_DIR="$BASE_VENV_DIR-hand"
         if _gui_ready && _hand_ready; then
             _drop_extra_cv2_providers
-            exec "$VENV_DRAW" "$@"
+            _exec_draw "$@"
         fi
         VENV_DIR="$BASE_VENV_DIR"
         _resolve_venv_paths
@@ -233,4 +264,4 @@ fi
 
 _resolve_venv_paths
 _drop_extra_cv2_providers
-exec "$VENV_DRAW" "$@"
+_exec_draw "$@"
