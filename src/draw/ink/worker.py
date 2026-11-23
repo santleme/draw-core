@@ -1334,6 +1334,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         history=_WORKER_HISTORY,
         config=None,
         ink_divnorm=False,
+        exposure_guard=True,
     ):
         self._page_clean = page_clean
         self._config = config if config is not None else InkConfig()
@@ -1343,6 +1344,10 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         # porque a passada tem folga de cadência; o laço principal
         # não paga o blur de página inteira (~42 ms/submit, #101).
         self._ink_divnorm = bool(ink_divnorm)
+        # Guarda fotometrica permanente em producao; o replay de
+        # paridade contra o laco legado (lab/parity_e2e) a abstém na
+        # construcao — o laco validado nunca teve a guarda.
+        self._exposure_guard = bool(exposure_guard)
         # Veto por movimento residual (InkConfig.motion_veto, opt-in):
         # ver draw.ink.motion.
         self._motion = (
@@ -2705,7 +2710,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 ink_support_threshold=self._config.vote_hit,
                 confirmed_ink=confirmed_ink,
             )
-            if p.exposure_guard is not None
+            if self._exposure_guard and p.exposure_guard is not None
             else None
         )
         # Cobertura de folha (cobertura de folha do loop) viaja em
@@ -3607,8 +3612,10 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         # A guarda e permanente: sem avaliacao na passada (imagem
         # fora do contrato fotometrico) falha fechada para a
         # remocao — nada prova papel, a ausencia nao pode ser
-        # testemunhada, incerteza congela.
-        paper_exposed = False
+        # testemunhada, incerteza congela. Desligada na construcao
+        # (replay de paridade) o acumulador volta a abstencao
+        # legada: None deixa a ausencia contar sem prova de papel.
+        paper_exposed = None if not self._exposure_guard else False
         physical_visible = p.visible
         if p.exposure is not None:
             # O par de registro é o da passada que VOTA

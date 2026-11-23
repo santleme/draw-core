@@ -488,15 +488,19 @@ class PageModel:
                     witness_n = int(np.count_nonzero(cell_ok))
                     if witness_n < max(4, _SHIFT_WITNESS_MIN * tested_n):
                         sample_c = cur_c[~cell_ok]
-                        cand = float(np.median(sample_c))
                     else:
                         sample_c = cur_c
-                        cand = float(np.median(cur_c[cell_ok]))
-                    cand_spread = chroma_tol * max(cand, 1e-3) + 1e-6
-                    coherent_n = int(
-                        np.count_nonzero(np.abs(sample_c - cand) <= cand_spread)
-                    )
-                    global_shift = coherent_n >= _SHIFT_COHERENCE * sample_c.size
+                    if sample_c.size > 0:
+                        cand = (
+                            float(np.median(sample_c))
+                            if witness_n < max(4, _SHIFT_WITNESS_MIN * tested_n)
+                            else float(np.median(cur_c[cell_ok]))
+                        )
+                        cand_spread = chroma_tol * max(cand, 1e-3) + 1e-6
+                        coherent_n = int(
+                            np.count_nonzero(np.abs(sample_c - cand) <= cand_spread)
+                        )
+                        global_shift = coherent_n >= _SHIFT_COHERENCE * sample_c.size
         if global_shift:
             return gain_p90, False, True
         if not chroma_valid:
@@ -539,8 +543,21 @@ class PageModel:
         gray_grid = gray_f[::step, ::step]
         gray_peak = cv2.dilate(gray_grid, kernel)
         bg_cells = max(1, 4 * cells)
-        local_bg = cv2.boxFilter(
+        vis_grid_f = input_vis[::step, ::step].astype(np.float32)
+        vis_weight = cv2.boxFilter(
+            vis_grid_f, -1, (bg_cells, bg_cells), borderType=cv2.BORDER_REPLICATE
+        )
+        vis_sum = cv2.boxFilter(
+            gray_grid * vis_grid_f,
+            -1,
+            (bg_cells, bg_cells),
+            borderType=cv2.BORDER_REPLICATE,
+        )
+        raw_bg = cv2.boxFilter(
             gray_grid, -1, (bg_cells, bg_cells), borderType=cv2.BORDER_REPLICATE
+        )
+        local_bg = np.where(
+            vis_weight > 1e-6, vis_sum / np.maximum(vis_weight, 1e-6), raw_bg
         )
         if not self._has_seeded:
             if float(gray_peak.max()) < 24.0:
@@ -550,18 +567,19 @@ class PageModel:
             ref_peak = local_bg
             eff_gain = 1.0
         else:
-            ref_grid = np.where(
-                self._seeded[::step, ::step],
-                self._norm_ref[::step, ::step],
-                local_bg,
-            )
-            ref_peak = cv2.dilate(ref_grid, kernel)
             gain, chroma_ok, chroma_shift = self._estimate_gain(
                 gray_f, bgr=bgr, visible=input_vis, chroma_tol=chroma_tol
             )
             self._last_chroma_ok = chroma_ok
             self._last_chroma_shift = chroma_shift
             eff_gain = min(gain, 1.0)
+            unseeded_ref = local_bg / max(eff_gain, 1e-3)
+            ref_grid = np.where(
+                self._seeded[::step, ::step],
+                self._norm_ref[::step, ::step],
+                unseeded_ref,
+            )
+            ref_peak = cv2.dilate(ref_grid, kernel)
         has_ref = ref_peak > 1.0
         ok = (~has_ref | (gray_peak >= (min_ratio * eff_gain) * ref_peak)) & (
             gray_peak >= 24.0

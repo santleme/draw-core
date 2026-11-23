@@ -871,3 +871,43 @@ def test_uneven_lighting_at_startup_seeds_darker_paper_and_captures_stroke(monke
         assert worker.poll(generation, 0).confirmed[stroke].all()
     finally:
         worker.stop()
+
+
+def test_exposure_guard_false_disables_tile_guard_for_legacy_parity(monkeypatch):
+    """exposure_guard=False no ctor abstem PaperExposureGuard para o replay legado."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(worker_mod, "_IDLE_PROBE_SECONDS", 0.02)
+    ink = _Scripted()
+    config = InkConfig(pass_interval_s=0.02)
+    worker = worker_mod.PageCleanWorker(
+        ink, config=config, exposure_guard=False
+    ).start()
+    generation = worker.new_generation()
+    try:
+        assert not worker._exposure_guard
+        clean = np.full((H, W, 3), 215, dtype=np.uint8)
+        scene = clean.copy()
+        scene[WITNESS] = INK_TONE
+        scene[COVERED] = INK_TONE
+        ink.content = _prob()
+        _pass_until(
+            worker,
+            generation,
+            scene,
+            lambda snap: snap is not None and snap.confirmed[COVERED].all(),
+            6,
+        )
+        assert worker.poll(generation, 0).confirmed[COVERED].all()
+
+        # Sem PaperExposureGuard, papel limpo com testemunha confirma remocao normalmente.
+        ink.content = _prob(covered_ink=False)
+        _pass_until(
+            worker,
+            generation,
+            clean,
+            lambda snap: snap is not None and not snap.confirmed[COVERED].any(),
+            12,
+        )
+        assert not worker.poll(generation, 0).confirmed[COVERED].any()
+    finally:
+        worker.stop()

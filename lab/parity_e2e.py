@@ -106,6 +106,7 @@ def run_new(
         clock=clock,
         config=legacy_config.ink,
         ink_divnorm=legacy_config.ink_divnorm,
+        exposure_guard=False,
     )
     loop = Pipeline(
         detection_worker=det,

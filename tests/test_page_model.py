@@ -3080,3 +3080,49 @@ def test_dimming_and_chroma_shift_under_partial_mask_does_not_freeze_on_reveal()
     stroke = dim_gray.copy()
     stroke[40:44, int(W * 0.6) : int(W * 0.8)] = 95
     assert model.novel(stroke)[42, int(W * 0.7)]
+
+
+def test_exposed_local_bg_ignores_occluded_regions():
+    """Regiao ocluida (visible=False) nao pode contaminar o local_bg da parte visivel."""
+    model = pm_mod.PageModel((200, 200), confirm_obs=1)
+    gray = np.full((200, 200), 160, dtype=np.uint8)
+    gray[:, :110] = 245  # manga clara ocluida
+    vis = np.ones((200, 200), dtype=bool)
+    vis[:, :110] = False
+    exp = model.exposed(gray, visible=vis)
+    assert exp[:, 112:].all()
+
+
+def test_exposed_unseeded_region_under_dimming_rejects_shadow_without_double_gain():
+    """Regiao ainda nao semeada sob escurecimento global nao pode sofrer dupla escala de eff_gain."""
+    model = pm_mod.PageModel((200, 260), confirm_obs=1)
+    init = np.full((200, 260), 220, dtype=np.uint8)
+    init_vis = np.zeros((200, 260), dtype=bool)
+    init_vis[:, :80] = True
+    model.observe(init, visible=init_vis)
+
+    dim = np.full((200, 260), 110, dtype=np.uint8)
+    dim[76:124, 156:204] = 55  # 50% do papel escurecido (< 0.78 * 110 = 85.8)
+    exp = model.exposed(dim)
+    assert not exp[100, 180]
+
+
+def test_estimate_gain_small_plateau_without_empty_median_warning():
+    """Platos minusculos (tested_n < 4) com todas as celulas ok nao disparam warning nem shift falso."""
+    import warnings
+
+    model = pm_mod.PageModel((40, 40), confirm_obs=1)
+    bgr = np.full((40, 40, 3), 200, dtype=np.uint8)
+    bgr[..., 0] = 180
+    bgr[..., 2] = 200
+    model.observe(np.full((40, 40), 200, dtype=np.uint8), bgr=bgr)
+
+    vis = np.zeros((40, 40), dtype=bool)
+    vis[0:2, 0:24] = True
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        _gain, _chroma_ok, _shift = model._estimate_gain(
+            np.full((40, 40), 200, dtype=np.float32), bgr=bgr, visible=vis
+        )
+    assert not caught
+    assert not _shift
