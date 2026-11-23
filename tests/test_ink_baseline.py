@@ -8,6 +8,7 @@ a tecla z, que faz o conteudo a vista virar a nova referencia.
 import time
 
 import numpy as np
+import pytest
 
 from draw.contracts import InkBaselineState, WarpedPage
 from draw.ink import occlusion
@@ -28,6 +29,14 @@ class _ScriptInk:
     def ink_prob(self, warped):
         gray = warped if warped.ndim == 2 else warped.mean(axis=2)
         return (gray < 100).astype(np.float32) * 0.95
+
+
+@pytest.fixture(autouse=True)
+def _fast_idle_probe(monkeypatch):
+    # A sonda ociosa de producao (1 Hz para poupar CPU) nao pode vazar
+    # para o arnes: cada passada sintetica pagaria ~1 s de espera real
+    # na cadencia (ver tests/test_page_model.py).
+    monkeypatch.setattr(worker_mod, "_IDLE_PROBE_SECONDS", 0.01)
 
 
 def _bgr(gray):

@@ -33,6 +33,15 @@ PAPER = 235.0
 INK = 40.0
 
 
+@pytest.fixture(autouse=True)
+def _fast_idle_probe(monkeypatch):
+    # A sonda ociosa de producao (1 Hz para poupar CPU) nao pode vazar
+    # para o arnes: cada passada sintetica pagaria ~1 s de espera real
+    # na cadencia. Testes que fixam a propria sonda (pump com relogio
+    # falso) sobrescrevem este patch depois — o setattr tardio vence.
+    monkeypatch.setattr(worker_mod, "_IDLE_PROBE_SECONDS", 0.01)
+
+
 def _paper(shape=(H, W)):
     return np.full(shape, PAPER, dtype=np.float32)
 
@@ -163,7 +172,7 @@ def test_shape_mismatch_raises():
         model.observe(np.zeros((H + 1, W), dtype=np.float32))
 
 
-@pytest.mark.slow
+@pytest.mark.timing
 def test_observe_budget_on_a4_grid():
     model = pm_mod.PageModel((1200, 850), confirm_obs=3)
     gray = _paper((1200, 850))
@@ -585,7 +594,7 @@ def test_page_model_reacquires_partially_covered_stroke_crossing_printed_rule(
         worker.stop()
 
 
-@pytest.mark.slow
+@pytest.mark.timing
 def test_identity_recovery_budget_on_a4_grid(monkeypatch):
     """worker.py:236 & test_page_model.py:575: avaliacao de identidade A4 com marcas em cantos opostos < 10 ms e fora do lock do worker."""
     shape = (1200, 850)

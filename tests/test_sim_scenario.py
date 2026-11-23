@@ -134,37 +134,45 @@ def test_move_shifts_final_quad():
     assert np.array_equal(still._quad_now, still.quad)
 
 
-def test_ground_truth_bundle_phase_fields(tmp_path):
+@pytest.fixture(scope="module")
+def gt_bundle(tmp_path_factory):
+    # Os dois testes do bundle GT consomem o mesmo cenario: gerar,
+    # drenar e salvar uma vez por worker; as assercoes seguem distintas.
     capture = scenario(move=(20, 10, 1.5))
     drain(capture)
-    gt = tmp_path / "scenario.gt.npz"
+    gt = tmp_path_factory.mktemp("gt") / "scenario.gt.npz"
     capture.save_ground_truth(gt)
     with np.load(gt, allow_pickle=False) as bundle:
-        for key in (
-            "page_ink_final",
-            "stroke_phase",
-            "stroke_erased",
-            "erase_rect",
-            "events",
-            "quad_final",
-            "page_to_scene_final",
-        ):
-            assert key in bundle.files
-        assert bundle["page_ink_final"].shape == bundle["page_ink_full"].shape
-        assert int(bundle["stroke_phase"].max()) == 1
-        events = json.loads(str(bundle["events"]))
-        # estado final: traço apagado some, redesenho fica no lugar
-        final = bundle["page_ink_final"] > 0
-        full = bundle["page_ink_full"] > 0
-        assert not np.array_equal(final, full)
-        erased_mask = _raster(bundle, np.nonzero(bundle["stroke_erased"])[0]) > 0
-        redraw_mask = _raster(bundle, np.nonzero(bundle["stroke_phase"] == 1)[0]) > 0
-        redraw_mask = cv2.dilate(redraw_mask.astype(np.uint8), np.ones((3, 3))) > 0
-        x, y, w, h = (int(v) for v in bundle["erase_rect"])
-        leftover = np.zeros_like(final)
-        leftover[y : y + h, x : x + w] = True
-        assert not (final & erased_mask & leftover & ~redraw_mask).any()
-        assert (final & redraw_mask).any()
+        yield capture, bundle
+
+
+def test_ground_truth_bundle_phase_fields(gt_bundle):
+    capture, bundle = gt_bundle
+    for key in (
+        "page_ink_final",
+        "stroke_phase",
+        "stroke_erased",
+        "erase_rect",
+        "events",
+        "quad_final",
+        "page_to_scene_final",
+    ):
+        assert key in bundle.files
+    assert bundle["page_ink_final"].shape == bundle["page_ink_full"].shape
+    assert int(bundle["stroke_phase"].max()) == 1
+    events = json.loads(str(bundle["events"]))
+    # estado final: traço apagado some, redesenho fica no lugar
+    final = bundle["page_ink_final"] > 0
+    full = bundle["page_ink_full"] > 0
+    assert not np.array_equal(final, full)
+    erased_mask = _raster(bundle, np.nonzero(bundle["stroke_erased"])[0]) > 0
+    redraw_mask = _raster(bundle, np.nonzero(bundle["stroke_phase"] == 1)[0]) > 0
+    redraw_mask = cv2.dilate(redraw_mask.astype(np.uint8), np.ones((3, 3))) > 0
+    x, y, w, h = (int(v) for v in bundle["erase_rect"])
+    leftover = np.zeros_like(final)
+    leftover[y : y + h, x : x + w] = True
+    assert not (final & erased_mask & leftover & ~redraw_mask).any()
+    assert (final & redraw_mask).any()
     assert [e["kind"] for e in events] == kinds(capture)
 
 
@@ -583,28 +591,24 @@ def test_polyline_rect_overlap_exclusive_border_not_erased():
     assert sim_source._polyline_rect_overlap(by_thickness, rect, 4)
 
 
-def test_page_expected_matches_simulator_final(tmp_path):
+def test_page_expected_matches_simulator_final(gt_bundle):
     """O gabarito do avaliador segue a ordem do simulador: a borracha
     correu antes do redesenho, então traço de fase 1 dentro do
     retângulo apagado é tinta esperada — não falso positivo."""
     from lab.eval_scenario import _page_expected
 
-    capture = scenario(move=(20, 10, 1.5))
-    drain(capture)
-    gt = tmp_path / "scenario.gt.npz"
-    capture.save_ground_truth(gt)
-    with np.load(gt, allow_pickle=False) as bundle:
-        # fase de redraw aplicada e borracha já corrida: o esperado
-        # do checkpoint final tem que ser exatamente o estado da folha
-        expected = _page_expected(bundle, int(bundle["stroke_phase"].size), erased=True)
-        np.testing.assert_array_equal(expected > 0, bundle["page_ink_final"] > 0)
-        # e o redesenho DENTRO do retângulo apagado sobrevive no
-        # gabarito (era o que o apagar-em-bloco zerava)
-        x, y, w, h = (int(v) for v in bundle["erase_rect"])
-        redraw = _raster(bundle, np.nonzero(bundle["stroke_phase"] == 1)[0]) > 0
-        inside = np.zeros_like(redraw)
-        inside[y : y + h, x : x + w] = True
-        assert (expected > 0)[inside & redraw].all()
+    _capture, bundle = gt_bundle
+    # fase de redraw aplicada e borracha já corrida: o esperado
+    # do checkpoint final tem que ser exatamente o estado da folha
+    expected = _page_expected(bundle, int(bundle["stroke_phase"].size), erased=True)
+    np.testing.assert_array_equal(expected > 0, bundle["page_ink_final"] > 0)
+    # e o redesenho DENTRO do retângulo apagado sobrevive no
+    # gabarito (era o que o apagar-em-bloco zerava)
+    x, y, w, h = (int(v) for v in bundle["erase_rect"])
+    redraw = _raster(bundle, np.nonzero(bundle["stroke_phase"] == 1)[0]) > 0
+    inside = np.zeros_like(redraw)
+    inside[y : y + h, x : x + w] = True
+    assert (expected > 0)[inside & redraw].all()
 
 
 def test_final_checkpoint_terminal_canvas_loss():

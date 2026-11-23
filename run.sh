@@ -149,6 +149,10 @@ _install_gui() {
         if [ "$#" -gt 0 ]; then
             extras=gui,hand
         fi
+        # pip nao le [tool.uv.sources]: sem o membro instalado antes, a
+        # dependencia "draw-dral" do draw-core nao resolve fora do
+        # workspace. Instalado primeiro, ela ja consta como satisfeita.
+        "$VENV_PYTHON" -m pip install -e "./packages/draw-dral" || return "$?"
         "$VENV_PYTHON" -m pip install -e ".[$extras]"
     fi
 }

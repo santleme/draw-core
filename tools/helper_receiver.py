@@ -41,9 +41,11 @@ import threading
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
+# draw.protocol reexporta o handshake de draw_dral (pacote draw-dral):
+# sem instalar nada, os dois src/ entram no path.
+for extra in (ROOT / "src", ROOT / "packages" / "draw-dral" / "src"):
+    if str(extra) not in sys.path:
+        sys.path.insert(0, str(extra))
 
 import draw.protocol as _protocol  # noqa: E402
 from draw.protocol import (  # noqa: E402

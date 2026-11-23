@@ -7,8 +7,13 @@ consumidor distinguir a fonte. Cada frame sai como a tupla
 monotônico do ajudante, ancorado na captura, e só serve para
 diferenças dentro da mesma sessão.
 
-Toda conexão TCP começa pelo handshake de token (PROTOCOL.md,
-"Authentication handshake"). O token entra por parâmetro ou por
+O handshake de token (PROTOCOL.md, "Authentication handshake"), os
+erros e o leitor `_read_exact` moram agora em `draw_dral.wire`
+(pacote draw-dral), compartilhados com o fio DRAL — reexportados
+aqui para compatibilidade. A reexportação preserva imports e
+leituras; escrever num nome reexportado (ex.: monkeypatch) não
+alcança `draw_dral.wire` — quem precisa mira lá. O token entra por
+parâmetro ou por
 arquivo: a única leitura de ambiente permitida no runtime é
 DRAW_MODEL_STRICT (regra do repositório), então o app recebe
 --helper-token-file e o tools/helper_receiver.py aceita
@@ -20,14 +25,35 @@ para camera.open_capture: read() -> (ok, frame) preservando o
 carimbo monotônico real de captura em last_capture_ts_ms.
 """
 
-import hmac
 import socket
 import struct
 import time
 from pathlib import Path
 from urllib.parse import urlparse
 
+import draw_dral.wire as _wire
+from draw_dral.wire import (
+    HANDSHAKE_TIMEOUT_S,
+    ProtocolError,
+    _read_exact,
+    client_handshake,
+    resolve_token,
+)
+
 from .infra.safe_io import decode_image, image_format
+
+# Reexportados para compatibilidade (ver docstring): nomes do handshake
+# que este modulo nao consome internamente, mas consumidores como
+# tools/helper_receiver.py e draw.stream importam daqui.
+ACCEPT = _wire.ACCEPT
+HELLO = _wire.HELLO
+HELLO_MAGIC = _wire.HELLO_MAGIC
+HELLO_VERSION = _wire.HELLO_VERSION
+TOKEN_ENV = _wire.TOKEN_ENV
+TOKEN_MAX_LEN = _wire.TOKEN_MAX_LEN
+TOKEN_MIN_LEN = _wire.TOKEN_MIN_LEN
+AuthenticationError = _wire.AuthenticationError
+server_handshake = _wire.server_handshake
 
 MAGIC = b"DRAW"
 VERSION = 1
@@ -42,98 +68,11 @@ MAX_PAYLOAD_LEN = 16 << 20
 MAX_FRAME_SIDE = 8192
 MAX_FRAME_PIXELS = 40_000_000
 
-# Handshake de autenticação (PROTOCOL.md): o cliente envia
-# HELLO(magic, versão, len) + token; o ajudante responde ACCEPT ou fecha.
-HELLO_MAGIC = b"DRAH"
-HELLO_VERSION = 1
-HELLO = struct.Struct("<4sHH")
-ACCEPT = b"DROK"
-TOKEN_ENV = "DRAW_HELPER_TOKEN"
-TOKEN_MIN_LEN = 16
-TOKEN_MAX_LEN = 256
-HANDSHAKE_TIMEOUT_S = 5.0
-
 # Janelas de socket vazias (timeout de recv sem nenhum byte) que uma
 # leitura do HelperCapture tolera antes de desistir do registro. Um
 # stall breve não mata o iterador; um emissor morto ainda é
 # declarado morto depois de ~4 janelas de silêncio.
 _STALL_WINDOWS = 3
-
-
-class ProtocolError(RuntimeError):
-    """O fluxo violou bridge/PROTOCOL.md (magic, versão ou truncamento)."""
-
-
-class AuthenticationError(ProtocolError):
-    """Token ausente, inválido ou recusado pelo ajudante."""
-
-
-def resolve_token(token=None, token_file=None):
-    """Token como bytes: argumento ou arquivo (--helper-token-file).
-
-    Sem fallback de ambiente — no runtime a única variável lida é
-    DRAW_MODEL_STRICT. O fallback para DRAW_HELPER_TOKEN mora no
-    wrapper de ferramentas (tools/helper_receiver.py).
-    """
-    if token is None and token_file:
-        try:
-            token = Path(token_file).read_text(encoding="utf-8").strip()
-        except OSError as error:
-            raise AuthenticationError(
-                f"nao consegui ler o arquivo de token {token_file!r}: {error}"
-            ) from error
-    if token is None:
-        token = ""
-    if isinstance(token, str):
-        token = token.encode("utf-8")
-    if not TOKEN_MIN_LEN <= len(token) <= TOKEN_MAX_LEN:
-        raise AuthenticationError(
-            f"token do ajudante ausente ou fora de {TOKEN_MIN_LEN}..{TOKEN_MAX_LEN} "
-            "bytes; use --helper-token-file"
-        )
-    return token
-
-
-def client_handshake(sock, token):
-    """Lado WSL: envia o token e exige ACCEPT antes de qualquer frame."""
-    token = resolve_token(token)
-    sock.sendall(HELLO.pack(HELLO_MAGIC, HELLO_VERSION, len(token)) + token)
-    try:
-        reply = _read_exact(sock.recv, len(ACCEPT))
-    except (ProtocolError, OSError) as error:
-        raise AuthenticationError(f"ajudante fechou o handshake: {error}") from error
-    if reply != ACCEPT:
-        raise AuthenticationError("ajudante recusou o token (handshake sem ACCEPT)")
-
-
-def server_handshake(conn, token, timeout=HANDSHAKE_TIMEOUT_S):
-    """Lado ajudante: True e ACCEPT enviado se o token confere.
-
-    Espelha bridge/windows_helper.authenticate_client (usado no
-    selfcheck e nos testes). Qualquer falha devolve False sem
-    responder; quem chamou fecha a conexão.
-    """
-    expected = resolve_token(token)
-    previous = conn.gettimeout()
-    conn.settimeout(timeout)
-    try:
-        hello = _read_exact(conn.recv, HELLO.size)
-        if hello is None:
-            return False
-        magic, version, length = HELLO.unpack(hello)
-        if magic != HELLO_MAGIC or version != HELLO_VERSION:
-            return False
-        if not TOKEN_MIN_LEN <= length <= TOKEN_MAX_LEN:
-            return False
-        offered = _read_exact(conn.recv, length)
-        if offered is None or not hmac.compare_digest(offered, expected):
-            return False
-        conn.sendall(ACCEPT)
-        return True
-    except (ProtocolError, OSError):
-        return False
-    finally:
-        conn.settimeout(previous)
 
 
 def _connect(host, port, token, timeout):
@@ -155,74 +94,6 @@ def pack_record(frame_id, capture_ts_us, payload):
     return (
         HEADER.pack(MAGIC, VERSION, 0, frame_id, capture_ts_us, len(payload)) + payload
     )
-
-
-def _read_exact(
-    read,
-    size,
-    stall_retries=0,
-    deadline=None,
-    clock=time.monotonic,
-    recv_timeout=None,
-):
-    """Lê exatamente size bytes via read(n) -> bytes.
-
-    Retorna None se a fonte acabar limpa antes do primeiro byte.
-    Levanta ProtocolError se acabar no meio — ou depois de
-    `stall_retries` janelas de socket consecutivas sem nenhum byte,
-    ou ao estourar `deadline` (relogio absoluto) com bytes parciais.
-
-    Um socket.timeout não dessincroniza nada: os bytes já consumidos
-    ficaram em `chunks` e o restante continua chegando no próximo
-    recv. O timeout vale como detector de stall, não como fim de
-    fluxo — por isso a tolerância é contada aqui, dentro da leitura,
-    onde o fluxo ainda está íntegro (depois que a exceção sobe, o
-    iterador morre e qualquer retry externo lê lixo).
-
-    `deadline` e o prazo ABSOLUTO do registro: o timeout do socket e
-    por recv, entao um frame que chega pingando byte a byte passava
-    por qualquer janela — so um prazo total limita a montagem. Com
-    `recv_timeout` (ex.: sock.settimeout) o bloqueio do recv e
-    clampeado ao orcamento restante: um frame nunca completa depois
-    do prazo.
-    """
-    chunks = []
-    remaining = size
-    stalls = 0
-    while remaining > 0:
-        if deadline is not None:
-            budget = deadline - clock()
-            if budget <= 0:
-                raise ProtocolError(
-                    f"registro estourou o prazo com {len(chunks)} "
-                    f"chunks lidos (faltaram {remaining} de {size} bytes)"
-                )
-            if recv_timeout is not None:
-                recv_timeout(budget)
-        try:
-            chunk = read(remaining)
-        except (TimeoutError, socket.timeout) as error:
-            stalls += 1
-            if stalls <= stall_retries:
-                continue
-            # Sem orcamento de stall o timeout sobe intacto — quem
-            # pega TimeoutError/OSError (frames_from_socket, record)
-            # continua funcionando. Com orcamento esgotado o desfecho
-            # e de protocolo: o emissor esta parado.
-            if not stall_retries:
-                raise
-            raise ProtocolError(
-                f"emissor parado: {stalls} janelas de socket vazias "
-                f"seguidas (faltaram {remaining} de {size} bytes)"
-            ) from error
-        if not chunk:
-            if not chunks:
-                return None
-            raise ProtocolError(f"fluxo truncado: faltaram {remaining} de {size} bytes")
-        stalls = 0
-        chunks.append(chunk)
-        remaining -= len(chunk)
-    return b"".join(chunks)
 
 
 def _iter_records(
@@ -543,3 +414,11 @@ class HelperCapture:
             except OSError:
                 pass
             self._handle = None
+
+
+def __getattr__(name):
+    return getattr(_wire, name)
+
+
+def __dir__():
+    return sorted(set(globals()) | set(dir(_wire)))
