@@ -384,21 +384,6 @@ class InkPublication:
 
 
 @dataclass(frozen=True, slots=True)
-class GateInfo:
-    """O pacote do portão de primeira confirmação (frente 88).
-
-    Extraído do rastro da detecção combinada quando ela traz os
-    campos do portão: a fonte do desfecho, o logit de presença e a
-    fração de aresta da máscara. Rastro sem esses campos não tem
-    pacote — o laço não julga por falta de sinal.
-    """
-
-    source: str | None = None
-    presence_logit: float | None = None
-    edge_in: float | None = None
-
-
-@dataclass(frozen=True, slots=True)
 class DetectionResult:
     """Um resultado de detecção de folha publicado pelo worker.
 
@@ -409,7 +394,6 @@ class DetectionResult:
     fechou" é um caso legítimo (presença sem posição). captured_at é
     o carimbo de captura do quadro
     examinado; detect_ms é a duração da detecção em ms, >= 0.
-    gate_info é o pacote do portão quando o rastro o traz.
     coverage_mask e hand_mask são máscaras 2D uint8 (visões
     somente-leitura do buffer recebido) publicadas só quando o
     detector roda com cobertura; sem cobertura ficam None.
@@ -420,7 +404,6 @@ class DetectionResult:
     verdict: str | None
     captured_at: float
     detect_ms: float
-    gate_info: GateInfo | None = None
     coverage_mask: np.ndarray | None = None
     hand_mask: np.ndarray | None = None
 

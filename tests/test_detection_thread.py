@@ -10,7 +10,7 @@ O contrato, com um detector falso que bloqueia de propósito:
    detectado, não o instante em que a detecção terminou.
 
 Cobre também o formato do DetectionResult publicado (campos
-opcionais de portão e cobertura) e o parâmetro coverage da
+opcionais de cobertura) e o parâmetro coverage da
 trabalhadora, que decide se as máscaras da detecção são publicadas.
 """
 
@@ -20,15 +20,13 @@ import time
 import numpy as np
 import pytest
 
-from draw.contracts import GateInfo
-from draw.tracker import SheetDetectionWorker, _gate_info_from_trace
+from draw.tracker import SheetDetectionWorker
 
 CORNERS = np.array([[0, 0], [10, 0], [10, 10], [0, 10]], dtype=np.float32)
 QUAD = np.array(
     [[100.0, 100.0], [500.0, 100.0], [500.0, 400.0], [100.0, 400.0]],
     dtype=np.float32,
 )
-WEAK = {"source": "neural", "presence_logit": 0.32, "edge_in": 0.001}
 
 
 class _BlockingDetector:
@@ -121,16 +119,7 @@ def test_detector_error_is_kept_for_the_loop():
         worker.stop()
 
 
-# ---------- pacote do portão: rastro -> trabalhadora ----------
-
-
-def test_gate_info_from_trace():
-    assert _gate_info_from_trace(None) is None
-    assert _gate_info_from_trace({}) is None
-    trace = {"source": "neural", "presence_logit": 0.32, "edge_in": 0.001}
-    assert _gate_info_from_trace(trace) == GateInfo(
-        source="neural", presence_logit=0.32, edge_in=0.001
-    )
+# ---------- rastro da detecção -> trabalhadora ----------
 
 
 def test_worker_result_fields_with_and_without_trace():
@@ -141,22 +130,24 @@ def test_worker_result_fields_with_and_without_trace():
     try:
         worker.submit(np.zeros((8, 8, 3), np.uint8), 1.0, 0)
         result = _poll_until(worker, 0)
-        assert result.gate_info is None
         assert result.coverage_mask is None
         assert result.hand_mask is None
+        assert worker.take_traces() == []
     finally:
         worker.stop()
 
     def detect_traced(_frame):
-        return QUAD.copy(), "paper", dict(WEAK)
+        return QUAD.copy(), "paper", {"source": "neural"}
 
     worker = SheetDetectionWorker(detect_traced).start()
     try:
         worker.submit(np.zeros((8, 8, 3), np.uint8), 1.0, 0)
         result = _poll_until(worker, 0)
-        assert result.gate_info == GateInfo(
-            source="neural", presence_logit=0.32, edge_in=0.001
-        )
+        traces = worker.take_traces()
+        assert len(traces) == 1
+        assert traces[0]["source"] == "neural"
+        assert traces[0]["result_seq"] == result.sequence
+        assert worker.take_traces() == []
     finally:
         worker.stop()
 
@@ -174,7 +165,6 @@ def test_worker_forwards_extras_with_coverage_on():
     try:
         worker.submit(np.zeros((8, 8, 3), np.uint8), 1.0, 0)
         result = _poll_until(worker, 0)
-        assert result.gate_info is None, "sem rastro de portão não há pacote"
         np.testing.assert_array_equal(result.coverage_mask, mask)
     finally:
         worker.stop()
