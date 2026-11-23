@@ -610,6 +610,45 @@ def test_cli_run_and_sweep_refuse_a_tampered_registered_frame(tmp_path, monkeypa
     assert not (out_dir / "sw2" / "results.jsonl").exists()
 
 
+def test_cli_run_and_sweep_allow_unverified_controls_model_verify(
+    tmp_path, monkeypatch
+):
+    """--allow-unverified entrega verify=None a run_corpus/run_sweep; sem a
+    flag, o callable verify_model do manifesto (mesma régua das bancadas)."""
+    import lab.corpus.run as run_mod
+    import lab.corpus.sweep as sweep_mod
+    from lab.corpus.__main__ import main
+
+    from draw.infra.manifest import verify_model
+
+    seen = []
+    monkeypatch.setattr(
+        run_mod,
+        "run_corpus",
+        lambda root, bundles, **kw: seen.append(kw["verify"]) or [],
+    )
+    monkeypatch.setattr(
+        sweep_mod,
+        "run_sweep",
+        lambda root, spec, **kw: seen.append(kw["verify"]) or [],
+    )
+
+    common = {
+        "run": ["run", str(tmp_path), "--bundle", "base:"],
+        "sweep": ["sweep", str(tmp_path), "--grid", "coverage=0"],
+    }
+    assert main([*common["run"], "--out", str(tmp_path / "r1")]) == 0
+    assert main([*common["sweep"], "--out", str(tmp_path / "s1")]) == 0
+    assert (
+        main([*common["run"], "--allow-unverified", "--out", str(tmp_path / "r2")]) == 0
+    )
+    assert (
+        main([*common["sweep"], "--allow-unverified", "--out", str(tmp_path / "s2")])
+        == 0
+    )
+    assert seen == [verify_model, verify_model, None, None]
+
+
 def test_run_bundle_replays_only_the_registered_inventory(tmp_path):
     """preview.png e um raw/ solto ficam FORA do replay: o corpus passa
     a run_clip o mesmo inventario f*.png que o hash cobre."""
@@ -853,8 +892,7 @@ def test_report_rerenderiza_com_baseline_salvo(monkeypatch, tmp_path, capsys):
             "control:",
             "--baseline",
             "control",
-            "--verify",
-            "none",
+            "--allow-unverified",
             "--out",
             str(out),
         ]

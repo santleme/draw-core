@@ -714,7 +714,7 @@ def diff_panel(scen_dir, canvas_bin, out_path):
     return {"tp": int(tp.sum()), "fn": int(fn.sum()), "fp": int(fp.sum())}
 
 
-def audit_one(scen_dir, out_dir, flags, detector_kind="real"):
+def audit_one(scen_dir, out_dir, flags, detector_kind="real", verify="manifest"):
     """Um cenário, um braço, NESTE processo (isolamento de flags).
 
     detector_kind="real": detecção combinada real (neural+clássica)
@@ -726,7 +726,12 @@ def audit_one(scen_dir, out_dir, flags, detector_kind="real"):
     mistura falha de geometria sintética em toda métrica de tinta;
     o braço-oráculo isola a pilha de tinta — que é onde moram as
     perguntas da E3, das bandas finas e da fuga de impressão. O
-    braço real fica como medida do gap sintético→detector."""
+    braço real fica como medida do gap sintético→detector.
+
+    verify é o callable de integridade dos modelos: "manifest" injeta
+    draw.infra.manifest.verify_model; None pula a verificação (opt-out
+    total do --allow-unverified de lab/, diferente do app, onde a flag
+    só rebaixa falhas para aviso)."""
     from draw.contracts import DetectionResult, FramePacket
     from draw.infra.manifest import verify_model
     from draw.ink.worker import PageCleanWorker
@@ -734,6 +739,8 @@ def audit_one(scen_dir, out_dir, flags, detector_kind="real"):
     from draw.perception import NeuralSheetDetector
     from draw.pipeline import Pipeline
 
+    if verify == "manifest":
+        verify = verify_model
     config = _parse_flags(flags)
     if config.ink_divnorm:
         # A auditoria roda sempre o INK_MODEL do slot de produção (v2
@@ -747,9 +754,9 @@ def audit_one(scen_dir, out_dir, flags, detector_kind="real"):
     scen_dir, out_dir = Path(scen_dir), Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     side = json.loads((scen_dir / "sidecar.json").read_text())
-    detector = NeuralSheetDetector(str(SHEET_MODEL), verify=verify_model)
+    detector = NeuralSheetDetector(str(SHEET_MODEL), verify=verify)
     detector.load()
-    page_clean = PageCleanInk(str(INK_MODEL), verify=verify_model)
+    page_clean = PageCleanInk(str(INK_MODEL), verify=verify)
     page_clean.load()
 
     clock = StepClock()
@@ -988,7 +995,7 @@ def audit_one(scen_dir, out_dir, flags, detector_kind="real"):
     return res
 
 
-def audit(corpus, out, flags, scenarios, detector_kind="real"):
+def audit(corpus, out, flags, scenarios, detector_kind="real", allow_unverified=False):
     """Roda cada cenário num subprocesso (flags isoladas, ONNX
     sequencial) e consolida."""
     out = Path(out)
@@ -1009,6 +1016,8 @@ def audit(corpus, out, flags, scenarios, detector_kind="real"):
         ]
         if flags:
             cmd += ["--flags", ",".join(flags)]
+        if allow_unverified:
+            cmd += ["--allow-unverified"]
         r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode != 0:
             print(r.stdout[-3000:])
@@ -1031,21 +1040,44 @@ def main(argv=None):
     a.add_argument("--flags", default="")
     a.add_argument("--detector", default="real", choices=["real", "oracle"])
     a.add_argument("--scenarios", default=",".join(SCENARIOS))
+    a.add_argument(
+        "--allow-unverified",
+        action="store_true",
+        help="desliga a verificacao sha256 dos modelos",
+    )
     o = sub.add_parser("audit-one")
     o.add_argument("--corpus", required=True)
     o.add_argument("--out", required=True)
     o.add_argument("--flags", default="")
     o.add_argument("--detector", default="real", choices=["real", "oracle"])
+    o.add_argument(
+        "--allow-unverified",
+        action="store_true",
+        help="desliga a verificacao sha256 dos modelos",
+    )
     args = ap.parse_args(argv)
     scenarios = [s for s in getattr(args, "scenarios", "").split(",") if s.strip()]
     if args.cmd == "generate":
         generate(args.out, scenarios)
     elif args.cmd == "audit":
         flags = [f for f in args.flags.split(",") if f.strip()]
-        audit(args.corpus, args.out, flags, scenarios, detector_kind=args.detector)
+        audit(
+            args.corpus,
+            args.out,
+            flags,
+            scenarios,
+            detector_kind=args.detector,
+            allow_unverified=args.allow_unverified,
+        )
     else:
         flags = [f for f in args.flags.split(",") if f.strip()]
-        audit_one(args.corpus, args.out, flags, detector_kind=args.detector)
+        audit_one(
+            args.corpus,
+            args.out,
+            flags,
+            detector_kind=args.detector,
+            verify=None if args.allow_unverified else "manifest",
+        )
     return 0
 
 

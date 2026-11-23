@@ -29,14 +29,12 @@ def _parse_bundles(specs: list[str]) -> dict:
     return bundles
 
 
-def _resolve_verify(mode: str):
-    if mode == "none":
+def _resolve_verify(allow_unverified: bool):
+    if allow_unverified:
         return None
-    if mode == "manifest":
-        from draw.infra.manifest import verify_model
+    from draw.infra.manifest import verify_model
 
-        return verify_model
-    raise ValueError(f"--verify invalido: {mode!r}")
+    return verify_model
 
 
 def _cmd_init(args) -> int:
@@ -121,7 +119,7 @@ def _cmd_run(args) -> int:
 
     bundles = _parse_bundles(args.bundle)
     baseline = args.baseline or next(iter(bundles))
-    verify = _resolve_verify(args.verify)
+    verify = _resolve_verify(args.allow_unverified)
     # --models e reservado para futura passagem de diretorio de modelos customizados
     _ = args.models
     results = run_corpus(
@@ -151,7 +149,7 @@ def _cmd_sweep(args) -> int:
     base_flags = [f.strip() for f in args.base.split(",") if f.strip()]
     bundles = grid_bundles(parse_grid(args.grid), base_flags=base_flags)
     baseline = args.baseline or next(iter(bundles))
-    verify = _resolve_verify(args.verify)
+    verify = _resolve_verify(args.allow_unverified)
     results = run_sweep(
         args.root,
         args.grid,
@@ -224,7 +222,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--baseline", default=None)
     p_run.add_argument("--only", action="append", default=[])
     p_run.add_argument("--models", default=None)
-    p_run.add_argument("--verify", choices=("manifest", "none"), default="manifest")
+    p_run.add_argument(
+        "--allow-unverified",
+        action="store_true",
+        help="desliga a verificacao sha256 dos modelos",
+    )
     p_run.add_argument("--out", default="corpus-out")
 
     p_swp = sub.add_parser("sweep", help="varre grade cartesiana de flags")
@@ -232,7 +234,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_swp.add_argument("--grid", required=True)
     p_swp.add_argument("--base", default="")
     p_swp.add_argument("--baseline", default=None)
-    p_swp.add_argument("--verify", choices=("manifest", "none"), default="manifest")
+    p_swp.add_argument(
+        "--allow-unverified",
+        action="store_true",
+        help="desliga a verificacao sha256 dos modelos",
+    )
     p_swp.add_argument("--out", default="corpus-sweep")
 
     p_rep = sub.add_parser("report", help="rerrenderiza Markdown de results.jsonl")

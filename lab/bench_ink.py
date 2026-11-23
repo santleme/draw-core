@@ -746,6 +746,11 @@ def main(argv=None):
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--models", default=str(_REPO_ROOT / "models"))
+    parser.add_argument(
+        "--allow-unverified",
+        action="store_true",
+        help="desliga a verificacao sha256 dos modelos",
+    )
     parser.add_argument("--json", help="grava o resultado completo neste arquivo")
     args = parser.parse_args(argv)
     if not args.synthetic and not args.clips:
@@ -789,6 +794,7 @@ def main(argv=None):
         from draw.page_clean import PageCleanInk
         from draw.perception import NeuralSheetDetector
 
+        verify = None if args.allow_unverified else verify_model
         models = Path(args.models)
 
         def fresh_detector():
@@ -796,14 +802,12 @@ def main(argv=None):
             # entre clipes/presets faria o resultado depender da ordem de
             # execução (review do PR #54).
             detector = NeuralSheetDetector(
-                str(models / "draw_seg_v3_dyn.onnx"), verify=verify_model
+                str(models / "draw_seg_v3_dyn.onnx"), verify=verify
             )
             detector.load()
             return detector
 
-        page_clean = PageCleanInk(
-            str(models / "page_clean_unet.onnx"), verify=verify_model
-        )
+        page_clean = PageCleanInk(str(models / "page_clean_unet.onnx"), verify=verify)
         page_clean.load()
         rows = []
         for clip in sorted(Path(args.clips).iterdir()):
@@ -817,7 +821,7 @@ def main(argv=None):
                     preset_flags(preset),
                     detector=fresh_detector(),
                     page_clean=page_clean,
-                    verify=None,
+                    verify=verify,
                 )
                 row["preset"] = preset
                 row.pop("_canvas")

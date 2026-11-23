@@ -55,6 +55,70 @@ def test_audit_refuses_ink_divnorm_with_frozen_model(tmp_path):
         audit_one(tmp_path, tmp_path / "out", ["ink_divnorm=1"])
 
 
+def test_audit_appends_allow_unverified_to_audit_one_cmd(tmp_path, monkeypatch):
+    """O --allow-unverified do `audit` atravessa o subprocesso do audit-one;
+    sem a flag o cmd sai limpo."""
+    import json
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    import lab.sim_writer as sw
+
+    cmds = []
+
+    def fake_run(cmd, **_kw):
+        cmds.append(list(cmd))
+        out_dir = Path(cmd[cmd.index("--out") + 1])
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "result.json").write_text(json.dumps({"scenario": "x"}))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(sw.subprocess, "run", fake_run)
+    argv = [
+        "audit",
+        "--corpus",
+        str(tmp_path / "corpus"),
+        "--out",
+        str(tmp_path / "out"),
+        "--scenarios",
+        "cursive",
+    ]
+    assert sw.main(argv) == 0
+    assert sw.main([*argv, "--allow-unverified"]) == 0
+    assert len(cmds) == 2
+    assert "--allow-unverified" not in cmds[0]
+    assert "--allow-unverified" in cmds[1]
+
+
+def test_audit_one_resolves_manifest_verify_and_none_opt_out(tmp_path, monkeypatch):
+    """audit_one converte "manifest" no callable verify_model e aceita o
+    opt-out None — o detector é construído com o verify resolvido."""
+    import lab.sim_writer as sw
+
+    from draw.infra.manifest import verify_model
+
+    # audit_one lê o sidecar antes de construir os modelos; "{}" basta
+    # porque a sonda aborta no construtor do detector.
+    (tmp_path / "sidecar.json").write_text("{}")
+
+    seen = []
+
+    class _Bail(Exception):
+        pass
+
+    def _probe(path, *, verify=None):
+        seen.append(verify)
+        raise _Bail
+
+    monkeypatch.setattr("draw.perception.NeuralSheetDetector", _probe)
+
+    for verify in ("manifest", None):
+        with pytest.raises(_Bail):
+            sw.audit_one(tmp_path, tmp_path / "out", [], verify=verify)
+
+    assert seen == [verify_model, None]
+
+
 def test_parse_flags_validates_final_hysteresis_thresholds():
     from lab.sim_writer import _parse_flags
 

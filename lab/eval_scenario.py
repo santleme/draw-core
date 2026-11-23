@@ -723,6 +723,11 @@ def main(argv=None):
     parser.add_argument("--page-clean-model")
     parser.add_argument("--hand-model")
     parser.add_argument(
+        "--allow-unverified",
+        action="store_true",
+        help="desliga a verificacao sha256 dos modelos",
+    )
+    parser.add_argument(
         "--save-masks",
         type=Path,
         help="grava a máscara confirmada de cada checkpoint como PNG",
@@ -738,6 +743,7 @@ def main(argv=None):
             "hand": args.hand_model,
         },
         save_masks=args.save_masks,
+        verify=None if args.allow_unverified else "manifest",
     )
     text = json.dumps(report, ensure_ascii=False, indent=2)
     if args.out:
