@@ -1661,6 +1661,63 @@ def test_page_model_global_dim_plus_chroma_shift_keeps_luminance_gain():
     assert np.all(exp[8:32, 8:120])
 
 
+def _partial_cover_then_light_change(gain, blue_over_red, covered_rows):
+    """Folha madura; a luz muda (ganho e/ou B/R) enquanto `covered_rows` da
+    folha (a parte de baixo) esta coberta, e so a parte visivel adapta os
+    refs. Devolve (modelo, gray, bgr) na luz nova, ja com a folha revelada."""
+    model = pm_mod.PageModel((H, W), confirm_obs=1, rate=0.5)
+    model.observe(_paper(), paper=np.ones((H, W), dtype=bool), bgr=_bgr(_paper()))
+    gray = _paper() * np.float32(gain)
+    bgr = np.stack([gray * blue_over_red, gray, gray], axis=-1).astype(np.uint8)
+    cover = np.ones((H, W), dtype=bool)
+    cover[H - covered_rows :, :] = False
+    for _ in range(6):
+        obs = cover & model.exposed(gray, bgr=bgr, visible=cover)
+        model.observe(gray, visible=obs, paper=obs, bgr=bgr)
+    return model, gray, bgr
+
+
+@pytest.mark.parametrize("covered_rows", [29, 58], ids=["30pct", "60pct"])
+def test_page_model_partial_cover_during_dim_and_warm_shift_keeps_the_gain(
+    covered_rows,
+):
+    """Review do #162: parte da folha adapta a luz mais fraca E mais quente
+    enquanto o resto esta coberto. Na revelacao as celulas que adaptaram
+    casam com o ref e contavam como testemunhas de "oclusor local", mantendo
+    o veto de croma: o ganho caia para 1,0 e a regiao revelada ficava
+    congelada para sempre (0 % exposta; um traco novo nunca confirmava).
+    As celulas reprovadas veem a MESMA cor atual das testemunhas — ref
+    velho, nao oclusor — entao o ganho (0,744) e preservado."""
+    model, gray, bgr = _partial_cover_then_light_change(0.744, 0.5, covered_rows)
+    gain, _chroma_ok, shift = model._estimate_gain(gray, bgr=bgr)
+    assert gain == pytest.approx(0.744, abs=0.02)
+    assert shift is True
+    revealed = model.exposed(gray, bgr=bgr)[H - covered_rows + 4 : H - 4, 8:-8]
+    assert revealed.all()
+    # Um traco novo na regiao revelada e visto como tinta nova.
+    stroke = gray.copy()
+    r0 = H - covered_rows + 12
+    stroke[r0 : r0 + 4, 30:90] = 45.0
+    stroke_bgr = np.stack([stroke * 0.5, stroke, stroke], axis=-1).astype(np.uint8)
+    assert model.exposed(stroke, bgr=stroke_bgr)[r0 + 2, 60]
+    assert model.novel(stroke)[r0 + 2, 60]
+
+
+def test_page_model_dominant_occluder_of_another_color_still_vetoes_the_gain():
+    """Controle negativo do teste acima: se as celulas reprovadas veem uma cor
+    DIFERENTE da das testemunhas (mao/sombra tingida cobrindo boa parte da
+    folha), nao e deslocamento de luz — o veto de croma fica (ganho 1,0,
+    sem deslocamento global) e a regiao nao e exposta."""
+    model = pm_mod.PageModel((H, W), confirm_obs=1, rate=0.5)
+    model.observe(_paper(), paper=np.ones((H, W), dtype=bool), bgr=_bgr(_paper()))
+    gray = _paper()
+    bgr = _bgr(gray)
+    bgr[40:, :, 0] = np.uint8(PAPER * 0.35)  # oclusor quente so em 58 % da folha
+    gain, chroma_ok, shift = model._estimate_gain(gray, bgr=bgr)
+    assert (gain, chroma_ok, shift) == (1.0, False, False)
+    assert not model.exposed(gray, bgr=bgr)[48:88, 16:112].any()
+
+
 def test_page_model_hand_exit_holds_until_uncovered_stroke_confirms_before_rest(
     monkeypatch,
 ):

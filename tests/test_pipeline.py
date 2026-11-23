@@ -1674,7 +1674,11 @@ class _BaselineInk(_FakeInkWorker):
 
 
 def test_baseline_state_and_rezero_need_page_model_and_active_sheet():
-    off, _, off_ink = _make_loop([], ink=_BaselineInk())
+    off, _, off_ink = _make_loop(
+        [],
+        config=PipelineConfig(ink=InkConfig(page_model=False), **_BASE),
+        ink=_BaselineInk(),
+    )
     assert off.ink_baseline_state().phase == "disabled"
     assert off.rezero_ink_baseline() is False
     assert off_ink.rezero_calls == 0

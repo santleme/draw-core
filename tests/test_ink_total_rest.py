@@ -15,6 +15,7 @@ tinta falsa contavel:
 3. A mao volta e a cadencia ativa volta junto, na hora.
 """
 
+import dataclasses
 import threading
 import time
 
@@ -92,6 +93,14 @@ def _wait_resting(worker, timeout=2.0):
     return False
 
 
+def _production_votes():
+    """Preset de producao SEM o PageModel: o teste compara o caminho de votos
+    (legado x estrito); o PageModel trata o conteudo estatico como pagina."""
+    from draw.ink.config import InkConfig
+
+    return dataclasses.replace(InkConfig.production(), page_model=False)
+
+
 def test_total_rest_after_settle_without_hand(monkeypatch):
     monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.02)
     monkeypatch.setattr(worker_mod, "_IDLE_PROBE_SECONDS", 0.05)
@@ -161,7 +170,6 @@ def test_production_vote_confirms_late_stroke_after_hand_exit_and_then_rests():
     escrito logo antes da mao sair (visto 1x antes da saida e o resto apos
     a saida) precisa fechar as 3 leituras do InkConfig.production() antes
     do descanso total e depois entrar em descanso sem novo movimento."""
-    from draw.ink.config import InkConfig
 
     class _LateDashInk:
         threshold = 0.7
@@ -181,7 +189,7 @@ def test_production_vote_confirms_late_stroke_after_hand_exit_and_then_rests():
 
     now = [1000.0]
     fake = _LateDashInk()
-    cfg = InkConfig.production()
+    cfg = _production_votes()
     worker = worker_mod.PageCleanWorker(fake, clock=lambda: now[0], config=cfg)
     generation = worker.new_generation()
     worker.set_hand_presence(True, moved=True)
@@ -335,6 +343,6 @@ def test_queued_masked_frame_on_exit_legacy_vs_production():
     assert legacy_px == 0
     assert legacy_worker.stats()["resting"] is True
 
-    prod_px, prod_worker = _run_case(InkConfig.production())
+    prod_px, prod_worker = _run_case(_production_votes())
     assert prod_px == 8 * 15
     assert prod_worker.stats()["resting"] is True

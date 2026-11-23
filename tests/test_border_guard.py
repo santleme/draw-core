@@ -162,7 +162,9 @@ def test_jitter_against_dark_desk_does_not_confirm_or_provisional_border_ink(
         extras = {"coverage_mask": cov_mask} if with_coverage else None
         return quad, "paper", extras
 
-    ink_cfg = dataclasses.replace(InkConfig.production(), paper_guard=False)
+    ink_cfg = dataclasses.replace(
+        InkConfig.production(), paper_guard=False, page_model=False
+    )
     pipe_cfg = PipelineConfig(
         coverage=with_coverage,
         ink_auto_gain=False,
@@ -208,7 +210,9 @@ def test_empty_page_with_jitter_against_dark_desk_stays_empty():
     cov_mask = np.zeros((720, 1280), np.uint8)
     cov_mask[100:600, 200:560] = 255
 
-    ink_cfg = dataclasses.replace(InkConfig.production(), paper_guard=False)
+    ink_cfg = dataclasses.replace(
+        InkConfig.production(), paper_guard=False, page_model=False
+    )
     pipe_cfg = PipelineConfig(
         coverage=True,
         ink_auto_gain=False,
@@ -264,7 +268,9 @@ def test_empty_coverage_mask_still_gates_votes():
         dtype=np.float32,
     )
     empty_cov = np.zeros((720, 1280), np.uint8)
-    ink_cfg = dataclasses.replace(InkConfig.production(), paper_guard=False)
+    ink_cfg = dataclasses.replace(
+        InkConfig.production(), paper_guard=False, page_model=False
+    )
     pipe_cfg = PipelineConfig(
         coverage=True,
         coverage_iou_floor=0.0,
@@ -284,7 +290,9 @@ def test_empty_coverage_mask_still_gates_votes():
 @pytest.mark.parametrize(
     "ink_cfg",
     [
-        dataclasses.replace(InkConfig.production(), paper_guard=False),
+        dataclasses.replace(
+            InkConfig.production(), paper_guard=False, page_model=False
+        ),
         InkConfig.sketch(),
     ],
 )
@@ -335,7 +343,9 @@ def test_near_edge_stroke_survives_persistent_inward_quad_shift():
     def script(seq):
         return (anchor_quad if seq <= 3 else shifted_quad).copy(), "paper", None
 
-    ink_cfg = dataclasses.replace(InkConfig.production(), paper_guard=False)
+    ink_cfg = dataclasses.replace(
+        InkConfig.production(), paper_guard=False, page_model=False
+    )
     pipe_cfg = PipelineConfig(
         coverage=False,
         ink_auto_gain=False,
@@ -1318,7 +1328,9 @@ def test_stale_provisional_ink_clears_when_reanchor_widens_guard():
     """Marcas provisorias antigas que caem na nova faixa da guarda apos
     reancoragem nao ficam congeladas indefinidamente."""
     clock = _Clock()
-    cfg = dataclasses.replace(InkConfig.production(), paper_guard=False)
+    cfg = dataclasses.replace(
+        InkConfig.production(), paper_guard=False, page_model=False
+    )
     worker = PageCleanWorker(_DarkInkPageClean(), config=cfg, clock=clock)
     near_quad = np.array(
         [[100, 50], [800, 50], [800, 1050], [100, 1050]], dtype=np.float32

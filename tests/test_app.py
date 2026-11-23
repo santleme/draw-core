@@ -1273,3 +1273,25 @@ def test_main_combinacoes_e_flags_removidas_saem_com_2(monkeypatch, argv):
     with pytest.raises(SystemExit) as error:
         app_module.main()
     assert error.value.code == 2
+
+
+def test_legacy_ink_live_and_parity_replay_share_one_ink_config(monkeypatch):
+    """`--legacy-ink` ao vivo e o replay de paridade comparam contra o MESMO
+    laco legado (sem a guarda de papel #129): uma unica definicao
+    (InkConfig.legacy_loop). Se um dos dois voltar a montar a sua propria
+    config, a comparacao deixa de validar o que o usuario roda."""
+    from lab.parity_e2e import legacy_pipeline_config
+
+    live = _run_main(monkeypatch, "--legacy-ink")["pipeline_config"]
+    replay = legacy_pipeline_config()
+    assert live.ink == replay.ink == app_module.InkConfig.legacy_loop()
+    assert live.ink.paper_guard is False
+
+
+def test_no_ink_ruling_keeps_the_page_model_on(monkeypatch):
+    """O override documentado segue valendo com o preset de producao e tira
+    SO a pauta: o PageModel (e as guardas) continuam ligados."""
+    ink = _run_main(monkeypatch, "--no-ink-ruling")["pipeline_config"].ink
+    assert ink.ruling_removal is False
+    assert ink.page_model is True
+    assert ink.paper_guard is True
