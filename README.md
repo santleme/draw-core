@@ -84,19 +84,19 @@ pulling `draw-core`'s heavy deps when it drops its remaining `draw.*` imports
 (`draw.config`, `draw.exporters`) — repointing the wire imports alone is not
 enough.
 
-For a quick local check, run the module's tests directly, then use Testmon for
-changes that can affect other modules.
+For a quick local check, run the module's tests directly. For changes that can
+affect other modules, use the separate parallel and serialized Testmon lanes in
+`AGENTS.md`.
 
 ```sh
 pytest -q tests/test_sheet_tracker.py tests/test_tracker_loss_clock.py
-pytest -q --testmon -n 4
 ```
 
-Seed `.testmondata` with a serial `pytest -q --testmon` on a fresh worktree.
-To keep `slow`/`timing` tests serial, add
-`--testmon-forceselect -m 'not slow and not timing'` to the parallel
-command and run `pytest -q -m 'slow or timing'` separately. Use
-`--testmon-forceselect` whenever combining impact selection with `-m`.
+Do not run an unfiltered `pytest --testmon -n 4`: it can send selected
+`slow`/`timing` tests to xdist and a shared Testmon data file can lose history
+for tests excluded by a marker filter. The lane setup and commands in
+`AGENTS.md` keep those histories separate and run the serialized lane without
+xdist.
 
 Run the corresponding tests directly for scripts and subprocess entry
 points, such as `tests/test_run_sh.py` after changing `run.sh` or

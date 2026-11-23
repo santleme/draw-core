@@ -33,12 +33,15 @@ helpers for the iteration loop; the final gate above stays the full suite.
   - Iterate:
     `TESTMON_DATAFILE=.testmondata-fast pytest --testmon-forceselect -m "not slow and not timing" -n auto --dist worksteal`
     and `TESTMON_DATAFILE=.testmondata-serial pytest --testmon-forceselect -m "slow or timing"`.
-  - Plain `-m`, `-k` or a test node id with `--testmon` turns selection off and
-    runs everything, without a warning in the summary. `--testmon-forceselect`
-    keeps selection and the filter.
-- **`slow` and `timing` run serialized, never with `-n`.** That is what the
-  markers mean. Run in parallel, `test_ruling.py::test_cost_per_pass_stays_inside_the_budget`
-  failed once on its timing budget (8.11 ms against 8.0) and passes alone.
+  - Plain `-m`, `-k` or a test node id with `--testmon` disables testmon's
+    affected-test selection; pytest still applies its filter, and testmon reports
+    the reason in the pytest header. `--testmon-forceselect` combines impact
+    selection with that filter.
+- **Keep local lanes aligned with CI.** The CI runs `slow` and `timing` without
+  xdist, so run those markers serially. In one parallel run,
+  `test_ruling.py::test_cost_per_pass_stays_inside_the_budget` exceeded its
+  8.0 ms budget once (8.11 ms) and passed alone; treat this as evidence of load
+  sensitivity, not as a general speed or failure-rate estimate.
 - Comments never trigger selection; docstring edits do.
 - Testmon only sees executed Python. Run the full suite when you change
   `assets/manifest.json`, `run.sh`, `pyproject.toml`, `uv.lock`,
