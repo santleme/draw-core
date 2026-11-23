@@ -478,7 +478,7 @@ class HandSample:
     moved: bool
 
     def __post_init__(self):
-        if self.present not in (True, False, None):
+        if self.present is not None and not isinstance(self.present, bool):
             raise ValueError(
                 f"present precisa ser True, False ou None: {self.present!r}"
             )
