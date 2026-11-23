@@ -325,6 +325,37 @@ def _warp_exposure_mask(mask, matrix, shape):
     )
 
 
+_PAPER_CHROMA_TOL = paper_evidence._CHROMA_TOL
+
+
+def _ink_like_color(bgr, exposed, candidate):
+    """Onde `candidate` tem a COR do papel exposto da passada (neutra como
+    tinta de caneta), nao a de pele/manga/objeto colorido.
+
+    O preenchimento que a guarda adotou so entra na votacao se for neutro
+    como o papel: a adocao se baseia em previsoes repetidas de tinta, que
+    um objeto escuro mal lido pelo modelo tambem produz. B/R medido em
+    blocos (o ruido de cor do escuro nao decide pixel a pixel) contra a
+    mediana de B/R do papel exposto desta passada. Sem papel suficiente ou
+    sem cor, nada e adotado (falha fechada para o comportamento anterior).
+    """
+    if bgr is None or getattr(bgr, "ndim", 0) != 3 or bgr.shape[2] < 3:
+        return np.zeros(candidate.shape, dtype=bool)
+    paper = exposed & ~candidate
+    if int(np.count_nonzero(paper)) < 64:
+        return np.zeros(candidate.shape, dtype=bool)
+    blue = cv2.blur(bgr[..., 0].astype(np.float32), (9, 9))
+    red = cv2.blur(bgr[..., 2].astype(np.float32), (9, 9))
+    ratio = blue / np.maximum(red, 1.0)
+    paper_ratio = float(np.median(ratio[paper]))
+    tol = _PAPER_CHROMA_TOL * max(paper_ratio, 1e-3) + 1e-6
+    consistent = (np.abs(ratio - paper_ratio) <= tol).astype(np.uint8)
+    # Erosao do tamanho do blur: a borda de um objeto colorido mistura cor com
+    # o papel vizinho e passaria; so conta o pixel cuja vizinhanca inteira e
+    # neutra. Nao afeta tinta neutra (papel e tinta tem o mesmo B/R).
+    return cv2.erode(consistent, np.ones((9, 9), np.uint8)) > 0
+
+
 def _exposure_masks_in_geometry(
     assessment, reg_anchor, reg_corners, shape, motion_fix=None, fill_clear=False
 ):
@@ -3975,7 +4006,10 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                         ),
                     )
                     if adopted_grid is not None:
-                        vote_exposed = exposed_mask | adopted_grid
+                        vote_exposed = exposed_mask | (
+                            adopted_grid
+                            & _ink_like_color(reg_bgr, exposed_mask, adopted_grid)
+                        )
                 p.visible = (
                     vote_exposed if p.visible is None else (p.visible & vote_exposed)
                 )

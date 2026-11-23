@@ -772,3 +772,62 @@ def test_new_stroke_confirms_after_a_partial_cover_during_a_light_change(ink):
     assert _frac(got, want_old) >= 0.95
     assert _frac(got, want) >= 0.9
     assert _beyond(got, want, 2) == 0
+
+
+def _dense_prediction_object(regime, color):
+    """Objeto escuro 40x140 SEM mascara, sobre papel limpo, que o modelo le
+    como tinta (previsao alta) por 16 passadas: o modelo foi enganado. Devolve
+    quantos pixels do objeto acabam no canvas confirmado."""
+    clock, worker = _worker(REGIMES[regime])
+    try:
+        generation = worker.new_generation()
+        scene = _Scene()
+        _passes(worker, clock, generation, scene, 6, dt=_DT_IDLE, must=True)
+        base = scene.page.copy()
+        for _ in range(16):
+            worker.set_hand_presence(True, moved=True)
+            page = scene.frame(generation, img=base)
+            bgr = np.stack([base] * 3, axis=-1).astype(np.uint8)
+            bgr[100:140, 60:200] = color
+            _feed(
+                worker,
+                clock,
+                dataclasses.replace(page, image=bgr),
+                dt=_DT_ACTIVE,
+                must=False,
+            )
+        worker.set_hand_presence(False)
+        _passes(worker, clock, generation, scene, 4, dt=_DT_IDLE)
+        return int(
+            np.count_nonzero((_confirmed(worker, generation) > 0)[100:140, 60:200])
+        )
+    finally:
+        try:
+            worker.stop()
+        except RuntimeError:
+            pass
+
+
+@pytest.mark.parametrize("color", [(40, 70, 100), (110, 60, 40)], ids=["pele", "azul"])
+def test_colored_dark_object_read_as_ink_does_not_reach_the_canvas(regime, color):
+    """Controle da adocao de preenchimento: um objeto escuro COLORIDO (pele,
+    manga) que o modelo le como tinta com previsao alta e sustentada, sem
+    mascara, nao fica no canvas. A guarda adota por previsoes repetidas de
+    tinta, o que nao prova que e preenchimento; so entra na votacao o que
+    tem a cor neutra do papel (tinta de caneta). Sem essa checagem de cor,
+    5.600 de 5.600 px viravam tinta fantasma (medido). O preenchimento
+    legitimo segue coberto por test_thick_solid_fill_is_confirmed_in_every_regime.
+    O caminho de votos (production_votes) nunca teve esta protecao."""
+    if not REGIMES[regime].page_model:
+        pytest.skip("o caminho de votos nao tem esta protecao (anterior ao flip)")
+    assert _dense_prediction_object(regime, color) == 0
+
+
+def test_neutral_dark_object_read_as_ink_is_adopted_known_limit(regime):
+    """LIMITE CONHECIDO, nao desejado: um objeto escuro NEUTRO com previsao
+    alta e sustentada e fotometricamente igual a um preenchimento de caneta
+    (mesma cor, mesma previsao), entao e adotado e confirmado como tinta
+    fantasma, nos tres regimes. So a mascara de mao (que aqui erra) ou um
+    modelo que nao confunda o objeto o evitaria. Se a adocao ganhar um sinal
+    que separe os dois, este teste deve passar a exigir 0."""
+    assert _dense_prediction_object(regime, (70, 70, 70)) >= 0.95 * 40 * 140
