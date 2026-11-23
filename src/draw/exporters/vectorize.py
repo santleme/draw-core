@@ -59,6 +59,13 @@ MM_PER_PX_Y = PAPER_H_MM / PAPER_H_PX
 MM_PER_PX = 0.5 * (MM_PER_PX_X + MM_PER_PX_Y)
 
 
+# Modo de medida: False = legado A4; True = papel custom. É a FLAG que
+# distingue os dois modos, nunca o valor da escala — um papel explícito
+# pode reproduzir as razões do default (ex.: 420x594 mm em 1700x2400 px)
+# e mesmo assim pede a medida métrica por eixo.
+_PAPER_OVERRIDE = False
+
+
 def _set_paper_mm(paper_w_mm, paper_h_mm, img_w_px, img_h_px):
     """Reaponta a escala px->mm para uma folha não-A4 (override de CLI).
 
@@ -67,44 +74,45 @@ def _set_paper_mm(paper_w_mm, paper_h_mm, img_w_px, img_h_px):
     já rotacionado (ex.: 1200x850), então a grade legada não se aplica.
     """
     global PAPER_W_MM, PAPER_H_MM, MM_PER_PX_X, MM_PER_PX_Y, MM_PER_PX
+    global _PAPER_OVERRIDE
     PAPER_W_MM = float(paper_w_mm)
     PAPER_H_MM = float(paper_h_mm)
     MM_PER_PX_X = PAPER_W_MM / img_w_px
     MM_PER_PX_Y = PAPER_H_MM / img_h_px
     MM_PER_PX = 0.5 * (MM_PER_PX_X + MM_PER_PX_Y)
+    _PAPER_OVERRIDE = True
 
 
-# Escalas do A4 legado congeladas na carga do módulo: enquanto a escala
-# corrente for essa (sem --paper-w-mm/--paper-h-mm), medidas mm ficam
-# bit-idênticas ao comportamento histórico px*MM_PER_PX.
-_MM_SCALE_DEFAULT = (MM_PER_PX_X, MM_PER_PX_Y)
+def _reset_paper_mm():
+    """Restaura escala e modo de medida do A4 default (finally de main)."""
+    global _PAPER_OVERRIDE
+    _set_paper_mm(210.0, 297.0, PAPER_W_PX, PAPER_H_PX)
+    _PAPER_OVERRIDE = False
 
 
-def _mm_scale_vec():
-    """Vetor de escala px->mm: por eixo sob papel custom, média legada senão."""
-    if (MM_PER_PX_X, MM_PER_PX_Y) != _MM_SCALE_DEFAULT:
-        return np.array([MM_PER_PX_X, MM_PER_PX_Y])
-    return np.array([MM_PER_PX, MM_PER_PX])
+def _decision_space():
+    """Espaço em que a geometria das primitivas é decidida.
 
+    Devolve ``(scale_dec, unit_mm, mm_axis)``: pontos de decisão =
+    ``pts_px * scale_dec``, medidas escalares = ``len_dec * unit_mm`` e
+    coordenadas de saída = ``p_dec * mm_axis``.
 
-def _isotropic_scale():
-    """Escala px->mm isotrópica o bastante para ``circle`` (<=1% relativo).
-
-    O A4 legado já é ~0,2% anisotrópico (210/850 vs 297/1200) e sempre
-    classificou círculos com ``r_mm`` médio — o 1% preserva isso e os
-    specs isotrópicos que o OCRE emite, enquanto uma folha de razão
-    claramente diferente (ex.: o exemplo de ~9% do review) transforma
-    o círculo em elipse. O schema ``circle`` não comporta elipse, então
-    nesse caso o classificador cai no contorno escalado, que preserva
-    a geometria exata ponto a ponto.
+    Sem override de papel, o espaço de decisão é o próprio raster em px,
+    as medidas saem pela média legada ``MM_PER_PX`` e as coordenadas pela
+    escala de cada eixo — bit a bit idêntico ao histórico. Com papel
+    custom, os pontos são normalizados para "pixels isotrópicos" — a
+    correção clássica de pixel aspect ratio, sem reamostrar o raster:
+    ``pts * (sx/ref, sy/ref)`` com ``ref = min(sx, sy)`` torna a métrica
+    uniforme (1 unidade = ``ref`` mm em qualquer direção). Nesse espaço
+    as mesmas tolerâncias do legado (gap 8, raio 6, desvios 2.5/3.5/4,
+    lado 10) medem geometria real: um círculo que o cisalhamento px->mm
+    tornou elipse no raster volta a ser redondo, e um oval do raster
+    não vira círculo na saída.
     """
-    return abs(MM_PER_PX_X - MM_PER_PX_Y) <= 0.01 * max(MM_PER_PX_X, MM_PER_PX_Y)
-
-
-def _mm_dist(dx_px, dy_px):
-    """Distância euclidiana px->mm eixo a eixo (segura p/ escala anisotrópica)."""
-    sx, sy = _mm_scale_vec()
-    return math.hypot(dx_px * sx, dy_px * sy)
+    if not _PAPER_OVERRIDE:
+        return np.ones(2), MM_PER_PX, np.array([MM_PER_PX_X, MM_PER_PX_Y])
+    ref = min(MM_PER_PX_X, MM_PER_PX_Y)
+    return np.array([MM_PER_PX_X / ref, MM_PER_PX_Y / ref]), ref, np.full(2, ref)
 
 
 THINNING_TYPES = {
@@ -669,7 +677,8 @@ def classify_primitive(polyline):
     Retorna um dicionário com `type` em `{"point", "line", "circle",
     "rectangle", "polygon", "polyline"}` e parâmetros métricos em mm/px.
     """
-    pts = polyline["points"]
+    scale_dec, unit_mm, mm_axis = _decision_space()
+    pts = np.asarray(polyline["points"], dtype=np.float64) * scale_dec
     closed = bool(polyline["closed"])
     meta = {}
     if "t_start_ms" in polyline:
@@ -683,8 +692,8 @@ def classify_primitive(polyline):
     if len(pts) == 1:
         return {
             "type": "point",
-            "x_mm": round(float(pts[0, 0] * MM_PER_PX_X), 3),
-            "y_mm": round(float(pts[0, 1] * MM_PER_PX_Y), 3),
+            "x_mm": round(float(pts[0, 0] * mm_axis[0]), 3),
+            "y_mm": round(float(pts[0, 1] * mm_axis[1]), 3),
             **meta,
         }
 
@@ -705,11 +714,11 @@ def classify_primitive(polyline):
             if max_dev <= max(2.5, 0.025 * chord_len):
                 return {
                     "type": "line",
-                    "x1_mm": round(float(p0[0] * MM_PER_PX_X), 3),
-                    "y1_mm": round(float(p0[1] * MM_PER_PX_Y), 3),
-                    "x2_mm": round(float(p1[0] * MM_PER_PX_X), 3),
-                    "y2_mm": round(float(p1[1] * MM_PER_PX_Y), 3),
-                    "length_mm": round(float(_mm_dist(chord_vec[0], chord_vec[1])), 3),
+                    "x1_mm": round(float(p0[0] * mm_axis[0]), 3),
+                    "y1_mm": round(float(p0[1] * mm_axis[1]), 3),
+                    "x2_mm": round(float(p1[0] * mm_axis[0]), 3),
+                    "y2_mm": round(float(p1[1] * mm_axis[1]), 3),
+                    "length_mm": round(float(chord_len * unit_mm), 3),
                     "max_dev_px": round(max_dev, 3),
                     **meta,
                 }
@@ -717,9 +726,7 @@ def classify_primitive(polyline):
     # 2. Círculo (fechado ou quase fechado):
     end_gap = 0.0 if closed else float(np.hypot(*(pts[-1] - pts[0])))
     perim = _polyline_arc_length(np.vstack([pts, pts[:1]]) if closed else pts)
-    skip_rect = False
     if (closed or end_gap <= max(8.0, 0.08 * perim)) and len(dense) >= 16:
-        circle_like = False
         fit = _fit_circle_kasa(dense)
         if fit is not None:
             cx, cy, r = fit
@@ -727,143 +734,98 @@ def classify_primitive(polyline):
                 radii = np.hypot(dense[:, 0] - cx, dense[:, 1] - cy)
                 rmse = float(np.sqrt(np.mean((radii - r) ** 2)))
                 max_err = float(np.max(np.abs(radii - r)))
-                angles = np.mod(
-                    np.degrees(np.arctan2(dense[:, 1] - cy, dense[:, 0] - cx)),
-                    360.0,
-                )
-                bins = np.unique((angles // 15.0).astype(int))
+                theta = np.arctan2(dense[:, 1] - cy, dense[:, 0] - cx)
+                bins = np.unique((np.mod(np.degrees(theta), 360.0) // 15.0).astype(int))
                 # >= 21 de 24 setores de 15° cobertos (>= 315°).
                 circle_like = (
                     len(bins) >= 21
                     and rmse / r <= 0.055
                     and max_err <= max(3.5, 0.10 * r)
                 )
-                if circle_like and _isotropic_scale():
+                if circle_like and _PAPER_OVERRIDE:
+                    # No espaço normalizado a excentricidade é física: um
+                    # oval tem o desvio radial dominado pelo 2º harmônico
+                    # (polos opostos sistemáticos), ruído de raster não.
+                    # Sem essa auditoria uma elipse suave com rmse baixo
+                    # exportaria como círculo de raio único.
+                    h2 = np.column_stack([np.cos(2.0 * theta), np.sin(2.0 * theta)])
+                    coef, _, _, _ = np.linalg.lstsq(h2, radii - r, rcond=None)
+                    circle_like = float(np.hypot(coef[0], coef[1])) <= max(
+                        1.5, 0.035 * r
+                    )
+                if circle_like:
                     return {
                         "type": "circle",
-                        "cx_mm": round(cx * MM_PER_PX_X, 3),
-                        "cy_mm": round(cy * MM_PER_PX_Y, 3),
-                        "r_mm": round(r * MM_PER_PX, 3),
+                        "cx_mm": round(cx * mm_axis[0], 3),
+                        "cy_mm": round(cy * mm_axis[1], 3),
+                        "r_mm": round(r * unit_mm, 3),
                         "radial_rmse_px": round(rmse, 3),
                         **meta,
                     }
-        if not _isotropic_scale():
-            # A redondeza também é decidida no espaço de saída (mm): o
-            # cisalhamento px->mm pode esconder um círculo real atrás de
-            # uma elipse no raster (e vice-versa). O ajuste Kåsa é
-            # refeito sobre as amostras já escaladas.
-            dense_mm = dense * np.array([MM_PER_PX_X, MM_PER_PX_Y])
-            fit_mm = _fit_circle_kasa(dense_mm)
-            if fit_mm is not None:
-                cxm, cym, rm = fit_mm
-                if rm >= 6.0 * MM_PER_PX:
-                    radii_m = np.hypot(dense_mm[:, 0] - cxm, dense_mm[:, 1] - cym)
-                    rmse_m = float(np.sqrt(np.mean((radii_m - rm) ** 2)))
-                    max_err_m = float(np.max(np.abs(radii_m - rm)))
-                    ang_m = np.mod(
-                        np.degrees(
-                            np.arctan2(dense_mm[:, 1] - cym, dense_mm[:, 0] - cxm)
-                        ),
-                        360.0,
-                    )
-                    bins_m = np.unique((ang_m // 15.0).astype(int))
-                    if (
-                        len(bins_m) >= 21
-                        and rmse_m / rm <= 0.055
-                        and max_err_m <= max(3.5 * MM_PER_PX, 0.10 * rm)
-                    ):
-                        return {
-                            "type": "circle",
-                            "cx_mm": round(cxm, 3),
-                            "cy_mm": round(cym, 3),
-                            "r_mm": round(rm, 3),
-                            "radial_rmse_px": round(rmse_m / MM_PER_PX, 3),
-                            **meta,
-                        }
-            # Um quase-círculo em px que não fecha círculo em mm é uma
-            # elipse na saída: vai para o contorno escalado direto, sem
-            # passar pelo detector de retângulo (a simplificação a 4
-            # cantos o venderia como caixa).
-            skip_rect = circle_like
 
     # 3. Retângulo fechado:
-    if closed and len(pts) >= 4 and not skip_rect:
+    if closed and len(pts) >= 4:
         coarse = _dp_open(np.vstack([pts, pts[:1]]), epsilon=3.0)
         corners = _merge_collinear_closed_vertices(coarse)
         if len(corners) == 4:
             sides = [corners[(i + 1) % 4] - corners[i] for i in range(4)]
             lengths = [float(np.hypot(s[0], s[1])) for s in sides]
             if min(lengths) >= 10.0:
-                # A forma é decidida em mm: com escala anisotrópica um
-                # retângulo rotacionado cisalha em px (ângulos != 90°) e
-                # um paralelogramo em px pode parecer retângulo. Sob o
-                # default A4 o vetor é uniforme (escala média) — a
-                # decisão e as medidas saem idênticas às do legado px.
-                sides_mm = [s * _mm_scale_vec() for s in sides]
-                lengths_mm = [float(np.hypot(s[0], s[1])) for s in sides_mm]
                 angles_ok = True
                 for i in range(4):
-                    u = -sides_mm[(i - 1) % 4] / lengths_mm[(i - 1) % 4]
-                    v = sides_mm[i] / lengths_mm[i]
+                    u = -sides[(i - 1) % 4] / lengths[(i - 1) % 4]
+                    v = sides[i] / lengths[i]
                     ang = math.degrees(
                         math.acos(min(1.0, max(-1.0, float(np.dot(u, v)))))
                     )
                     if abs(ang - 90.0) > 12.0:
                         angles_ok = False
                         break
-                opp0 = abs(lengths_mm[0] - lengths_mm[2]) / max(
-                    lengths_mm[0], lengths_mm[2]
-                )
-                opp1 = abs(lengths_mm[1] - lengths_mm[3]) / max(
-                    lengths_mm[1], lengths_mm[3]
-                )
-                # Garante também que o contorno real segue os 4 lados do
-                # retângulo — o desvio é medido no mesmo espaço escalado:
-                # sob anisotropia um arcoamento aceitável em px pode
-                # exceder a tolerância em mm e achatar a borda no export.
-                scale = _mm_scale_vec()
-                corners_mm = corners * scale
-                dense_mm = dense * scale
+                opp0 = abs(lengths[0] - lengths[2]) / max(lengths[0], lengths[2])
+                opp1 = abs(lengths[1] - lengths[3]) / max(lengths[1], lengths[3])
+                # Garante também que o contorno real segue os 4 lados.
+                # O desvio é medido com sinal sobre a normal externa de
+                # cada lado: um contorno curvo (oval simplificado a 4
+                # cantos) fica sistematicamente FORA do quadrilátero
+                # inscrito, enquanto as arestas de um retângulo real
+                # oscilam em torno da aresta (~metade dentro, metade fora).
+                center = corners.mean(axis=0)
+                normals = []
+                for i, s in enumerate(sides):
+                    n = np.array([s[1], -s[0]], dtype=np.float64) / lengths[i]
+                    if float(np.dot(n, center - corners[i])) > 0:
+                        n = -n
+                    normals.append(n)
                 rect_dev = []
-                for p in dense_mm:
-                    d_min = min(
-                        abs(
-                            float(
-                                (corners_mm[(i + 1) % 4, 0] - corners_mm[i, 0])
-                                * (corners_mm[i, 1] - p[1])
-                                - (corners_mm[(i + 1) % 4, 1] - corners_mm[i, 1])
-                                * (corners_mm[i, 0] - p[0])
-                            )
-                        )
-                        / lengths_mm[i]
-                        for i in range(4)
-                    )
-                    rect_dev.append(d_min)
+                n_out = 0
+                for p in dense:
+                    ds = [float(np.dot(p - corners[i], normals[i])) for i in range(4)]
+                    j = int(np.argmin(np.abs(ds)))
+                    rect_dev.append(abs(ds[j]))
+                    n_out += ds[j] > 0
                 if (
                     angles_ok
                     and opp0 <= 0.12
                     and opp1 <= 0.12
-                    and max(rect_dev) <= max(4.0 * MM_PER_PX, 0.05 * max(lengths_mm))
+                    and max(rect_dev) <= max(4.0, 0.05 * max(lengths))
+                    and (not _PAPER_OVERRIDE or n_out / len(rect_dev) <= 0.7)
                 ):
-                    w_mm = 0.5 * (lengths_mm[0] + lengths_mm[2])
-                    h_mm = 0.5 * (lengths_mm[1] + lengths_mm[3])
-                    ang_deg = math.degrees(
-                        math.atan2(float(sides_mm[0][1]), float(sides_mm[0][0]))
-                    )
-                    center = corners.mean(axis=0)
+                    w_mm = 0.5 * (lengths[0] + lengths[2]) * unit_mm
+                    h_mm = 0.5 * (lengths[1] + lengths[3]) * unit_mm
+                    ang_deg = math.degrees(math.atan2(sides[0][1], sides[0][0]))
                     return {
                         "type": "rectangle",
                         "center_mm": [
-                            round(float(center[0] * MM_PER_PX_X), 3),
-                            round(float(center[1] * MM_PER_PX_Y), 3),
+                            round(float(center[0] * mm_axis[0]), 3),
+                            round(float(center[1] * mm_axis[1]), 3),
                         ],
                         "width_mm": round(w_mm, 3),
                         "height_mm": round(h_mm, 3),
                         "angle_deg": round(ang_deg, 2),
                         "corners_mm": [
                             [
-                                round(float(c[0] * MM_PER_PX_X), 3),
-                                round(float(c[1] * MM_PER_PX_Y), 3),
+                                round(float(c[0] * mm_axis[0]), 3),
+                                round(float(c[1] * mm_axis[1]), 3),
                             ]
                             for c in corners
                         ],
@@ -874,7 +836,7 @@ def classify_primitive(polyline):
         "type": "polygon" if closed else "polyline",
         "vertices": len(pts),
         "points_mm": [
-            [round(float(x * MM_PER_PX_X), 3), round(float(y * MM_PER_PX_Y), 3)]
+            [round(float(x * mm_axis[0]), 3), round(float(y * mm_axis[1]), 3)]
             for x, y in pts
         ],
         **meta,
@@ -1289,7 +1251,7 @@ def main(argv=None):
     try:
         return _run_pipeline(args, ink, polarity)
     finally:
-        _set_paper_mm(210.0, 297.0, PAPER_W_PX, PAPER_H_PX)
+        _reset_paper_mm()
 
 
 def _run_pipeline(args, ink, polarity):
