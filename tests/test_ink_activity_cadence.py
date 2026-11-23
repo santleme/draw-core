@@ -8,20 +8,12 @@ em quase toda passada. A sonda pressupoe "sem mao, sem tinta
 nova"; a saida desmentia o pressuposto e o escalonador nao ouvia a
 saida.
 
-1. Flag desligada: sem mao, tinta mudando ou nao, a cadencia e a
-   da sonda — comportamento de sempre, byte a byte.
-2. Flag ligada + sem mao + saida mudando nas ultimas
-   _NO_HAND_REST_AFTER_STILL_PASSES passadas: cadencia ativa.
-3. Flag ligada + saida assentada: a sonda volta, e o descanso
-   total segue intacto (zero passadas).
-4. Passada cuja geracao trocou entre a retirada e a execucao
+1. Passada cuja geracao trocou entre a retirada e a execucao
    morre antes do modelo (o descarte tardio ja a jogava fora
    depois de pagar o modelo inteiro).
-5. O registro de telemetria carrega o intervalo que governou a
+2. O registro de telemetria carrega o intervalo que governou a
    espera, o estado de mao na retirada e a quietude da saida.
 """
-
-import time
 
 import numpy as np
 import pytest
@@ -60,22 +52,8 @@ class _ShiftingInk:
         return prob
 
 
-def _feed(worker, generation, seconds):
-    warp = np.zeros((H, W, 3), dtype=np.uint8)
-    deadline = time.monotonic() + seconds
-    while time.monotonic() < deadline:
-        worker.submit(WarpedPage(warp, generation))
-        time.sleep(0.005)
-
-
-def _patched(monkeypatch):
-    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.02)
-    monkeypatch.setattr(worker_mod, "_IDLE_PROBE_SECONDS", 0.30)
-    monkeypatch.setattr(worker_mod, "_NO_HAND_REST_AFTER_STILL_PASSES", 3)
-
-
 @pytest.mark.slow
-def test_stale_generation_pass_skips_model(monkeypatch):
+def test_stale_generation_pass_skips_model():
     fake = _ShiftingInk()
     worker = worker_mod.PageCleanWorker(fake)
     generation = worker.new_generation()

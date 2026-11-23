@@ -22,76 +22,20 @@ Contratos:
    hipoteses).
 """
 
-import time
-
 import cv2
 import numpy as np
 import pytest
 
-import rr
-from draw.contracts import WarpedPage
 from draw.ink import registration as registration_mod
 from draw.ink import worker as worker_mod
+from rr import BASE, SHAPE, _drive, _page, _ProbIsWarp, _run, _settled
 
-SHAPE = (120, 85)
-BASE = rr.base_quad(SHAPE)
 STEP = BASE + np.float32([120.0, 0.0])
-
-
-class _ProbIsWarp:
-    """page_clean falso: o "warp" submetido ja e o mapa."""
-
-    threshold = 0.7
-
-    def ink_prob(self, warped):
-        return warped
-
-
-@pytest.fixture
-def fast(monkeypatch):
-    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.005)
-    monkeypatch.setattr(worker_mod, "_IDLE_PROBE_SECONDS", 0.005)
-    return monkeypatch
-
-
-def _content():
-    _drawing, settled = rr.synthetic_pages(SHAPE, stages=3, seed=3)
-    return settled[0].astype(np.float32)
-
-
-def _drive(worker, generation, sequence):
-    for prob, corners in sequence:
-        before = worker.stats()["passes_total"]
-        worker.submit(WarpedPage(prob, generation, corners))
-        deadline = time.monotonic() + 5.0
-        while worker.stats()["passes_total"] <= before:
-            assert time.monotonic() < deadline, "a passada nao executou"
-            time.sleep(0.001)
-
-
-def _run(sequence, config=None):
-    worker = worker_mod.PageCleanWorker(_ProbIsWarp(), config=config).start()
-    try:
-        generation = worker.new_generation()
-        _drive(worker, generation, sequence)
-        _disp = worker.poll_display(generation, 0)
-        _version, confirmed, provisional = (
-            _disp.version,
-            _disp.confirmed,
-            _disp.provisional,
-        )
-        return worker, confirmed, provisional
-    finally:
-        worker.stop()
-
-
-def _settled(content, passes=4):
-    return [(content, BASE.copy()) for _ in range(passes)]
 
 
 @pytest.mark.slow
 def test_landing_swaps_anchor_without_touching_state(fast):
-    content = _content()
+    content = _page()
     sequence = _settled(content) + [(content, STEP.copy()) for _ in range(3)]
     worker, confirmed, _provisional = _run(sequence)
     snapshot = worker.telemetry_snapshot()
@@ -114,7 +58,7 @@ def test_landing_swaps_anchor_without_touching_state(fast):
 
 @pytest.mark.slow
 def test_spurious_mode_keeps_anchor_and_canvas(fast):
-    content = _content()
+    content = _page()
     # O quad mente: a prob chega distorcida pela homografia inversa
     # do registro; registrada contra a ancora, ela volta ao lugar.
     matrix = registration_mod._registration_matrix(BASE, STEP, SHAPE)
@@ -136,7 +80,7 @@ def test_spurious_mode_keeps_anchor_and_canvas(fast):
 
 @pytest.mark.slow
 def test_midmovement_passes_do_not_close_the_streak(fast):
-    content = _content()
+    content = _page()
     ramp = [
         (content, (BASE + np.float32([dx, 0.0])).astype(np.float32))
         for dx in (30.0, 60.0, 90.0)
@@ -156,7 +100,7 @@ def test_midmovement_passes_do_not_close_the_streak(fast):
 
 @pytest.mark.slow
 def test_open_event_births_no_confirmation(fast):
-    content = _content()
+    content = _page()
     other = np.zeros(SHAPE, np.float32)
     other[10:14, 10:40] = 1.0  # tinta nova, fora do canvas confirmado
     sequence = _settled(content) + [(other, STEP.copy()) for _ in range(2)]
@@ -279,7 +223,7 @@ def test_straight_landing_after_rotated_landing(fast):
 
 @pytest.mark.slow
 def test_no_mass_defaults_to_anchor_swap(fast):
-    content = _content()
+    content = _page()
     empty = np.zeros(SHAPE, np.float32)
     # A geracao assenta numa pagina vazia (ancora nasce, nada
     # confirma) e a folha anda antes de qualquer tinta: sem massa

@@ -16,112 +16,17 @@ Fechada a janela, a semantica e exatamente a da banda morta do #57.
 Com qualquer uma das flags desligada, nada muda.
 """
 
-import time
-
 import numpy as np
 import pytest
 
-import rr
-from draw.contracts import WarpedPage
-from draw.ink import registration as registration_mod
-from draw.ink import worker as worker_mod
 from draw.ink.config import InkConfig
-
-SHAPE = (120, 85)
-BASE = rr.base_quad(SHAPE)
-
-
-class _ProbIsWarp:
-    """page_clean falso: o "warp" submetido ja e o mapa."""
-
-    threshold = 0.7
-
-    def ink_prob(self, warped):
-        return warped
-
-
-@pytest.fixture
-def fast(monkeypatch):
-    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.005)
-    monkeypatch.setattr(worker_mod, "_IDLE_PROBE_SECONDS", 0.005)
-    return monkeypatch
-
-
-@pytest.fixture
-def spy(monkeypatch):
-    """Registra (ancora, quad de registro) que cada passada entregou."""
-    calls = []
-    real = registration_mod._register_ink_probability
-
-    def wrapped(
-        prob,
-        anchor,
-        corners,
-        visible=None,
-        visible_cam=None,
-        pass_corners=None,
-        sampled=None,
-    ):
-        calls.append(
-            (
-                None if anchor is None else np.array(anchor, copy=True),
-                None if corners is None else np.array(corners, copy=True),
-            )
-        )
-        return real(
-            prob,
-            anchor,
-            corners,
-            visible,
-            visible_cam=visible_cam,
-            pass_corners=pass_corners,
-            sampled=sampled,
-        )
-
-    monkeypatch.setattr(registration_mod, "_register_ink_probability", wrapped)
-    return calls
-
-
-def _page():
-    _drawing, settled = rr.synthetic_pages(SHAPE, stages=3, seed=3)
-    return settled[0]
-
-
-def _pass(page, warp_corners):
-    corners = np.asarray(warp_corners, np.float32)
-    return rr.render_pass(page, BASE, corners), corners
+from rr import BASE, _page, _pass, _run
 
 
 def _shifted(dx, dy=0.0, corner=0):
     quad = BASE.copy()
     quad[corner] += np.float32([dx, dy])
     return quad
-
-
-def _drive(worker, generation, sequence):
-    for prob, corners in sequence:
-        before = worker.stats()["passes_total"]
-        worker.submit(WarpedPage(prob, generation, corners))
-        deadline = time.monotonic() + 5.0
-        while worker.stats()["passes_total"] <= before:
-            assert time.monotonic() < deadline, "a passada nao executou"
-            time.sleep(0.001)
-
-
-def _run(sequence, config=None):
-    worker = worker_mod.PageCleanWorker(_ProbIsWarp(), config=config).start()
-    try:
-        generation = worker.new_generation()
-        _drive(worker, generation, sequence)
-        _disp = worker.poll_display(generation, 0)
-        _version, confirmed, provisional = (
-            _disp.version,
-            _disp.confirmed,
-            _disp.provisional,
-        )
-        return worker, confirmed, provisional
-    finally:
-        worker.stop()
 
 
 BOTH_ON = InkConfig(reg_anchor_median=True, reg_deadband=True)
