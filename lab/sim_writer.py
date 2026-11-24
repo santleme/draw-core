@@ -714,7 +714,7 @@ def diff_panel(scen_dir, canvas_bin, out_path):
     return {"tp": int(tp.sum()), "fn": int(fn.sum()), "fp": int(fp.sum())}
 
 
-def audit_one(scen_dir, out_dir, flags, detector_kind="real", verify="manifest"):
+def audit_one(scen_dir, out_dir, flags, detector_kind="real", *, verify="manifest"):
     """Um cenário, um braço, NESTE processo (isolamento de flags).
 
     detector_kind="real": detecção combinada real (neural+clássica)
@@ -995,7 +995,9 @@ def audit_one(scen_dir, out_dir, flags, detector_kind="real", verify="manifest")
     return res
 
 
-def audit(corpus, out, flags, scenarios, detector_kind="real", allow_unverified=False):
+def audit(
+    corpus, out, flags, scenarios, detector_kind="real", *, allow_unverified=False
+):
     """Roda cada cenário num subprocesso (flags isoladas, ONNX
     sequencial) e consolida."""
     out = Path(out)

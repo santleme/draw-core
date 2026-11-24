@@ -318,6 +318,7 @@ def run_trial(
     tag: str,
     models: dict,
     keep_artifacts: bool,
+    *,
     verify="manifest",
 ) -> dict:
     """Gera o vídeo do cenário, roda a bancada real e pontua.
