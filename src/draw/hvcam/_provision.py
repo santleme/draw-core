@@ -11,6 +11,7 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
+from ..infra.manifest import sha256_of
 from ..infra.safe_io import atomic_publish
 
 # Release oficial do hvcam-host.exe (santleme/hvcam) para provisionamento
@@ -24,10 +25,18 @@ HVCAM_HOST_ZIP_SHA256 = (
     "4bb9aeaf72ca983950b7ed65df3188ead146b7fdcd5a2b53e4280d82e8247c6e"
 )
 HVCAM_HOST_ZIP_MEMBER = "hvcam-v0.1.1-rc.1-windows-x86_64/hvcam-host.exe"
+# sha256 do hvcam-host.exe contido no zip oficial — medido sobre o membro
+# HVCAM_HOST_ZIP_MEMBER do zip cujo sha confere com HVCAM_HOST_ZIP_SHA256:
+# ff8991e2ac2ec78bf42befb0241aac7886a0813ae7b08a2fb86822c45f17a863 (v0.1.1-rc.1).
+# Fica None neste PR: registra-lo passa a rejeitar builds locais que divergem
+# da release (friccao em dev) e pede ajuste nos testes de provisionamento que
+# usam payloads fake. O mecanismo (kwarg + sidecar) funciona com o valor None.
+HVCAM_HOST_EXE_SHA256: str | None = None
 _HVCAM_HOST_MAX_ZIP_BYTES = 16 << 20
 _HVCAM_HOST_DOWNLOAD_TIMEOUT_S = 60
 _MANAGED_CONNECT_TIMEOUT_MS = 10_000
 _DEVICE_LINE_RE = re.compile(r"^\s*\[(\d+)\]\s*(.+?)\s*$")
+_HVCAM_EXE_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _windows_cache_dir():
@@ -93,18 +102,67 @@ def _atomic_write_executable(target, payload_bytes):
     return target
 
 
+def _registered_exe_sha256(target, expected_exe_sha256):
+    """sha256 registrado para o hvcam-host.exe, ou None se nao houver registro.
+
+    Precedencia: kwarg do chamador > constante HVCAM_HOST_EXE_SHA256 >
+    sidecar `<exe>.sha256` ao lado do exe em cache. O sidecar so conta se
+    tiver o formato [0-9a-f]{64} — conteudo ilegivel ou malformado vale
+    como "nao registrado" (confianca legada, que aceita builds locais).
+    Valor explicito (kwarg/constante) malformado e erro, nao "sem registro":
+    pedir verificacao e receber confianca legada seria fail-open.
+    """
+    explicit = expected_exe_sha256 or HVCAM_HOST_EXE_SHA256 or ""
+    explicit = explicit.strip().lower()
+    if explicit:
+        if not _HVCAM_EXE_SHA256_RE.match(explicit):
+            raise RuntimeError(
+                "sha256 registrado do hvcam-host.exe fora do formato "
+                f"[0-9a-f]{{64}}: {explicit!r}"
+            )
+        return explicit
+    sidecar = target.parent / (target.name + ".sha256")
+    try:
+        content = sidecar.read_text(encoding="ascii").strip().lower()
+    except (OSError, UnicodeDecodeError):
+        return None
+    return content if _HVCAM_EXE_SHA256_RE.match(content) else None
+
+
+def _write_exe_sidecar(target, exe_sha256):
+    """Registra ao lado do exe o sha256 verificado na gravacao (best-effort).
+
+    NUNCA chamar para um exe copiado sem verificacao: o sidecar cimentaria
+    o sha de um binario que pode ter sido plantado no PATH/checkout.
+    """
+    sidecar = target.parent / (target.name + ".sha256")
+    try:
+        with atomic_publish(sidecar) as handle:
+            handle.write(f"{exe_sha256}\n".encode("ascii"))
+    except OSError:
+        pass
+
+
 def ensure_hvcam_host(
     *,
     cache_dir=None,
     urlopen=None,
     release_url=None,
     expected_sha256=None,
+    expected_exe_sha256=None,
     local_candidates=None,
 ):
     """Garante hvcam-host.exe pronto no disco do Windows (copia local ou download).
 
     Verifica o SHA-256 do pacote zip oficial antes de extrair (fail-closed).
-    Devolve o Path do executavel ou levanta RuntimeError em caso de falha.
+    No exe em si a politica e de dois niveis: se houver sha256 registrado
+    (kwarg `expected_exe_sha256`, constante HVCAM_HOST_EXE_SHA256 ou sidecar
+    `<exe>.sha256` gravado por uma gravacao verificada), o exe em cache e os
+    candidatos locais so sao aceitos se o sha conferir — cache divergente e
+    apagado e provisionado de novo. Sem sha registrado, mantem a confianca
+    legada (cache nao-vazio e copias locais sao aceitos sem verificacao) para
+    nao quebrar builds locais. Devolve o Path do executavel ou levanta
+    RuntimeError em caso de falha.
     """
     win_dir = Path(cache_dir) if cache_dir is not None else _windows_cache_dir()
     if win_dir is None:
@@ -112,12 +170,22 @@ def ensure_hvcam_host(
             "nao consegui localizar %LOCALAPPDATA% no Windows via interop do WSL"
         )
     target = win_dir / "hvcam-host.exe"
+    registered = _registered_exe_sha256(target, expected_exe_sha256)
     if target.is_file() and target.stat().st_size > 0:
+        if registered is None or sha256_of(target) == registered:
+            try:
+                os.chmod(target, 0o755)
+            except OSError:
+                pass
+            return target
+        print(
+            f"AVISO: hvcam-host.exe em cache nao confere com o sha256 "
+            f"registrado; provisionando de novo ({target})."
+        )
         try:
-            os.chmod(target, 0o755)
+            target.unlink()
         except OSError:
             pass
-        return target
 
     candidates = (
         _local_hvcam_host_candidates() if local_candidates is None else local_candidates
@@ -126,10 +194,18 @@ def ensure_hvcam_host(
         cand_path = Path(cand)
         if cand_path.is_file() and cand_path.stat().st_size > 0:
             try:
+                if registered is not None and sha256_of(cand_path) != registered:
+                    print(
+                        f"AVISO: candidato local {cand_path} ignorado: sha256 "
+                        f"diverge do registrado."
+                    )
+                    continue
                 _atomic_write_executable(target, cand_path.read_bytes())
-                return target
             except OSError:
                 continue
+            if registered is not None:
+                _write_exe_sidecar(target, registered)
+            return target
 
     url = (release_url or HVCAM_HOST_RELEASE_URL).strip()
     parsed = urllib.parse.urlparse(url)
@@ -179,6 +255,7 @@ def ensure_hvcam_host(
         raise RuntimeError(f"pacote zip do hvcam corrompido: {error}") from error
 
     _atomic_write_executable(target, exe_bytes)
+    _write_exe_sidecar(target, hashlib.sha256(exe_bytes).hexdigest())
     print(f"hvcam-host.exe salvo e verificado em {target}.")
     return target
 
