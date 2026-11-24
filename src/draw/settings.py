@@ -113,7 +113,30 @@ class PipelineConfig:
                 "detect_wake_interval_s fora de (0, 5] s: "
                 f"{self.detect_wake_interval_s!r}"
             )
+        if not 0.0 <= self.coverage_iou_floor <= 1.0:
+            raise ValueError(
+                f"coverage_iou_floor fora de [0, 1]: {self.coverage_iou_floor!r}"
+            )
         if self.spread_mode not in ("auto", "always", "never"):
             raise ValueError(
                 f"spread_mode deve ser um de: auto, always, never: {self.spread_mode!r}"
             )
+
+    @classmethod
+    def legacy(cls, *, paper_guard: bool):
+        """A base do laço legado (SheetInkLoop), como preset nomeado.
+
+        É a linha de base das réguas e da paridade: sem ganho de
+        exposição, sem Detect-Wake e com o InkConfig() padrão — exceto
+        a guarda fotométrica de papel, que NÃO existia no laço legado
+        e por isso é um argumento OBRIGATÓRIO aqui: parity_e2e e o
+        --legacy-ink do desk_capture a desligam (paridade estrita com
+        o SheetInkLoop); eval_capture e sim_writer a mantêm (suas
+        réguas medem o motor com a guarda). A assimetria fica
+        explícita no ponto de uso em vez de escondida num default.
+        """
+        return cls(
+            ink=InkConfig(paper_guard=paper_guard),
+            ink_auto_gain=False,
+            detect_wake=False,
+        )

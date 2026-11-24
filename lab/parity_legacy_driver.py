@@ -26,6 +26,7 @@ lados como na produção. Uso:
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 
 import cv2
@@ -72,14 +73,33 @@ def _close_hand_masker(masker):
                 pass
 
 
+def frame_sort_key(path):
+    """Espelho de lab.corpus.clip.frame_sort_key — manter em sync.
+
+    O driver é auto-contido (roda sob o PYTHONPATH do repo legado),
+    então a chave se duplica aqui: a paridade alinha os dois lados
+    pelo índice do frame, e o índice só significa o mesmo quadro se
+    a ordem do diretório for a mesma. Sem ela, f10000.png (formato
+    f%04d da captura, após o quadro 9999) pareava com f1001.png do
+    lado novo.
+    """
+    digits = re.search(r"(\d+)$", path.stem)
+    if digits is not None:
+        return (0, int(digits.group(1)), path.name)
+    return (1, 0, path.name)
+
+
 def iter_frames(source, limit):
     """Frames de um diretório de imagens ou de um vídeo."""
     path = Path(source)
     if path.is_dir():
         files = sorted(
-            p
-            for p in path.iterdir()
-            if p.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp"}
+            (
+                p
+                for p in path.iterdir()
+                if p.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp"}
+            ),
+            key=frame_sort_key,
         )
         for i, f in enumerate(files):
             if i >= limit:

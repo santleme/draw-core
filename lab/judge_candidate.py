@@ -58,9 +58,9 @@ ABSENCE_PASS = "PASSA_AUSENCIA"
 JUDGE_TIMEOUT_S = 3600
 
 JUDGES = (
-    ("sheet", "judge_sheet.py", "sheet"),
-    ("absence", "judge_absence.py", "absence"),
-    ("adversarial", "judge_adversarial.py", "adversarial"),
+    ("sheet", "judge_sheet.py"),
+    ("absence", "judge_absence.py"),
+    ("adversarial", "judge_adversarial.py"),
 )
 
 
@@ -325,17 +325,6 @@ def render_markdown(report):
                 f"- {manip}: IoU bg05 {_fmt_pair(row['bg05_mask_iou_mediano'])}"
             )
         lines.append("")
-    if "replay" in sec:
-        r = sec["replay"]
-        lines.append("## Replay (contexto — NÃO julga o candidato)")
-        lines.append(
-            "A régua consome mapas cacheados do pipeline de "
-            "produção; o perfil abaixo é da orquestração atual, "
-            "não deste ONNX."
-        )
-        for scen, v in r["verdicts"].items():
-            lines.append(f"- {scen}: {v}")
-        lines.append("")
     lines.append(
         "A bancada não promove: APTO = merece o teste ao vivo na "
         "mesa do Lucas, ainda dependendo do holdout selado "
@@ -368,7 +357,13 @@ def parse_args(argv=None):
         default=None,
         help="onde salvar o relatório consolidado (default: results/ da bancada)",
     )
-    return ap.parse_args(argv)
+    args = ap.parse_args(argv)
+    unknown = {s.strip() for s in args.skip.split(",") if s.strip()} - {
+        name for name, _ in JUDGES
+    }
+    if unknown:
+        ap.error(f"juízes desconhecidos em --skip: {', '.join(sorted(unknown))}")
+    return args
 
 
 def main(argv=None):
@@ -391,7 +386,7 @@ def main(argv=None):
         python = str(Path(python).absolute())
     scripts_dir = bench / "scripts"
     results_dir = bench / "results"
-    for script in ("judge_sheet.py", "judge_absence.py", "judge_adversarial.py"):
+    for _, script in JUDGES:
         if not (scripts_dir / script).is_file():
             print(f"bancada incompleta: falta {scripts_dir / script}", file=sys.stderr)
             return 2
@@ -408,11 +403,11 @@ def main(argv=None):
         "adversarial": extract_adversarial_reasons,
     }
     try:
-        for name, script, prefix in JUDGES:
+        for name, script in JUDGES:
             if name in skip:
                 continue
             report_path, dt = run_judge(
-                python, scripts_dir, results_dir, script, prefix, candidate
+                python, scripts_dir, results_dir, script, name, candidate
             )
             durations[name] = round(dt, 1)
             try:

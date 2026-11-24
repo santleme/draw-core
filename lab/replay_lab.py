@@ -34,23 +34,26 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT))
 sys.path.insert(0, str(_REPO_ROOT / "src"))
 
-from lab.sync_workers import StepClock, SyncDetector  # noqa: E402
-
-IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp"}
+from lab.corpus.clip import IMG_EXTS, frame_sort_key  # noqa: E402
+from lab.sync_workers import build_sync_pipeline  # noqa: E402
 
 
 # ------------------------------------------------------------------
 # Corpus
 # ------------------------------------------------------------------
 def list_corpus_frames(corpus):
-    """Frames do corpus em ordem: raw/ de sessão ou o próprio dir."""
+    """Frames do corpus em ordem numerica de sufixo (f2 antes de
+    f10): raw/ de sessão ou o próprio dir."""
     corpus = Path(corpus)
     src = corpus
     for sub in ("raw", "frames"):
         if (corpus / sub).is_dir():
             src = corpus / sub
             break
-    files = sorted(p for p in src.iterdir() if p.suffix.lower() in IMG_EXTS)
+    files = sorted(
+        (p for p in src.iterdir() if p.suffix.lower() in IMG_EXTS),
+        key=frame_sort_key,
+    )
     if not files:
         raise FileNotFoundError(f"nenhum frame em {src}")
     return files
@@ -286,12 +289,8 @@ def run_replay(
     mantém a descoberta genérica (raw/ da sessão ou o próprio dir)."""
     from draw.contracts import FramePacket
     from draw.infra.manifest import verify_model
-    from draw.ink.worker import PageCleanWorker
-    from draw.page_clean import PageCleanInk
     from draw.paper import warp_sheet
-    from draw.perception import NeuralSheetDetector
     from draw.photometry import division_normalize
-    from draw.pipeline import Pipeline
     from lab.sim_writer import _parse_flags
 
     if verify == "manifest":
@@ -301,31 +300,27 @@ def run_replay(
     if frame_files is None:
         frame_files = list_corpus_frames(corpus)
     files = list(frame_files)[::stride]
-    if detector is None:
-        detector = NeuralSheetDetector(
-            str(sheet_model or _default_model("draw_seg_v3_dyn.onnx")),
-            verify=verify,
-        )
-        detector.load()
-    if page_clean is None:
-        page_clean = PageCleanInk(
-            str(ink_model or _default_model("page_clean_unet.onnx")),
-            verify=verify,
-        )
-        page_clean.load()
-
-    clock = StepClock()
-    det_worker = SyncDetector(detector, keep_history=True)
-    ink_worker = PageCleanWorker(
-        page_clean, None, clock=clock, config=config.ink, ink_divnorm=config.ink_divnorm
-    )
-    loop = Pipeline(
-        detection_worker=det_worker,
-        ink_worker=ink_worker,
-        clock=clock,
-        log=lambda *_a: None,
+    bundle = build_sync_pipeline(
+        verify=verify,
         config=config,
+        # sheet_model carrega SEMPRE que informado: só se passa quando
+        # o detector injetado não o vence (com detector de teste o
+        # binário nem se constrói — como antes).
+        sheet_model=(
+            None
+            if detector is not None
+            else str(sheet_model or _default_model("draw_seg_v3_dyn.onnx"))
+        ),
+        ink_model=str(ink_model or _default_model("page_clean_unet.onnx")),
+        detector=detector,
+        page_clean=page_clean,
+        keep_history=True,
     )
+    clock = bundle.clock
+    det_worker = bundle.detection_worker
+    ink_worker = bundle.ink_worker
+    loop = bundle.pipeline
+    page_clean = bundle.page_clean
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     records = []

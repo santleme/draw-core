@@ -444,20 +444,17 @@ def main(argv=None):
     parser.add_argument(
         "--legacy-ink",
         action="store_true",
-        help="usa a configuracao legada da tinta (sem ganho, sem Detect-Wake, InkConfig())",
+        help="usa a configuracao legada da tinta (sem ganho, sem Detect-Wake, sem a guarda de papel)",
     )
     args = parser.parse_args(argv)
     if args.every < 1:
         parser.error("--every precisa ser >= 1")
 
     from draw.camera import open_capture, parse_source
-    from draw.ink.config import InkConfig
     from draw.settings import PipelineConfig
 
     pipeline_config = (
-        PipelineConfig(
-            ink=InkConfig(paper_guard=False), ink_auto_gain=False, detect_wake=False
-        )
+        PipelineConfig.legacy(paper_guard=False)
         if args.legacy_ink
         else PipelineConfig()
     )

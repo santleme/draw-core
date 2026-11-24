@@ -6,15 +6,15 @@ máscara de tinta verdadeira M_GT(t) de cada frame é conhecida por
 construção — não por rotulação. Uma câmera virtual compõe a folha
 sobre frames REAIS de mesa vazia (corpora de negativos do
 laboratório) com homografia H_t conhecida e salva por frame, e o
-corpus sai no formato que o tools/replay_lab.py consome
+corpus sai no formato que o lab/replay_lab.py consome
 (``frames/`` + arquivos ao lado), acrescido do ``sidecar.json``
 com GT, bandas, máscara de impressão e eventos.
 
 A auditoria (``audit``) roda o corpus pelo laço REAL
 (draw.pipeline.Pipeline + trabalhadora página→limpa real em
 pump(), o mesmo arranjo síncrono do replay_lab) com a pilha de
-produção — detector de folha FT-dyn (SHA e20a89f0…) e tinta v6
-(SHA 613e250f…) — e compara o canvas confirmado com o GT.
+produção — detector de folha FT-dyn (SHA 5e2c611f…) e tinta
+round-v2 (SHA 8359ff03…) — e compara o canvas confirmado com o GT.
 
 O simulador é camada de REGRESSÃO (quebra aparece em segundos,
 com número exato), NÃO portão de promoção: ele não modela textura
@@ -45,7 +45,7 @@ sys.path.insert(0, str(_REPO_ROOT))
 sys.path.insert(0, str(_REPO_ROOT / "src"))
 
 from lab.parity_e2e import run_captured  # noqa: E402
-from lab.sync_workers import StepClock, SyncDetector  # noqa: E402
+from lab.sync_workers import build_sync_pipeline  # noqa: E402
 
 # ------------------------------------------------------------------
 # Geometria e constantes
@@ -66,7 +66,6 @@ BG_ROOT = (
     / "train-negatives-v2"
     / "session_raw_capture"
 )
-_REPO_ROOT = Path(__file__).resolve().parents[1]
 SHEET_MODEL = _REPO_ROOT / "models" / "draw_seg_v3_dyn.onnx"
 INK_MODEL = _REPO_ROOT / "models" / "page_clean_unet.onnx"
 SCENE_FPS = 2.0
@@ -574,10 +573,6 @@ def generate_scenario(out_dir, name, seed=103):
         "events_spec": events,
         "bands": {b: f"bands/{b}.png" for b in bands},
         "frames": frames_meta,
-        "models_production": {
-            "sheet_sha16_expected": "5e2c611f34774245",
-            "ink_sha16_expected": "613e250f5f7e15e9",
-        },
     }
     (scen / "sidecar.json").write_text(json.dumps(sidecar, indent=1))
     return sidecar
@@ -646,10 +641,9 @@ def _parse_flags(flags):
     padrao), nao o padrao de producao: os presets das bancadas ("legado",
     "ganho", ...) sao deltas sobre ela, e a regua so compara se a linha de
     base nao mudar quando o padrao de producao muda."""
-    from draw.ink.config import InkConfig
     from draw.settings import PipelineConfig
 
-    config = PipelineConfig(ink=InkConfig(), ink_auto_gain=False, detect_wake=False)
+    config = PipelineConfig.legacy(paper_guard=True)
     ink = dataclasses.replace(config.ink)
     for kv in flags:
         name, sep, raw = kv.partition("=")
@@ -729,10 +723,6 @@ def audit_one(scen_dir, out_dir, flags, detector_kind="real"):
     braço real fica como medida do gap sintético→detector."""
     from draw.contracts import DetectionResult, FramePacket
     from draw.infra.manifest import verify_model
-    from draw.ink.worker import PageCleanWorker
-    from draw.page_clean import PageCleanInk
-    from draw.perception import NeuralSheetDetector
-    from draw.pipeline import Pipeline
 
     config = _parse_flags(flags)
     if config.ink_divnorm:
@@ -747,13 +737,8 @@ def audit_one(scen_dir, out_dir, flags, detector_kind="real"):
     scen_dir, out_dir = Path(scen_dir), Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     side = json.loads((scen_dir / "sidecar.json").read_text())
-    detector = NeuralSheetDetector(str(SHEET_MODEL), verify=verify_model)
-    detector.load()
-    page_clean = PageCleanInk(str(INK_MODEL), verify=verify_model)
-    page_clean.load()
 
-    clock = StepClock()
-
+    det_worker = None
     if detector_kind == "oracle":
         true_corners = {
             fr["index"]: np.asarray(fr["corners_camera"], float)
@@ -787,19 +772,20 @@ def audit_one(scen_dir, out_dir, flags, detector_kind="real"):
             def take_traces(self, upto_result_seq=None):
                 return []
 
-        det = OracleDet()
-    else:
-        det = SyncDetector(detector)
-    worker = PageCleanWorker(
-        page_clean, None, clock=clock, config=config.ink, ink_divnorm=config.ink_divnorm
-    )
-    loop = Pipeline(
-        detection_worker=det,
-        ink_worker=worker,
-        clock=clock,
-        log=lambda *_a: None,
+        det_worker = OracleDet()
+    # SHEET_MODEL entra nos dois braços: no oráculo o detector real não
+    # roda, mas o binário carrega e verifica do mesmo jeito (o builder
+    # o constrói e carrega sempre que sheet_model é informado).
+    bundle = build_sync_pipeline(
+        verify=verify_model,
         config=config,
+        sheet_model=SHEET_MODEL,
+        ink_model=INK_MODEL,
+        detection_worker=det_worker,
     )
+    clock = bundle.clock
+    worker = bundle.ink_worker
+    loop = bundle.pipeline
     files = sorted((scen_dir / "frames").glob("*.png"))
     series = []
     seg_gt = None

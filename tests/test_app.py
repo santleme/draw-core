@@ -19,16 +19,14 @@ import cv2
 import numpy as np
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-
-from draw import app as app_module  # noqa: E402
-from draw import config  # noqa: E402
-from draw import paper as paper_module  # noqa: E402
-from draw import selfcheck as selfcheck_module  # noqa: E402
-from draw import ui as ui_module  # noqa: E402
-from draw.contracts import InkBaselineState  # noqa: E402
-from draw.infra import manifest as manifest_module  # noqa: E402
-from draw.perception import PRESENCE_VETO_LOGIT  # noqa: E402
+from draw import app as app_module
+from draw import config
+from draw import paper as paper_module
+from draw import selfcheck as selfcheck_module
+from draw import ui as ui_module
+from draw.contracts import InkBaselineState
+from draw.infra import manifest as manifest_module
+from draw.perception import PRESENCE_VETO_LOGIT
 
 
 def _frame(h=120, w=160):

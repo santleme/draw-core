@@ -43,6 +43,12 @@ from lab.sim_source import SyntheticCapture, export_video  # noqa: E402
 # elitismo e no keep.
 PIPELINE_CRASH_SCORE = 4.0
 
+# Falha de infraestrutura (modelo ou GT ausente, manifesto estrito,
+# onnxruntime faltando) não é defeito do cenário: score negativo tira
+# a tentativa de elite/mutação/keep pelos filtros ``score >= 0`` do
+# main — registrada no relatório, sem contaminar a busca.
+INFRA_ERROR_SCORE = -1.0
+
 TEXT_POOL = [
     "ab",
     "draw",
@@ -64,9 +70,7 @@ def _uniform(rng, lo, hi):
     return float(rng.uniform(lo, hi))
 
 
-def sample_config(
-    rng: np.random.Generator, index: int, texts: list[str] | None = None
-) -> dict:
+def sample_config(rng: np.random.Generator, texts: list[str] | None = None) -> dict:
     """Sorteia uma configuração de cenário no espaço do falsificador.
 
     Cada fase/efeito entra com probabilidade independente — o espaço
@@ -312,6 +316,33 @@ def score_report(report: dict) -> tuple[float, dict]:
 # ---------------------------------------------------------------------
 
 
+def _is_infra_error(error: BaseException) -> bool:
+    """True quando a exceção é falha de infraestrutura, não do cenário.
+
+    Modelo ou GT ausente e worker sem onnxruntime quebram o ambiente
+    antes de o cenário ser julgado — o mesmo vídeo passaria numa
+    máquina pronta. A recusa do manifesto estrito sobe como
+    RuntimeError pelada (``verify_model`` não tem exceção própria),
+    então o marcador textual é o único sinal que a separa de um
+    crash real do pipeline; e a worker de tinta reempacota o erro da
+    thread (``raise ... from worker.error``), por isso a cadeia de
+    causa/contexto é percorrida inteira — a raiz manda, não o tipo
+    de cima.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, OSError):
+            return True
+        if isinstance(current, RuntimeError):
+            message = str(current)
+            if "manifesto" in message or "onnxruntime nao esta instalado" in message:
+                return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 def run_trial(
     cfg: dict,
     workdir: Path,
@@ -321,9 +352,13 @@ def run_trial(
 ) -> dict:
     """Gera o vídeo do cenário, roda a bancada real e pontua.
 
-    Dois fracassos distintos: configuração inválida ou export quebrado
+    Três desfechos distintos: configuração inválida ou export quebrado
     propagam como erro do cenário (score -1 no chamador — a tentativa
-    nem chegou ao pipeline); exceção DENTRO da auditoria é o pior
+    nem chegou ao pipeline); exceção DENTRO da auditoria que seja
+    falha de infraestrutura (modelo/GT ausente, manifesto estrito)
+    volta como resultado com score -1 — o ambiente quebrou, não o
+    cenário, e os filtros ``score >= 0`` do chamador a tiram de
+    elite/mutação/keep; qualquer outra exceção na auditoria é o pior
     desfecho que um cenário válido pode produzir — a bancada real
     caiu num vídeo legítimo — e volta como resultado com score máximo,
     elegível a elite/mutação/keep e com o erro registrado.
@@ -339,6 +374,21 @@ def run_trial(
                 video, video.with_suffix(".gt.npz"), models=models, save_masks=masks_dir
             )
         except Exception as error:
+            if _is_infra_error(error):
+                # Falha de infra (modelo/GT ausente, manifesto estrito):
+                # o ambiente quebrou, não o cenário — score negativo
+                # mantém a tentativa fora de elite/mutação/keep.
+                return {
+                    "tag": tag,
+                    "score": INFRA_ERROR_SCORE,
+                    "components": {"infra_error": 1.0},
+                    "verdict": {"status": f"infra_error: {error.__class__.__name__}"},
+                    "infra_error": f"{error.__class__.__name__}: {error}",
+                    "config": cfg,
+                    "frames": manifest["frames"],
+                    "elapsed_s": round(time.monotonic() - started, 2),
+                    "artifacts": str(video) if keep_artifacts else None,
+                }
             # Crash do pipeline (worker de tinta, laço, modelo): cenário
             # encontrou um defeito de verdade — score acima do máximo
             # pontuável para rankear à frente de qualquer falha medida.
@@ -467,7 +517,7 @@ def main(argv=None):
     }
 
     results = []
-    batch = [sample_config(rng, i, texts) for i in range(args.trials)]
+    batch = [sample_config(rng, texts) for _ in range(args.trials)]
     tag_seq = 0
     for round_index in range(args.rounds + 1):
         evaluated = []

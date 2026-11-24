@@ -25,6 +25,15 @@ def test_list_corpus_frames_prefere_raw(tmp_path):
     assert [p.name for p in list_corpus_frames(tmp_path)] == ["f1.png", "f2.png"]
 
 
+def test_list_corpus_frames_ordena_por_sufixo_numerico(tmp_path):
+    """f2.png precede f10.png mesmo escrito depois: a ordem é o valor
+    do sufixo numérico — a ordem de nome os invertia."""
+    (tmp_path / "raw").mkdir()
+    cv2.imwrite(str(tmp_path / "raw" / "f10.png"), np.zeros((4, 4, 3), np.uint8))
+    cv2.imwrite(str(tmp_path / "raw" / "f2.png"), np.zeros((4, 4, 3), np.uint8))
+    assert [p.name for p in list_corpus_frames(tmp_path)] == ["f2.png", "f10.png"]
+
+
 def test_list_corpus_frames_vazio_falha(tmp_path):
     with pytest.raises(FileNotFoundError):
         list_corpus_frames(tmp_path)

@@ -12,7 +12,13 @@ import time
 
 import pytest
 
+from draw.infra import telemetry as telemetry_module
 from draw.infra.telemetry import SessionTelemetry
+
+
+class _FakeThread:
+    def join(self, timeout=None):
+        return None
 
 
 def _read_records(path):
@@ -92,3 +98,72 @@ def test_writer_rotates_past_the_size_cap(tmp_path):
         assert backup.exists()
     finally:
         telemetry.close()
+
+
+def test_unserializable_record_surfaces_as_error(tmp_path):
+    """Payload que json.dumps recusa (TypeError, nao OSError) parava
+    o escritor sem deixar rastro: _write devolve False e a excecao
+    fica em .error — e o close() nao mascara o erro original."""
+    path = tmp_path / "telemetry.jsonl"
+    telemetry = SessionTelemetry(path)
+    telemetry.event("ruim", payload=object())
+    assert telemetry._write(telemetry._take_events()) is False
+    assert isinstance(telemetry.error, TypeError)
+
+    telemetry._thread = _FakeThread()
+    telemetry.close()
+    assert isinstance(telemetry.error, TypeError)
+    assert _read_records(path) == []  # flush pulado: nada regravado
+
+
+def test_run_loop_failure_surfaces_on_error(tmp_path, monkeypatch):
+    """Excecao fora do _write (ex.: montando o retrato) tambem nao
+    pode morrer em silencio na thread daemon."""
+    telemetry = SessionTelemetry(tmp_path / "telemetry.jsonl")
+    telemetry._stopped.set()
+
+    def boom(self):
+        raise RuntimeError("retrato quebrado")
+
+    monkeypatch.setattr(SessionTelemetry, "_snapshot", boom)
+    telemetry._run()  # nao propaga: a excecao vira telemetry.error
+    assert isinstance(telemetry.error, RuntimeError)
+
+
+def test_event_queue_is_bounded(tmp_path):
+    """A fila tem teto: com o escritor morto ou travado, a memoria
+    nao cresce sem fim — passado do limite os eventos mais antigos
+    caem."""
+    telemetry = SessionTelemetry(tmp_path / "telemetry.jsonl")
+    limit = telemetry_module._EVENT_QUEUE_LIMIT
+    for seq in range(limit + 7):
+        telemetry.event("tick", seq=seq)
+    records = telemetry._take_events()
+    assert len(records) == limit
+    assert records[0]["seq"] == 7  # os mais antigos cairam
+    assert records[-1]["seq"] == limit + 6
+
+
+def test_close_flushes_events_pending_when_writer_is_gone(tmp_path):
+    """Escritor morto ou preso no join: os eventos enfileirados
+    depois da ultima retirada ainda saem no flush final do close()."""
+    path = tmp_path / "telemetry.jsonl"
+    telemetry = SessionTelemetry(path, interval=60.0)
+    telemetry._thread = _FakeThread()  # escritor nunca rodou
+    telemetry.event("saida", seq=1)
+    telemetry.close()
+    assert telemetry.error is None
+    assert [record["event"] for record in _read_records(path)] == ["saida"]
+
+
+@pytest.mark.slow
+def test_close_flushes_events_queued_after_writer_stopped(tmp_path):
+    """Evento enfileirado depois do epilogo do escritor ainda sai na
+    proxima chamada de close(): o flush final cobre o que sobrou."""
+    path = tmp_path / "telemetry.jsonl"
+    telemetry = SessionTelemetry(path, interval=60.0).start()
+    telemetry.close()
+    telemetry.event("depois", seq=2)
+    telemetry.close()
+    events = [record.get("event") for record in _read_records(path)]
+    assert "depois" in events

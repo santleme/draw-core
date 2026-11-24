@@ -40,6 +40,16 @@ def test_hand_sample_rejects_bad_fields():
         HandSample(present="talvez", moved=False)
     with pytest.raises(ValueError):
         HandSample(present=True, moved=1)
+    with pytest.raises(ValueError):
+        HandSample(present=1, moved=False)
+    with pytest.raises(ValueError):
+        HandSample(present=0, moved=False)
+    with pytest.raises(ValueError):
+        HandSample(present=np.True_, moved=False)
+    with pytest.raises(ValueError):
+        HandSample(present=True, moved=np.False_)
+    with pytest.raises(ValueError):
+        HandOcclusion(4, 1.5, 2, present=1)
 
 
 def test_hand_occlusion_keeps_empty_distinct_from_missing_and_owns_masks():

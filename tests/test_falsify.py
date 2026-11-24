@@ -73,7 +73,7 @@ def _select_covering_indices(configs):
 
 def test_sampled_configs_build_valid_captures():
     rng = np.random.default_rng(11)
-    configs = [sample_config(rng, index) for index in range(40)]
+    configs = [sample_config(rng) for _ in range(40)]
     indices = sorted(set(range(10)) | set(_select_covering_indices(configs)))
     for idx in indices:
         cfg = configs[idx]
@@ -86,7 +86,7 @@ def test_sampled_configs_build_valid_captures():
 
 def test_mutation_stays_valid_and_near_parent():
     rng = np.random.default_rng(12)
-    parent = sample_config(rng, 0)
+    parent = sample_config(rng)
     children = [mutate_config(parent, rng) for _ in range(40)]
     selected: set[int] = set(range(8))
     seen_mutated: set[str] = set()
@@ -108,8 +108,8 @@ def test_mutation_never_leaves_parameter_contract():
     tem faixa própria."""
     rng = np.random.default_rng(42)
     children = []
-    for index in range(15):
-        parent = sample_config(rng, index)
+    for _ in range(15):
+        parent = sample_config(rng)
         for _ in range(25):
             child = mutate_config(parent, rng)
             params = child["params"]
@@ -275,6 +275,108 @@ def test_run_trial_config_failure_still_raises(tmp_path, monkeypatch):
     cfg = {"text": "ab", "seed": 1, "params": {"fps": 8}}
     with pytest.raises(ValueError):
         fz.run_trial(cfg, tmp_path, "bad", models={}, keep_artifacts=False)
+
+
+def test_run_trial_missing_file_is_infra_error(tmp_path, monkeypatch):
+    """Modelo/GT ausente (FileNotFoundError) é falha de infra, não do
+    cenário: score -1 tira o trial de elite/mutação/keep pelos filtros
+    ``score >= 0`` do main — e sem keep o vídeo continua sem dono."""
+    import lab.falsify as fz
+
+    def fake_export(capture, output):
+        output.write_bytes(b"x")
+        output.with_suffix(".gt.npz").write_bytes(b"x")
+        output.with_suffix(".json").write_bytes(b"x")
+        output.with_name(output.stem + "_ink_full.npy").write_bytes(b"x")
+        return {"frames": 1}
+
+    monkeypatch.setattr(fz, "export_video", fake_export)
+    monkeypatch.setattr(
+        fz,
+        "audit",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            FileNotFoundError("modelo ONNX nao encontrado: models/x.onnx")
+        ),
+    )
+    cfg = {"text": "ab", "seed": 1, "params": {"fps": 8, "settle_seconds": 0.3}}
+    result = fz.run_trial(cfg, tmp_path, "bad", models={}, keep_artifacts=False)
+    assert result["score"] == fz.INFRA_ERROR_SCORE
+    assert result["score"] == -1.0
+    assert "FileNotFoundError" in result["infra_error"]
+    assert result["verdict"]["status"].startswith("infra_error")
+    assert "pipeline_error" not in result
+    for suffix in (".mp4", ".gt.npz", ".json"):
+        assert not (tmp_path / f"bad{suffix}").exists()
+    assert not (tmp_path / "bad_ink_full.npy").exists()
+
+
+def test_run_trial_strict_manifest_rejection_is_infra(tmp_path, monkeypatch):
+    """A recusa do manifesto estrito sobe como RuntimeError pelada —
+    regressão do caminho real de verify_model: o marcador textual é
+    o que a separa de um crash do pipeline."""
+    import lab.falsify as fz
+
+    monkeypatch.setattr(fz, "export_video", lambda capture, output: {"frames": 1})
+    monkeypatch.setattr(
+        fz,
+        "audit",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError(
+                "MODELO NAO REGISTRADO no manifesto assets/manifest.json: "
+                "models/x.onnx. Nenhum sha256 aprovado cobre este arquivo."
+            )
+        ),
+    )
+    cfg = {"text": "ab", "seed": 1, "params": {"fps": 8, "settle_seconds": 0.3}}
+    result = fz.run_trial(cfg, tmp_path, "bad", models={}, keep_artifacts=False)
+    assert result["score"] == fz.INFRA_ERROR_SCORE
+    assert result["verdict"]["status"].startswith("infra_error")
+    assert "RuntimeError" in result["infra_error"]
+    assert "pipeline_error" not in result
+
+
+def test_run_trial_error_chained_on_oserror_is_infra(tmp_path, monkeypatch):
+    """RuntimeError com causa OSError (raise-from dentro do worker)
+    ainda é falha de infra — a causa raiz manda, não o tipo de cima."""
+    import lab.falsify as fz
+
+    def fake_audit(*args, **kwargs):
+        try:
+            raise FileNotFoundError("gt.npz ausente")
+        except FileNotFoundError as error:
+            raise RuntimeError("worker de tinta falhou") from error
+
+    monkeypatch.setattr(fz, "export_video", lambda capture, output: {"frames": 1})
+    monkeypatch.setattr(fz, "audit", fake_audit)
+    cfg = {"text": "ab", "seed": 1, "params": {"fps": 8, "settle_seconds": 0.3}}
+    result = fz.run_trial(cfg, tmp_path, "bad", models={}, keep_artifacts=False)
+    assert result["score"] == fz.INFRA_ERROR_SCORE
+    assert result["verdict"]["status"].startswith("infra_error")
+    assert "RuntimeError" in result["infra_error"]
+
+
+def test_run_trial_wrapped_manifest_rejection_is_infra(tmp_path, monkeypatch):
+    """Recusa do manifesto reempacotada pela worker de tinta
+    (``raise RuntimeError(...) from error``) continua infra: a
+    mensagem de cima não tem o marcador, mas a causa raiz tem."""
+    import lab.falsify as fz
+
+    def fake_audit(*args, **kwargs):
+        try:
+            raise RuntimeError(
+                "MODELO NAO REGISTRADO no manifesto assets/manifest.json: "
+                "models/x.onnx. Nenhum sha256 aprovado cobre este arquivo."
+            )
+        except RuntimeError as error:
+            raise RuntimeError("worker de tinta falhou") from error
+
+    monkeypatch.setattr(fz, "export_video", lambda capture, output: {"frames": 1})
+    monkeypatch.setattr(fz, "audit", fake_audit)
+    cfg = {"text": "ab", "seed": 1, "params": {"fps": 8, "settle_seconds": 0.3}}
+    result = fz.run_trial(cfg, tmp_path, "bad", models={}, keep_artifacts=False)
+    assert result["score"] == fz.INFRA_ERROR_SCORE
+    assert result["verdict"]["status"].startswith("infra_error")
+    assert "pipeline_error" not in result
 
 
 def test_score_report_weights_documented_failures():

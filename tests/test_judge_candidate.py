@@ -147,6 +147,13 @@ def test_with_replay_option_was_removed():
         jc.parse_args(["--candidate", "x.onnx", "--with-replay"])
 
 
+def test_skip_unknown_judge_names_rejected():
+    """Nome errado em --skip saia em silencio e o relatorio ainda
+    dizia o juiz executado; agora erro de uso (saida 2)."""
+    with pytest.raises(SystemExit):
+        jc.parse_args(["--candidate", "x.onnx", "--skip", "sheet,typo"])
+
+
 def test_consolidate_inconclusive_when_no_gate_judge_ran():
     """--skip sheet,absence deixava `failed` vazio e consolidava
     APTO sem julgar nada. Sem juiz com portao, INCONCLUSIVO."""

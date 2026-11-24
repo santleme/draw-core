@@ -10,7 +10,6 @@ import pytest
 from draw.contracts import (
     DetectionResult,
     FramePacket,
-    GateInfo,
     InkDisplaySnapshot,
     InkSnapshot,
     InkState,
@@ -480,9 +479,7 @@ def test_detection_result_masks_are_read_only_views():
         _detection_result(hand_mask=np.zeros((8, 8), dtype=np.float32))
 
 
-def test_detection_result_gate_info_and_frozen():
-    gate = GateInfo(source="neural", presence_logit=0.32, edge_in=0.001)
-    result = _detection_result(gate_info=gate)
-    assert result.gate_info is gate
+def test_detection_result_is_frozen():
+    result = _detection_result()
     with pytest.raises(FrozenInstanceError):
         result.detect_ms = 1.0

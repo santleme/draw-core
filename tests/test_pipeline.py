@@ -447,6 +447,15 @@ def test_coverage_iou_floor_inert_without_mask():
     assert ink.submitted
 
 
+def test_coverage_iou_floor_out_of_range_rejected():
+    """Piso fora de [0, 1] é recusado na construção (0 desliga o piso)."""
+    for bad in (-0.1, 1.5, float("nan")):
+        with pytest.raises(ValueError, match="coverage_iou_floor"):
+            PipelineConfig(coverage_iou_floor=bad)
+    PipelineConfig(coverage_iou_floor=0.0)
+    PipelineConfig(coverage_iou_floor=1.0)
+
+
 def test_coverage_iou_floor_rejections_are_recorded():
     """Issue #105: todo veto do piso de IoU é registrado — total e
     anel dos últimos valores — para a recalibração do limiar, que

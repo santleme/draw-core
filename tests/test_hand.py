@@ -267,20 +267,24 @@ def test_close_does_not_free_a_landmarker_in_flight(monkeypatch, tmp_path):
         masker.presence_signature(frame, timestamp_ms=1000)
         done.set()
 
-    thread = threading.Thread(target=_call)
+    thread = threading.Thread(target=_call, daemon=True)
     thread.start()
-    assert entered.wait(5.0)
-    # A deteccao detem o lock: o close() estoura o timeout,
-    # sinaliza _closed e NAO fecha o landmarker em uso.
-    masker.close()
-    assert created[0].closed == 0
-    release.set()
-    assert done.wait(5.0)
-    thread.join(5.0)
-    # Quem estava em voo fecha ao retornar.
-    assert created[0].closed == 1
-    # E o masker segue indisponivel depois do fechamento.
-    assert masker.presence_signature(frame) is None
+    try:
+        assert entered.wait(5.0)
+        # A deteccao detem o lock: o close() estoura o timeout,
+        # sinaliza _closed e NAO fecha o landmarker em uso.
+        masker.close()
+        assert created[0].closed == 0
+        release.set()
+        assert done.wait(5.0)
+        thread.join(5.0)
+        # Quem estava em voo fecha ao retornar.
+        assert created[0].closed == 1
+        # E o masker segue indisponivel depois do fechamento.
+        assert masker.presence_signature(frame) is None
+    finally:
+        release.set()
+        thread.join(5.0)
 
 
 def test_landmarker_created_after_close_is_disposed(monkeypatch, tmp_path):
@@ -296,20 +300,24 @@ def test_landmarker_created_after_close_is_disposed(monkeypatch, tmp_path):
         masker.presence_signature(frame, timestamp_ms=1000)
         done.set()
 
-    thread = threading.Thread(target=_call)
+    thread = threading.Thread(target=_call, daemon=True)
     thread.start()
-    assert entered.wait(5.0)
-    # A criacao preguicosa detem o lock: close() sinaliza _closed
-    # e sai sem esperar a criacao terminar.
-    masker.close()
-    release.set()
-    assert done.wait(5.0)
-    thread.join(5.0)
-    # O landmarker criado depois do _closed fecha na hora e nao
-    # se publica; a volta para o IMAGE nem cria outro — _closed
-    # ja marcou o masker indisponivel.
-    assert len(created) == 1
-    assert created[0].closed == 1
+    try:
+        assert entered.wait(5.0)
+        # A criacao preguicosa detem o lock: close() sinaliza _closed
+        # e sai sem esperar a criacao terminar.
+        masker.close()
+        release.set()
+        assert done.wait(5.0)
+        thread.join(5.0)
+        # O landmarker criado depois do _closed fecha na hora e nao
+        # se publica; a volta para o IMAGE nem cria outro — _closed
+        # ja marcou o masker indisponivel.
+        assert len(created) == 1
+        assert created[0].closed == 1
+    finally:
+        release.set()
+        thread.join(5.0)
 
 
 def test_missing_model_never_imports_mediapipe(tmp_path, monkeypatch):

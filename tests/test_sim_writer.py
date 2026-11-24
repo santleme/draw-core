@@ -48,7 +48,6 @@ def test_parse_flags_rejects_unknown(flags):
 def test_audit_refuses_ink_divnorm_with_frozen_model(tmp_path):
     """Review #48: o sim_writer audita o INK_MODEL congelado (v2);
     divnorm nele mediria o v2 fora do domínio — recusa antes de rodar."""
-    import pytest
     from lab.sim_writer import audit_one
 
     with pytest.raises(ValueError, match="v4"):
@@ -82,6 +81,13 @@ def test_parse_flags_base_is_legacy_and_producao_preset_matches_the_default():
         ink=InkConfig(), ink_auto_gain=False, detect_wake=False
     )
     assert _parse_flags(preset_flags("producao")) == PipelineConfig()
+
+
+def test_sim_writer_rejects_none_for_non_nullable_flags():
+    from lab import sim_writer
+
+    with pytest.raises(ValueError, match="booleano|invalido"):
+        sim_writer._parse_flags(["coverage=none"])
 
 
 def test_audit_timeout_imprime_rabos_e_sai(monkeypatch, tmp_path, capsys):

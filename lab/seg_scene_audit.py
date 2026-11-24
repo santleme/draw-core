@@ -25,7 +25,8 @@ overlay_NNNNN.png com a cobertura crua em tinta translúcida e o quad
 desenhado, para conferir olho a olho os frames que dispararam os
 contadores.
 
-A fonte é um diretório de frames (*.png, *.jpg em ordem de nome) ou
+A fonte é um diretório de frames (*.png, *.jpg, *.bmp em ordem
+numérica de sufixo — f2 antes de f10) ou
 qualquer fonte que draw.camera.parse_source/open_capture aceitem
 (.drawcap, vídeo, tcp://, hvcam://). Um --out que já contém artefatos
 de auditoria anterior é recusado — corridas não se misturam e a
@@ -57,6 +58,8 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(_repo_root / "src"))
     sys.path.insert(0, str(_repo_root))
 
+from lab.corpus.clip import IMG_EXTS, frame_sort_key  # noqa: E402
+
 # Limiares das famílias de falha, na medida que a issue citou: o piso
 # de fill das guardas geométricas (PR #107 — a folha real mede >=
 # 0.84), a fração de frame que os piores quads cobriram (96-100%) e o
@@ -69,8 +72,6 @@ OOB_GE_PX = 40.0
 # Piso de área para um componente contar: 0.5% do frame, medido na
 # grade da máscara de cobertura — a razão é a mesma nas duas grades.
 _MIN_COMPONENT_FRAC = 0.005
-
-_IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg")
 
 # Mesma política do _desk_artifacts: sufixo estritamente numérico —
 # um overlay_1.png de outra ferramenta não colide com os nossos.
@@ -353,8 +354,9 @@ def _open_frames(source, *, helper_token_file=None):
     (os dois chegam como o mesmo read()==False); None é fim limpo
     ou fonte sem a informação.
 
-    Diretório: os *.png/*.jpg em ordem de nome, decodificados por
-    cv2.imread — um arquivo indecodificável aborta a corrida com o
+    Diretório: os *.png/*.jpg/*.bmp em ordem numérica de sufixo do
+    nome (f2 antes de f10 — a ordem de nome os invertia), decodificados
+    por cv2.imread — um arquivo indecodificável aborta a corrida com o
     nome dele, nunca vira quadro mudo. Qualquer outra fonte passa por
     parse_source/open_capture (.drawcap, vídeo, tcp://, hvcam://) e
     entrega quadros seq_NNNNN até o read() fechar.
@@ -363,12 +365,11 @@ def _open_frames(source, *, helper_token_file=None):
     path = Path(str(source))
     if path.is_dir():
         names = sorted(
-            p
-            for p in path.iterdir()
-            if p.is_file() and p.suffix.lower() in _IMAGE_SUFFIXES
+            (p for p in path.iterdir() if p.is_file() and p.suffix.lower() in IMG_EXTS),
+            key=frame_sort_key,
         )
         if not names:
-            raise ValueError(f"{path} nao contem frames (*.png, *.jpg)")
+            raise ValueError(f"{path} nao contem frames (*.png, *.jpg, *.bmp)")
 
         def _iter_dir():
             for item in names:

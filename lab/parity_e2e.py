@@ -39,10 +39,9 @@ sys.path.insert(0, str(_REPO_ROOT))
 sys.path.insert(0, str(_REPO_ROOT / "src"))
 
 from lab.sync_workers import (  # noqa: E402
-    StepClock,
-    SyncDetector,
-    SyncPresence,
+    build_sync_pipeline,
     iter_frames,
+    step_sync_frame,
 )
 
 
@@ -68,54 +67,24 @@ def run_new(
     na produção (draw.app) — sem eles os caminhos dependentes de mão
     ficam sem paridade medida e o relatório diz isso.
     """
-    from draw import hand as hand_module
     from draw.contracts import FramePacket
-    from draw.hand_presence import make_hand_presence
-    from draw.ink.config import InkConfig
-    from draw.ink.worker import PageCleanWorker
-    from draw.page_clean import PageCleanInk
-    from draw.perception import NeuralSheetDetector
-    from draw.pipeline import Pipeline
     from draw.settings import PipelineConfig
 
-    detector = NeuralSheetDetector(str(sheet_model), verify=verify)
-    detector.load()
-    page_clean = PageCleanInk(str(ink_model), verify=verify)
-    page_clean.load()
-    hand_masker = (
-        hand_module.HandMasker(hand_model, verify=verify)
-        if hand_module.hand_model_available(hand_model)
-        else None
-    )
-    presence = make_hand_presence(hand_model, verify=verify) if hand_model else None
-
-    clock = StepClock()
-    det = SyncDetector(detector)
-    presence_worker = (
-        SyncPresence(presence, strict=True) if presence is not None else None
-    )
     # A régua de paridade compara contra o SheetInkLoop legado (Tier A, sem
-    # ganho, sem Detect-Wake e com voto/cadência legados): fixa a mesma base
-    # em Pipeline e PageCleanWorker para não misturar o preset de produção.
-    legacy_config = PipelineConfig(
-        ink=InkConfig(paper_guard=False), ink_auto_gain=False, detect_wake=False
+    # ganho, sem Detect-Wake, sem a guarda de papel que o laço legado não
+    # tinha e com voto/cadência legados): fixa a mesma base em Pipeline e
+    # PageCleanWorker para não misturar o preset de produção.
+    bundle = build_sync_pipeline(
+        verify=verify,
+        config=PipelineConfig.legacy(paper_guard=False),
+        sheet_model=sheet_model,
+        ink_model=ink_model,
+        hand_model=hand_model,
+        presence_strict=True,
     )
-    worker = PageCleanWorker(
-        page_clean,
-        hand_masker,
-        clock=clock,
-        config=legacy_config.ink,
-        ink_divnorm=legacy_config.ink_divnorm,
-    )
-    loop = Pipeline(
-        detection_worker=det,
-        ink_worker=worker,
-        hand_presence_worker=presence_worker,
-        hand_masker=hand_masker,
-        clock=clock,
-        log=lambda *_a: None,
-        config=legacy_config,
-    )
+    clock = bundle.clock
+    worker = bundle.ink_worker
+    loop = bundle.pipeline
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -124,11 +93,11 @@ def run_new(
     try:
         for idx, frame in iter_frames(corpus, frames):
             clock.t = parity_frame_time(idx, fps)
-            loop.step(FramePacket(image=frame, captured_at=clock.t, sequence=idx + 1))
-            worker.pump()
-            loop.collect_ink()
-            if worker.error is not None:
-                raise RuntimeError("trabalhadora de tinta falhou") from worker.error
+            step_sync_frame(
+                loop,
+                worker,
+                FramePacket(image=frame, captured_at=clock.t, sequence=idx + 1),
+            )
             records.append(
                 {
                     "frame": idx,
@@ -155,7 +124,9 @@ def run_new(
         # try próprio (um dump que levanta não pode pular o close).
         try:
             hand_samples = (
-                presence_worker.real_samples if presence_worker is not None else 0
+                bundle.presence_worker.real_samples
+                if bundle.presence_worker is not None
+                else 0
             )
             payload = {"frames": records, "hand_samples": hand_samples}
             if not done:
@@ -164,10 +135,7 @@ def run_new(
             np.savez_compressed(out_dir / "canvas.npz", *canvases)
         finally:
             # Os landmarkers fecham aqui, não pelo __del__.
-            if hand_masker is not None:
-                hand_masker.close()
-            if presence is not None:
-                presence.close()
+            bundle.close()
     return records, canvases, hand_samples
 
 

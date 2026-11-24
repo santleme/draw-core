@@ -593,7 +593,13 @@ def run_clip(
         pipeline_module.Pipeline = real
     wall = time.perf_counter() - wall0
     cpu = time.process_time() - cpu0
-    loop = holder["loop"]
+    loop = holder.get("loop")
+    if loop is None:
+        raise RuntimeError(
+            "o Spy não viu nenhum Pipeline ser construído — a fiação do "
+            "replay escapou da instrumentação (ex.: import de Pipeline "
+            "fixado no topo de um módulo)"
+        )
     mask = (
         np.zeros((config.current().height, config.current().width), bool)
         if loop.clean_mask is None

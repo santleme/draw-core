@@ -2,7 +2,7 @@
 
 Monta a interface com:
 - Barra superior Studio (logo DRAW, indicador de captura ao vivo e titulos editoriais).
-- Barra vertical compacta de atalhos a esquerda da camera ([S], [C], [F], [Q]).
+- Barra vertical compacta de atalhos a esquerda da camera ([S], [F], [Q]).
 - Painel central com viewport dedicado para a visao da camera.
 - Painel direito com viewport dedicado e paspatur para a folha digital, no mesmo padrao da camera.
 - Rodape sutil com informacoes de formato e identidade.
@@ -105,17 +105,17 @@ def _scale(sc):
     return k
 
 
-def _studio_template(cam_shape, canvas_shape, show_base, size=(_BASE_W, _BASE_H)):
+def _studio_template(cam_shape, canvas_shape, size=(_BASE_W, _BASE_H)):
     """Cromagem estatica da janela e geometria dos dois viewports.
 
     Header, rodape, botoes e molduras nao mudam entre quadros: sao
     desenhados uma vez por combinacao de (forma da camera, forma do
-    canvas, show_base, tamanho) e copiados a cada quadro. Sem o cache,
+    canvas, tamanho) e copiados a cada quadro. Sem o cache,
     compor a vista redesenhava textos e pilulas a cada quadro do laco.
     O layout nasce no tamanho pedido: medidas, fontes e espessuras
     escalam com min(w/1600, h/640), sem esticar uma imagem pronta.
     """
-    key = (cam_shape, canvas_shape, show_base, size)
+    key = (cam_shape, canvas_shape, size)
     cached = _STUDIO_TEMPLATES.get(key)
     if cached is not None:
         return cached
@@ -273,17 +273,14 @@ def _studio_template(cam_shape, canvas_shape, show_base, size=(_BASE_W, _BASE_H)
 
 
 FOOTER_BUTTONS = (("[S]", "Salvar", "s"), ("[F]", "Frame", "f"), ("[Q]", "Sair", "q"))
-_BASE_BUTTON = ("[C]", "Base", "c")
 
 
-def footer_buttons(show_base=False):
+def footer_buttons():
     """Botoes do rodape: (rotulo da tecla, texto, tecla que o botao aciona)."""
-    if not show_base:
-        return FOOTER_BUTTONS
-    return (FOOTER_BUTTONS[0], _BASE_BUTTON) + FOOTER_BUTTONS[1:]
+    return FOOTER_BUTTONS
 
 
-def button_rects(size, show_base=False):
+def button_rects(size):
     """Retangulos (x, y, w, h) dos botoes do rodape no tamanho dado."""
     target_w, target_h = size
     sc = min(target_w / _BASE_W, target_h / _BASE_H)
@@ -292,8 +289,7 @@ def button_rects(size, show_base=False):
     footer_h, btn_h, bw = k(36), k(22), k(94)
     y = target_h - footer_h + (footer_h - btn_h) // 2
     return [
-        (k(12) + i * (bw + k(8)), y, bw, btn_h)
-        for i in range(len(footer_buttons(show_base)))
+        (k(12) + i * (bw + k(8)), y, bw, btn_h) for i in range(len(footer_buttons()))
     ]
 
 
@@ -458,7 +454,7 @@ def camera_menu_layout(size, cam_shape, canvas_shape, count, first=0):
     primeira linha visivel, para rolar a lista. Devolve retangulos
     (x, y, w, h).
     """
-    geo = _studio_template(cam_shape, canvas_shape, False, tuple(size))[1]
+    geo = _studio_template(cam_shape, canvas_shape, tuple(size))[1]
     sc = geo["scale"]
     k = _scale(sc)
 
@@ -834,13 +830,13 @@ def _draw_settings_menu(studio, layout, items, progress):
         _draw_toggle(studio, (tx, ty, tw, tg), on_p, direction, progress, bg)
 
 
-def _draw_hud_footer(studio, geo, sc, lines, size, show_base=False):
+def _draw_hud_footer(studio, sc, lines, size):
     """Painel numa linha so no rodape, quando nao ha margem ao lado da camera."""
 
     k = _scale(sc)
 
     font, th = cv2.FONT_HERSHEY_SIMPLEX, k(1)
-    left = button_rects(size, show_base)[-1]
+    left = button_rects(size)[-1]
     left = left[0] + left[2] + k(24)
     right = settings_menu_layout(size, 1)["gear"]
     right = right[0] - right[2] - k(20)
@@ -864,7 +860,7 @@ def _draw_hud_footer(studio, geo, sc, lines, size, show_base=False):
         tx += cv2.getTextSize(text, font, fs, th)[0][0]
 
 
-def _draw_hud(studio, geo, sc, lines, size, show_base=False):
+def _draw_hud(studio, geo, sc, lines, size):
     """Informacoes no canto superior esquerdo da area escura da camera.
 
     O painel nunca passa da margem escura a esquerda da imagem: se o texto
@@ -892,7 +888,7 @@ def _draw_hud(studio, geo, sc, lines, size, show_base=False):
     needed = width(base_fs)
     factor = min(1.0, avail / needed) if needed > 0 else 1.0
     if factor < 0.6:
-        _draw_hud_footer(studio, geo, sc, lines, size, show_base)
+        _draw_hud_footer(studio, sc, lines, size)
         return
     fs = base_fs * factor
     line_h = max(1, int(round(18 * sc * factor)))
@@ -980,7 +976,7 @@ def _resize_canvas(image, width, height, version):
 def compose_view(
     camera_img,
     canvas_img,
-    show_base=False,
+    *,
     size=(_BASE_W, _BASE_H),
     rec_on=True,
     buttons=None,
@@ -1003,17 +999,13 @@ def compose_view(
     ordem de footer_buttons; wordmark e (progresso, origem) do hover no
     nome DRAW; camera_menu e o estado da bolinha de cameras (dot, opened,
     progress, items); pressed e o indice do botao sob o clique.
-    show_base liga o botao [C] Base do rodape: a tecla so tem efeito no
-    modo baseline (session_ink), entao fora dele o botao nao aparece.
     canvas_version e o token de conteudo de canvas_img para o cache do
     resize do painel (a mesma versao garante os mesmos pixels); None
     re-redimensiona a cada quadro.
     A cromagem estatica vem do cache de _studio_template; por quadro
     restam os dois resizes, as colagens e as bordas sobre as imagens.
     """
-    template, geo = _studio_template(
-        camera_img.shape, canvas_img.shape, show_base, tuple(size)
-    )
+    template, geo = _studio_template(camera_img.shape, canvas_img.shape, tuple(size))
     studio = template.copy()
     sc = geo["scale"]
     k = _scale(sc)
@@ -1107,7 +1099,7 @@ def compose_view(
     _draw_camera_dot(studio, layout, menu.get("dot", 0.0), menu.get("opened", False))
     _draw_camera_menu(studio, layout, menu.get("items", ()), menu.get("progress", 0.0))
 
-    _draw_hud(studio, geo, sc, _hud_lines(studio, hud or {}), size, show_base)
+    _draw_hud(studio, geo, sc, _hud_lines(studio, hud or {}), size)
 
     settings = settings_menu or {}
     gear = settings_menu_layout(size, len(settings.get("items", ())))
@@ -1117,7 +1109,7 @@ def compose_view(
     )
 
     for i, (rect, (key_label, label, _)) in enumerate(
-        zip(button_rects(size, show_base), footer_buttons(show_base), strict=True)
+        zip(button_rects(size), footer_buttons(), strict=True)
     ):
         p = buttons[i] if buttons is not None and i < len(buttons) else 0.0
         _draw_footer_button(studio, rect, key_label, label, p, pressed == i, sc)

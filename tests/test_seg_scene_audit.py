@@ -10,22 +10,15 @@ contadores.
 """
 
 import json
-import sys
-from pathlib import Path
 
 import cv2
 import numpy as np
 import pytest
+from lab import seg_scene_audit as sa
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from lab import seg_scene_audit as sa  # noqa: E402
-
-from draw.perception import NeuralSheetDetector  # noqa: E402
-from draw.protocol import HEADER_SIZE, pack_record  # noqa: E402
-from test_neural_onnx_contract import _logits_for_classes, _Session  # noqa: E402
+from draw.perception import NeuralSheetDetector
+from draw.protocol import HEADER_SIZE, pack_record
+from test_neural_onnx_contract import _logits_for_classes, _Session
 
 
 def _detector_for_classes(classes):
@@ -317,6 +310,27 @@ def test_run_sobre_diretorio_de_pngs_grava_jsonl_e_resumo(tmp_path):
     assert audit["frames"] == 3 and audit["frames_with_quad"] == 2
     assert audit["failures"] == {"fill_below": 2, "quad_area_ge": 2, "oob_ge_px": 2}
     assert audit["interrupted"] is False and audit["source_error"] is None
+
+
+def test_run_ordena_frames_de_diretorio_por_sufixo_numerico(tmp_path):
+    """f2.png entra em frames.jsonl antes de f10.png: a auditoria
+    seguia a ordem de nome, que os invertia."""
+    src = tmp_path / "frames"
+    src.mkdir()
+    frame = np.zeros((80, 100, 3), np.uint8)
+    assert cv2.imwrite(str(src / "f10.png"), frame)
+    assert cv2.imwrite(str(src / "f2.png"), frame)
+    no_quad = {"corners": None, "verdict": None, "coverage": None, "presence": -9.0}
+    det = _FakeDet([no_quad])
+    out = tmp_path / "audit"
+
+    sa.run(src, det, out_dir=out, model="fake.onnx", log=lambda *_a: None)
+
+    rows = [
+        json.loads(line)
+        for line in (out / "frames.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [r["file"] for r in rows] == ["f2.png", "f10.png"]
 
 
 def test_run_drawcap_truncado_marca_source_error(tmp_path):

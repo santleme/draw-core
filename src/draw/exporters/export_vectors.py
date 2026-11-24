@@ -1,4 +1,4 @@
-"""Partes puras da ponte de vetores do Draw (tools/export_vectors.py).
+"""Partes puras da ponte de vetores do Draw (lab/export_vectors.py).
 
 Extraidas sem a CLI e sem a fonte de mascara --mask model (que usa
 draw.page_clean.PageCleanInk): restam a mascara otsu, o afinamento
@@ -786,6 +786,3 @@ def iou(a, b):
     inter = int((a & b).sum())
     union = int((a | b).sum())
     return inter / union if union else 1.0
-
-
-# ------------------------------------------------------------------ core

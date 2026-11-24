@@ -22,10 +22,10 @@ Pipeline:
      exportação SVG/JSON em milímetros do A4.
 
 Uso:
-  python tools/vectorize.py canvas.png [--out saida.svg] [--clean]
+  python -m draw.exporters.vectorize canvas.png [--out saida.svg] [--clean]
       [--stamps canvas_stamps.npz] [--primitives] [--json saida.json]
       [--epsilon 1.5] [--thinning zhangsuen|guohall] [--stats]
-  python tools/vectorize.py --selfcheck
+  python -m draw.exporters.vectorize --selfcheck
 """
 
 import argparse

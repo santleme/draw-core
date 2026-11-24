@@ -1,6 +1,7 @@
 """Testes de schema, rotulagem e manifesto do corpus de clipes reais."""
 
 import json
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -254,6 +255,40 @@ def test_clip_frames_ordena_por_sufixo_numerico(tmp_path):
     init_clip(clip_dir, fps=10.0)
     write_manifest(tmp_path, build_manifest(tmp_path))
     assert verify_manifest(tmp_path) == []
+
+
+def test_clip_frames_nome_fora_do_padrao_vai_ao_fim(tmp_path):
+    """f_backup0.png termina em dígito mas não é f<dígitos>: vai ao
+    fim em vez de ocupar a posição 0 e deslocar todos os rótulos
+    posicionais do clipe."""
+    clip_dir = tmp_path / "cl"
+    clip_dir.mkdir()
+    img = np.zeros((8, 8, 3), dtype=np.uint8)
+    for name in ("f_backup0.png", "f0001.png", "f0000.png"):
+        cv2.imwrite(str(clip_dir / name), img)
+
+    assert [p.name for p in clip_frames(clip_dir)] == [
+        "f0000.png",
+        "f0001.png",
+        "f_backup0.png",
+    ]
+
+
+def test_frame_sort_key_ordena_qualquer_sufixo_numerico():
+    """A chave vale alem de f<N>: todo stem que termina em digito
+    ordena pelo valor; sem sufixo numerico vai ao fim e empate de
+    numero desempata pelo nome."""
+    from lab.corpus.clip import frame_sort_key
+
+    nomes = ["seq_10.png", "f2.png", "f10.png", "capa.png", "f0002.png"]
+    ordenados = sorted(nomes, key=lambda n: frame_sort_key(Path(n)))
+    assert ordenados == [
+        "f0002.png",  # 2, desempate pelo nome
+        "f2.png",  # 2
+        "f10.png",  # 10
+        "seq_10.png",  # 10, perde o desempate para f10.png
+        "capa.png",  # sem digito no fim: por ultimo
+    ]
 
 
 def test_validate_clip_flags_window_beyond_inventory(tmp_path):
