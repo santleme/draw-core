@@ -378,6 +378,12 @@ def run(
     session_report = None
     ink_stream = None
     pipeline = None
+    # Estado da troca de camera em voo: a trabalhadora publica o
+    # resultado aqui e o laco consome no service_camera_switch;
+    # "abandoned" avisa que o finally drenou — quem publica depois
+    # disso fecha o proprio candidato. Precisa existir antes do try
+    # para o finally enxergar uma troca iniciada no laco.
+    switch = {"thread": None, "result": None, "abandoned": False}
     try:
         if not markers_mode:
             _provision_official_models(neural_model, page_clean_model, hand_model)
@@ -696,12 +702,12 @@ def run(
             else None
         )
         last_auto_rot_det_seq = 0
-        switch = {"thread": None, "result": None}
 
         def start_switch(target):
             ui_module._camera_menu["busy"] = target
 
             def work():
+                candidate = None
                 try:
                     # Nova fonte abre com a rotacao base da CLI (nao herda
                     # o flip automatico inferido para a camera anterior).
@@ -711,6 +717,13 @@ def run(
                     switch["result"] = (target, candidate, None)
                 except Exception as error:
                     switch["result"] = (target, None, error)
+                if switch["abandoned"] and candidate is not None:
+                    # O laco ja saiu e o finally ja drenou: ninguem mais
+                    # consome o resultado — a propria trabalhadora para
+                    # o candidato. Sem lock de proposito: um stop a mais
+                    # vindo do finally e inocuo (LatestFrameCapture.
+                    # _released serializa).
+                    candidate.stop()
 
             switch["thread"] = threading.Thread(target=work, daemon=True)
             switch["thread"].start()
@@ -808,10 +821,14 @@ def run(
                 # acordou sem quadro. O aviso vai para o console e para
                 # a janela, sobre a ultima vista, e fica _DEAD_NOTICE_MS
                 # ou ate uma tecla: so o console seria um congelamento
-                # silencioso para quem esta olhando a janela.
+                # silencioso para quem esta olhando a janela. Um driver
+                # que levantou aparece no detalhe — o erro da thread
+                # morreria escondido sem o .error.
+                detail = frame_source.error
                 print(
                     "A camera abriu, mas parou de entregar quadros. "
                     "Feche outros programas usando a camera e tente de novo."
+                    + (f" Erro do driver: {detail}" if detail is not None else "")
                 )
                 ui_module._show(view_module.dead_source_view(last_view))
                 cv2.waitKey(_DEAD_NOTICE_MS)
@@ -1054,6 +1071,20 @@ def run(
         # daemon ficava lendo o dispositivo ate o processo sair.
         # Os `is not None` cobrem falha de setup antes de cada
         # recurso subir: o try abrange do primeiro load ao ultimo loop.
+        # Troca de camera em voo: drena a trabalhadora para um
+        # candidato pronto (ou ainda abrindo) nao vazar — a abertura
+        # nao e cancelavel, entao o join tem teto e "abandoned" manda
+        # a trabalhadora parar ela mesma um candidato que chegue
+        # depois da drenagem. Sem lock: o stop duplo converge via
+        # LatestFrameCapture._released.
+        if switch["thread"] is not None:
+            switch["thread"].join(timeout=2.0)
+        switch["abandoned"] = True
+        switch_result = switch.pop("result", None)
+        if switch_result is not None and switch_result[1] is not None:
+            switch_result[1].stop()
+        ui_module._camera_menu["busy"] = None
+        ui_module._camera_menu["request"] = None
         if frame_source is not None:
             frame_source.stop()
         if detection_worker is not None:

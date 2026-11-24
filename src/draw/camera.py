@@ -266,6 +266,12 @@ class LatestFrameCapture:
             return self._dead
 
     @property
+    def error(self):
+        """A excecao que matou a thread, ou None."""
+        with self._condition:
+            return self._error
+
+    @property
     def dropped(self):
         with self._condition:
             return self._dropped
@@ -490,7 +496,12 @@ def _probe_exposure(capture, seconds=_EXPOSURE_PROBE_SECONDS, now=time.monotonic
     deadline = now() + seconds
     recent = []
     while now() < deadline:
-        ok, frame = capture.read()
+        try:
+            ok, frame = capture.read()
+        except cv2.error:
+            # A captura e emprestada: o dono decide se reabre ou
+            # libera. Aqui o desfecho e so "sem evidencia de estouro".
+            return None
         if not ok or frame is None:
             return None
         _LAST_PROBE_DELIVERED = True
@@ -681,7 +692,12 @@ def _confirm_stream_alive(
     """
     deadline = now() + window_s
     while now() < deadline:
-        ok, frame = capture.read()
+        try:
+            ok, frame = capture.read()
+        except cv2.error:
+            # Captura emprestada tambem: quem chama libera e passa
+            # para o proximo candidato.
+            return False
         if ok and frame is not None:
             return True
         remaining = deadline - now()
