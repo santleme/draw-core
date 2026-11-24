@@ -132,7 +132,7 @@ except FileNotFoundError:
     # sem marcador: nunca tentou, retry liberado
     sys.exit(0)
 # Convenção bash: exit 0 = retry devido; exit 1 = ainda no cooldown de 24h.
-sys.exit(0 if not (0 <= age < 24 * 60 * 60) else 1)
+sys.exit(1 if 0 <= age < 24 * 60 * 60 else 0)
 '
 }
 

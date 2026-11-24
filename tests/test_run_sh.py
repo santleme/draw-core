@@ -581,10 +581,13 @@ def _setup_pip_fallback(tmp_path, launcher, *names):
     (tmp_path / ".venv" / "gui-broken").touch()
 
 
-def test_falls_back_to_python_when_no_python3(tmp_path, launcher):
-    """Sem python3 no PATH (Git Bash/MSYS sem MSYS2): o fallback usa
-    `python` para criar o venv e o lancamento segue normal."""
-    _setup_pip_fallback(tmp_path, launcher, "python")
+@pytest.mark.parametrize("stub", ["python", "py"])
+def test_falls_back_when_no_python3(tmp_path, launcher, stub):
+    """Sem python3 no PATH (Git Bash/MSYS sem MSYS2, ou Windows so com
+    o launcher `py`): o candidato seguinte passa na sonda `-c`, cria o
+    venv e o lancamento segue normal — o word-split de "py -3" e
+    intencional."""
+    _setup_pip_fallback(tmp_path, launcher, stub)
 
     subprocess.run(
         [BASH, "run.sh", "--check"],
@@ -597,27 +600,7 @@ def test_falls_back_to_python_when_no_python3(tmp_path, launcher):
     assert tmp_path / launched == tmp_path / ".venv/bin/draw"
 
 
-def test_falls_back_to_py_launcher(tmp_path, launcher):
-    """Git Bash so com o launcher `py` do Windows: `py -3` passa na
-    sonda `-c` e cria o venv — o word-split de "py -3" e intencional."""
-    _setup_pip_fallback(tmp_path, launcher, "py")
-
-    subprocess.run(
-        [BASH, "run.sh", "--check"],
-        cwd=tmp_path,
-        env={"PATH": str(launcher)},
-        check=True,
-        timeout=10,
-    )
-    launched = (tmp_path / "launches").read_text().strip()
-    assert tmp_path / launched == tmp_path / ".venv/bin/draw"
-
-
-def test_no_python_aborts_with_error(tmp_path, launcher):
-    """Nenhum Python >= 3.11 no PATH: erro claro com rc 1 em vez do
-    127 seco do `python3` ausente — e nada lanca."""
-    _setup_pip_fallback(tmp_path, launcher)
-
+def _assert_launch_aborted(tmp_path, launcher):
     result = subprocess.run(
         [BASH, "run.sh", "--check"],
         cwd=tmp_path,
@@ -630,6 +613,13 @@ def test_no_python_aborts_with_error(tmp_path, launcher):
     assert result.returncode == 1
     assert "erro" in result.stderr
     assert not (tmp_path / "launches").exists()
+
+
+def test_no_python_aborts_with_error(tmp_path, launcher):
+    """Nenhum Python >= 3.11 no PATH: erro claro com rc 1 em vez do
+    127 seco do `python3` ausente — e nada lanca."""
+    _setup_pip_fallback(tmp_path, launcher)
+    _assert_launch_aborted(tmp_path, launcher)
 
 
 def test_missing_draw_executable_aborts_with_error(tmp_path, launcher):
@@ -639,19 +629,7 @@ def test_missing_draw_executable_aborts_with_error(tmp_path, launcher):
     (tmp_path / "hand-available").touch()
     (tmp_path / ".venv" / "bin" / "draw").unlink()
     (tmp_path / ".venv" / "gui-broken").touch()
-
-    result = subprocess.run(
-        [BASH, "run.sh", "--check"],
-        cwd=tmp_path,
-        env={"PATH": str(launcher)},
-        check=False,
-        timeout=10,
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 1
-    assert "erro" in result.stderr
-    assert not (tmp_path / "launches").exists()
+    _assert_launch_aborted(tmp_path, launcher)
 
 
 @pytest.mark.slow
