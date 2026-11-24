@@ -136,6 +136,98 @@ def test_simplify_closed_drops_shallow_point_and_keeps_corner_order():
     assert _same_cycle(out, [(0, 0), (10, 0), (10, 10), (0, 10)])
 
 
+def test_keep_component_pixel_matches_naive_rescan_exactly():
+    """Passe único (bincount + índice argsort) tem de devolver o MESMO
+    esqueleto do rescan ingênuo `labels == i` por componente — inclusive
+    o pixel do argmin nos empates (a ordem de varredura linha-coluna é
+    a dos dois lados)."""
+    rng = np.random.default_rng(7)
+
+    def naive(src, skel):
+        n, labels, _, centroids = cv2.connectedComponentsWithStats(src, connectivity=8)
+        for i in range(1, n):
+            comp = labels == i
+            if (comp & skel).any():
+                continue
+            ys, xs = np.nonzero(comp)
+            cx, cy = centroids[i]
+            pick = int(np.argmin((xs - cx) ** 2 + (ys - cy) ** 2))
+            skel[ys[pick], xs[pick]] = True
+        return skel
+
+    for _trial in range(60):
+        h, w = int(rng.integers(8, 60)), int(rng.integers(8, 60))
+        src = (rng.random((h, w)) < rng.choice([0.02, 0.2, 0.5])).astype(np.uint8)
+        skel = src.astype(bool) & (rng.random((h, w)) < rng.choice([0.0, 0.4, 0.9]))
+        got = ev._keep_component_pixel(src, skel.copy())
+        want = naive(src, skel.copy())
+        assert np.array_equal(got, want)
+
+
+def test_keep_component_pixel_restores_one_px_per_erased_component():
+    """Muitos componentes apagados de uma vez (o pior caso do laço
+    antigo): cada um ganha de volta exatamente 1 px, e mais nada."""
+    src = np.zeros((120, 120), np.uint8)
+    for y in range(5, 115, 10):
+        for x in range(5, 115, 10):
+            src[y : y + 2, x : x + 2] = 1
+    skel = np.zeros((120, 120), bool)
+    out = ev._keep_component_pixel(src, skel)
+    n, labels = cv2.connectedComponents(src, connectivity=8)
+    assert n > 100
+    assert out.sum() == n - 1
+    for i in range(1, n):
+        assert (out & (labels == i)).sum() == 1
+
+
+def test_keep_component_pixel_leaves_surviving_skeleton_untouched():
+    src = np.zeros((20, 20), np.uint8)
+    src[8:12, 2:18] = 1  # faixa cujo esqueleto sobreviveu
+    skel = np.zeros((20, 20), bool)
+    skel[10, 4:16] = True
+    out = ev._keep_component_pixel(src, skel.copy())
+    assert np.array_equal(out, skel)
+
+
+def test_parse_svg_paths_reads_w3c_number_forms(tmp_path):
+    """Número W3C do SVG: ".5" sem zero à esquerda, expoente e sinais.
+    O regex antigo lia "1e-3" como ["1", "-3"] e corromvia a polilinha."""
+    svg = (
+        '<?xml version="1.0"?>\n'
+        '<svg xmlns="http://www.w3.org/2000/svg">\n'
+        '<path d="M .5 1e-3 L -2.5E+2 .25 Z" fill="none" stroke-width="1e-1"/>\n'
+        "</svg>\n"
+    )
+    path = tmp_path / "ext.svg"
+    path.write_text(svg, encoding="utf-8")
+    widths = []
+    parsed = ev.parse_svg_paths(path, widths)
+    assert len(parsed) == 1
+    pts, closed = parsed[0]
+    assert pts.tolist() == [[0.5, 1e-3], [-250.0, 0.25]]
+    assert closed
+    assert widths == [0.1]
+
+
+def test_parse_svg_paths_reads_circle_attrs_in_scientific_notation(tmp_path):
+    """Os atributos do <circle> (cx, cy, r) seguem o mesmo número W3C —
+    o padrão [\\d.]+ lia ".5e1" como 0.5 em vez de 5.0."""
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg">'
+        '<circle cx=".5e1" cy="-2E-1" r="1e0" fill="#000"/>'
+        "</svg>\n"
+    )
+    path = tmp_path / "c.svg"
+    path.write_text(svg, encoding="utf-8")
+    widths = []
+    parsed = ev.parse_svg_paths(path, widths)
+    assert len(parsed) == 1
+    pts, closed = parsed[0]
+    assert pts.tolist() == [[5.0, -0.2]]
+    assert not closed
+    assert widths == [2.0]
+
+
 def test_two_by_two_dot_survives_thinning_and_exports(tmp_path):
     # Um ponto 2x2 passa por filter_microfragments (area=4) mas o
     # Zhang-Suen o apagava inteiro: o export omitia o ponto.
