@@ -271,3 +271,29 @@ def test_run_replay_panel_overlay_honors_ink_divnorm(tmp_path):
     )
     assert seen, "a prancha não rodou inferência"
     assert not any(np.array_equal(x, raw_warp) for x in seen)
+
+
+def test_main_propagates_allow_unverified_to_run_replay(tmp_path, monkeypatch):
+    """O hop flag -> verify: sem a flag run_replay recebe "manifest";
+    com --allow-unverified, o opt-out None (a 2ª passagem usa a mesma
+    variável local, então uma chamada por execução já prova o hop)."""
+    import lab.replay_lab as rl
+
+    seen = []
+
+    class _Bail(Exception):
+        pass
+
+    def _replay(*_a, verify=None, **_kw):
+        seen.append(verify)
+        raise _Bail
+
+    monkeypatch.setattr(rl, "run_replay", _replay)
+
+    base = ["--corpus", str(tmp_path), "--out", str(tmp_path / "o")]
+    with pytest.raises(_Bail):
+        rl.main(base)
+    with pytest.raises(_Bail):
+        rl.main([*base, "--allow-unverified"])
+
+    assert seen == ["manifest", None]

@@ -494,3 +494,28 @@ def test_run_pipeline_alinha_config_entre_pipeline_e_worker(tmp_path, monkeypatc
         pipeline_config=prod,
     )
     assert seen == [("worker", prod.ink), ("pipeline", prod)]
+
+
+def test_main_propagates_allow_unverified_to_run_pipeline(tmp_path, monkeypatch):
+    """O hop flag -> verify: sem a flag run_pipeline recebe "manifest";
+    com --allow-unverified, o opt-out None explícito."""
+    import lab.eval_capture as ec
+
+    seen = []
+
+    class _Bail(Exception):
+        pass
+
+    def _pipeline(*_a, verify=None, **_kw):
+        seen.append(verify)
+        raise _Bail
+
+    monkeypatch.setattr(ec, "run_pipeline", _pipeline)
+
+    base = ["--video", str(tmp_path / "v.mp4"), "--gt", str(tmp_path / "gt.npy")]
+    with pytest.raises(_Bail):
+        ec.main(base)
+    with pytest.raises(_Bail):
+        ec.main([*base, "--allow-unverified"])
+
+    assert seen == ["manifest", None]

@@ -59,6 +59,7 @@ def test_audit_appends_allow_unverified_to_audit_one_cmd(tmp_path, monkeypatch):
     """O --allow-unverified do `audit` atravessa o subprocesso do audit-one;
     sem a flag o cmd sai limpo."""
     import json
+    import subprocess
     from pathlib import Path
     from types import SimpleNamespace
 
@@ -73,7 +74,10 @@ def test_audit_appends_allow_unverified_to_audit_one_cmd(tmp_path, monkeypatch):
         (out_dir / "result.json").write_text(json.dumps({"scenario": "x"}))
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(sw.subprocess, "run", fake_run)
+    # O patch vai no objeto-módulo subprocess, não em sw.subprocess —
+    # assim o teste sobrevive a sim_writer passar a chamar run_captured
+    # ou a remover o import próprio (mesmo resolvedor de nome).
+    monkeypatch.setattr(subprocess, "run", fake_run)
     argv = [
         "audit",
         "--corpus",

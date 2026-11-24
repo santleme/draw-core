@@ -618,3 +618,44 @@ def test_main_builds_a_fresh_detector_for_every_clip_and_preset(tmp_path, monkey
     _fake_clip(tmp_path)
     assert bench.main(["--clips", str(tmp_path), "--presets", "legado,ganho"]) == 0
     assert len(seen) == 2 and seen[0] is not seen[1]
+
+
+def test_main_propagates_allow_unverified_to_the_model_loaders(tmp_path, monkeypatch):
+    """O hop flag -> verify: sem a flag os construtores recebem verify_model
+    (fail-closed); com --allow-unverified, o opt-out None explícito."""
+    from draw.infra.manifest import verify_model
+
+    ctor_verify = []
+
+    class _Fake:
+        def __init__(self, *a, verify=None, **k):
+            ctor_verify.append(verify)
+
+        def load(self):
+            pass
+
+    import draw.page_clean as page_clean_mod
+    import draw.perception as perception
+
+    monkeypatch.setattr(perception, "NeuralSheetDetector", _Fake)
+    monkeypatch.setattr(page_clean_mod, "PageCleanInk", _Fake)
+    monkeypatch.setattr(
+        bench,
+        "run_clip",
+        lambda *a, **kw: {
+            "clip": "x",
+            "canvas_px": 0,
+            "provisional_median_px": 0.0,
+            "retracted_over_canvas": float("nan"),
+            "cpu_s_per_scene_s": 0.0,
+            "_canvas": None,
+        },
+    )
+    _fake_clip(tmp_path)
+
+    base = ["--clips", str(tmp_path), "--presets", "legado"]
+    assert bench.main(base) == 0
+    assert ctor_verify and all(v is verify_model for v in ctor_verify)
+    ctor_verify.clear()
+    assert bench.main([*base, "--allow-unverified"]) == 0
+    assert ctor_verify and all(v is None for v in ctor_verify)

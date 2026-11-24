@@ -369,3 +369,28 @@ def test_final_checkpoint_propaga_absence():
     score, comp = score_report({"verdict": final, "checkpoints": checkpoints})
     assert comp["no_canvas"] == 0.0
     assert comp["iou_loss"] == 0.0
+
+
+def test_main_propagates_allow_unverified_to_run_trial(tmp_path, monkeypatch):
+    """O hop flag -> verify: sem a flag run_trial recebe "manifest";
+    com --allow-unverified, o opt-out None explícito."""
+    import lab.falsify as fz
+
+    seen = []
+
+    class _Bail(Exception):
+        pass
+
+    def _trial(*_a, verify=None, **_kw):
+        seen.append(verify)
+        raise _Bail
+
+    monkeypatch.setattr(fz, "run_trial", _trial)
+
+    base = ["--out", str(tmp_path / "o"), "--trials", "1", "--rounds", "0"]
+    with pytest.raises(_Bail):
+        fz.main(base)
+    with pytest.raises(_Bail):
+        fz.main([*base, "--allow-unverified"])
+
+    assert seen == ["manifest", None]
