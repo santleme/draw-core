@@ -1,38 +1,33 @@
 # Validação do escore de arbitragem da âncora (#180) — síntese de pesquisa
 
 Pesquisa inicial: 2026-11-23. Implementação e validação local: 2026-11-24. Branch:
-`work/180-on-main`. As seções 0–8 preservam a pesquisa feita em duas rodadas (fontes
-secundárias e depois fontes primárias com Firecrawl e experimentos numéricos fora do
-repositório); a seção 9 registra as alterações e medições posteriores.
+`work/180-on-main`. As seções 0–8 preservam a pesquisa e os planos; a seção 9 registra
+snapshots cronológicos da implementação; a seção 10 é a auditoria final da evidência local e
+remota.
 
-**Atualização:** as seções 0–8 registram o estado e as conclusões em 23/11/2026. A seção 9
-preserva snapshots de implementação intermediários de 24/11/2026; algumas de suas medições e a
-primeira regra de aposentadoria do resíduo foram superadas por correções posteriores. A seção 10
-é o fechamento da versão final local: inclui A/B repetido contra `0bf0177`, o teste de worker
-para `unregistered` e o gate completo. Nenhum resultado sem rótulos independentes é tratado como
-prova de precisão funcional.
+**Estado final verificado:** a implementação está no commit `59ceb39`; o contrato explícito para
+massa não positiva foi acrescentado e validado nesta revisão local. A branch usa `5e530879` como
+merge-base com `origin/main`. O PR #180
+remoto continua no head `93f1c28`; nesse head os jobs `fast` e `slow` passaram, mas Devin Review
+segue pendente e há quatro threads não resolvidas. O CI remoto não cobre o código local. A
+suíte local final passou com **2553 passed, 2 skipped**. Sem anotações
+independentes de tinta e pose, nenhuma diferença de canvas é chamada de melhora de acurácia.
 
-## 0. Estado do código que esta síntese analisa
+## 0. Snapshot da pesquisa inicial — superado pelas seções 9–10
 
-Os relatórios foram escritos contra a versão intermediária
-`_total_after_clip(raw_total, before, after) = raw_total * min(sum(after)/sum(before), 1)`.
-O HEAD deste branch (`2b193af`, "correct anchor residual arbitration") a **substituiu** por
-`anchor._overlap_fraction(prob, snapshot)`: fração da massa de `prob` (já permutada e
-transladada) que cai no snapshot, com teto em 1. Equivale à alternativa "denominador
-`sum(after)`" que a pesquisa discute abaixo. Consequências, derivadas e **não medidas
-contra este HEAD**:
+Os relatórios iniciais discutiam uma versão intermediária que misturava a massa bruta com a
+massa cortada após permutação. A implementação final calcula a massa denominadora no domínio
+após a permutação/redimensionamento e antes da translação inteira, tanto para a hipótese de
+página quanto para as hipóteses cíclicas. A massa cortada reduz o escore; ela não desaparece do
+denominador. `total <= 0` resulta em zero. Essa regra está em `anchor.py` e é coberta por
+contratos sintéticos de linha fina e rotação com corte; os detalhes e limites estão nas seções 9
+e 10.
 
-- O escore fica em [0,1] por construção em qualquer hipótese (inclusive cíclica); o clamp
-  `min(...,1.0)` já existe, então o item "clamp defensivo" está atendido.
-- Sem permutação o resultado coincide com o da versão intermediária. Com `rot90`+resize o
-  denominador muda por um fator de massa do resize (medido: ~0,03% médio, 0,3% máximo em
-  traços; até ~11% em linhas verticais de 1 px com `INTER_LINEAR`). Os limiares da
-  arbitragem (delta 0,05; escores cíclicos 0,23–0,27) foram calibrados no denominador
-  antigo; recalibrar ou ao menos comparar escores antes/depois em cenas cíclicas.
-- Verificado neste HEAD (2026-11-23): `tests/test_anchor_arbitration.py`,
-  `test_ink_contracts.py`, `test_page_model.py`, `test_ink_registration.py` = 256 passed;
-  `ruff check` limpo. A suíte completa **não** foi reexecutada neste HEAD, e o CI remoto
-  não rodou (PR #180 remoto segue em `93f1c28`, base `816224f`).
+Os números originais sobre mudança de massa com `rot90`+resize continuam úteis para explicar o
+defeito histórico: em uma linha vertical de 1 px, `INTER_LINEAR` elevou a soma de 240 para
+266,67 (cerca de 11,1%); a fórmula de domínio misto podia exceder 1. Eles não representam
+desempenho em tinta real. O teste atual compara a fórmula antiga com a atual no caso construído;
+os limites de arbitragem continuam sem calibração em holdout anotado.
 
 ## 1. Conclusões principais
 
@@ -127,35 +122,30 @@ fonte para 2 px, 90% e 0,05; Hartley & Zisserman não consultados; protocolo do 
 obtido; Firecrawl limitou taxa; afirmações sobre o código vêm do coordenador, não dos
 pesquisadores; mapas sintéticos não são tinta real.
 
-## 7. Próximos passos
+## 7. Plano de validação e estado de execução
 
-Bloqueantes do #180:
+O plano abaixo veio da pesquisa inicial. O status final foi auditado em 24/11/2026:
 
-1. Reexecutar a suíte completa e o CI no HEAD atual; atualizar o PR remoto (hoje em `93f1c28`
-   sobre `816224f`). Push só por decisão explícita.
-2. Teste de contrato que fixe a definição do escore (massa do mapa já permutado e
-   transladado) e o caso `total <= 0 → 0`; incluir cíclico com `INTER_LINEAR` e linha vertical
-   de 1 px.
-3. Comparar escores cíclicos antes/depois da troca de denominador e recalibrar o delta 0,05 se
-   preciso.
-4. Frescor do resíduo persistido (evento/instante, suporte, margem, pose de referência);
-   invalidar em salto de pose e reinício do tracker; exigir resíduo fresco no 2º ramo do
-   gatilho de pose, com log do ramo usado.
-5. `_RESIDUAL_EXPLAINS_PX` no objeto de configuração (sem flags `DRAW_*`), com testes de
-   fronteira em 1,9 / 2,0 / 2,1 px.
-6. Reversão manual de cada elemento do fix e do gatilho, mostrando que um teste falha em cada.
-7. Descrição do PR declarando: evidência sintética, sem clipe real, 2 px e 0,05 sem fonte,
-   escore que ignora massa recortada, e a regressão do gatilho de pose (apagamento) que o PR
-   introduziu e corrigiu.
+| Requisito | Estado e evidência |
+|---|---|
+| Suíte local completa e CI | Gate local executado no código final; detalhes e contagem na seção 10. O CI remoto de `93f1c28` também tem `fast` e `slow` verdes, mas não testa os commits locais ainda não enviados. |
+| Fórmula do escore, zero de massa e caso cíclico | Implementado: denominador depois da permutação e antes da translação; o contrato explícito `total <= 0 → 0` foi acrescentado nesta revisão; há também caso de linha de 1 px com `INTER_LINEAR` e massa cortada. |
+| Margem cíclica `0,05` | Nove combinações sintéticas não cruzaram a margem; não ajustei o valor. Isso não é calibração em holdout nem validação de câmera. |
+| Frescor do resíduo | Implementado com geração, instante, suporte, margem e pose de referência; salto/deriva e troca de geração invalidam o uso geométrico; o ramo efetivo fica em telemetria e tem contratos pareados. |
+| Tolerância `2 px` configurável | Campo em `InkConfig`, com fronteiras testadas em `1,9`, `2,0` e `2,1 px`. O default ainda não foi calibrado em captura rotulada. |
+| Controles negativos | Mutações do filtro de aceite, da checagem de frescor e do limiar fixo derrubam testes próprios; a seção 10 também registra a mutação do ramo `unregistered`. Não é uma reversão exaustiva de cada linha do patch. |
+| Descrição e publicação do PR | O relatório local declara os limites e a evidência. A descrição remota ainda está no estado antigo e os quatro threads seguem abertos; não atualizei o GitHub nem enviei commits. |
 
-Desejáveis: fundir hipóteses equivalentes antes da margem e usar margem relativa; observabilidade
-por eixo no estimador; testes de propriedade; 30–60 clipes reais com controle; medir o custo do
-estimador em A/B no fluxo completo e rebaixar o teste absoluto de 10 ms a opt-in.
+Continuam como trabalho de validação com produto: fundir hipóteses equivalentes antes da
+margem, explorar margem relativa e observabilidade por eixo, testar propriedades, coletar 30–60
+clipes rotulados, medir o custo do estimador no fluxo completo contra um orçamento de CPU
+definido e avaliar o `SheetTracker` com relógio real.
 
-## 8. Execução local das recomendações
+## 8. Execução local das recomendações — snapshot intermediário
 
-Atualização da mesma branch, após a síntese acima. Código e documentação ainda não foram
-publicados no PR remoto.
+Este snapshot foi registrado durante a implementação em 24/11/2026. As medições e contagens
+abaixo são históricas; as correções posteriores, a suíte final e a publicação remota estão
+descritas na seção 10.
 
 ### Escore e limiar
 
@@ -212,8 +202,9 @@ publicados no PR remoto.
 
 - A branch `work/180-on-main` está baseada em `origin/main` no commit
   `5e53087984705423ab6061c16dc39057bf0cd6d6`; o HEAD base desta atualização é `0bf0177`
-  (`fix(ink): track identity residual freshness`). O rebase não teve conflitos. As alterações
-  abaixo continuam locais, sem commit ou push; o PR remoto e seu CI não foram atualizados.
+  (`fix(ink): track identity residual freshness`). O rebase não teve conflitos. Naquele
+  snapshot as alterações ainda não estavam commitadas. O código foi commitado localmente em
+  `59ceb39`; os commits de acompanhamento permanecem locais. Nenhum foi enviado ao PR remoto.
 - O escopo desta atualização inclui os escores da hipótese de página e da câmera, a validação
   do suporte projetado, a abstenção quando falta evidência observável, a resolução de resíduos
   pendentes e seus contratos. A revisão também encontrou e corrigiu um caminho sem cobertura
@@ -491,9 +482,9 @@ nas subseções posteriores e no fechamento da seção 10.
   os clipes de replay estão como sequências PNG. Elas permitem replay determinístico, mas não
   acrescentam captura após a saída da mão nem rótulos independentes de tinta. Também não havia
   dispositivo `/dev/video*` nesta sessão.
-- As mudanças locais continuam sem commit/push. Assim, embora o gate completo local esteja verde
-  (**2547 passed, 2 skipped**), o CI remoto segue no head antigo e as quatro threads abertas ainda
-  não foram atualizadas nem resolvidas no GitHub.
+- Neste snapshot intermediário as mudanças ainda não estavam commitadas; o gate então havia
+  registrado **2547 passed, 2 skipped**. O gate final e a situação remota atual estão na seção
+  10, que substitui este estado.
 
 ### Correção do domínio da máscara fotométrica — 2026-11-24
 
@@ -582,9 +573,11 @@ nas subseções posteriores e no fechamento da seção 10.
   máscara fotométrica fez o teste falhar com numerador **0**. Isso prova que o contrato discrimina
   o defeito de geometria no estágio do worker; o replay de câmera ainda não selecionou
   `unregistered`.
-- Gate final nesta worktree após adicionar esse contrato: `ruff check .` passou,
-  `ruff format --check .` confirmou **221 arquivos já formatados**, e `pytest -q` terminou com
-  **2552 passed, 2 skipped em 160,52 s**. `git diff --check` também passou.
+- Gate final nesta worktree após adicionar os contratos do worker e de massa não positiva:
+  `ruff check .` passou, `ruff format --check .` confirmou **221 arquivos já formatados**, e
+  `pytest -q` terminou com **2553 passed, 2 skipped em 161,11 s**. O contrato
+  `test_overlap_fraction_returns_zero_for_nonpositive_mass` passou isoladamente (**1 passed**).
+  `git diff --check` também passou.
 - Os testes mostram que os casos sintéticos reproduzidos deixam de inverter o denominador ou
   aposentar um resíduo ainda ambíguo. Não provam a taxa de ocorrência nem melhoria funcional em
   câmera. Não há rótulo independente por pixel, e o empate foi construído com o resíduo já
@@ -622,10 +615,12 @@ nas subseções posteriores e no fechamento da seção 10.
   calibração do escore. A busca na biblioteca Alexandria não encontrou um provedor técnico
   específico para OpenCV/homografia; usei a documentação primária diretamente. Fonte:
   [OpenCV, Geometric Image Transformations](https://docs.opencv.org/4.13.0/da/d54/group__imgproc__transform.html).
-- GitHub foi consultado em leitura: PR #180 segue aberto, head remoto `93f1c28`, mergeável,
-  com 4 threads de revisão ainda não resolvidas. A implementação e este relatório foram
-  consolidados em commit local, ainda não enviado; portanto o CI remoto não cobre este código.
+- GitHub foi consultado em leitura: PR #180 segue aberto e mergeável, head remoto `93f1c28`, com
+  4 threads de revisão ainda não resolvidas. O workflow `ci` desse head concluiu os jobs `fast` e
+  `slow` com sucesso (run `45276928495`); Devin Review permanece pendente. Esses checks cobrem
+  `93f1c28`, não o código local em `59ceb39`, que ainda não foi enviado.
 - Conferência do commit do relatório informado: `4d6f924` existe, mas a consulta local de
   `git branch --contains 4d6f924` retorna apenas `backup/work-180-d7ded1e`; a branch ativa
-  `work/180-on-main`, baseada em `0bf0177`, não contém esse commit. Não movi refs nem reescrevi o
-  histórico. O arquivo desta worktree inclui o conteúdo de pesquisa e as atualizações locais.
+  `work/180-on-main`, cuja série local parte de `0bf0177` sobre `origin/main` em `5e530879`, não
+  contém esse commit como ancestral. Não movi refs nem reescrevi o histórico; o documento ativo
+  incorpora a síntese e acrescenta os resultados da implementação.

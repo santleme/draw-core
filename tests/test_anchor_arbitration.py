@@ -1361,6 +1361,18 @@ def test_anchor_arbitration_prefers_rival_over_clipped_page_fragment():
     assert event["score_camera"] == pytest.approx(0.9)
 
 
+def test_overlap_fraction_returns_zero_for_nonpositive_mass():
+    from draw.ink.anchor import _overlap_fraction
+
+    snapshot = np.ones((8, 8), dtype=bool)
+    full_probability = np.ones((8, 8), dtype=np.float32)
+    empty_probability = np.zeros((8, 8), dtype=np.float32)
+
+    assert _overlap_fraction(full_probability, snapshot, denominator_mass=0.0) == 0.0
+    assert _overlap_fraction(full_probability, snapshot, denominator_mass=-1.0) == 0.0
+    assert _overlap_fraction(empty_probability, snapshot) == 0.0
+
+
 def test_cyclic_linear_resize_keeps_a_thin_stroke_score_bounded():
     """O resize INTER_LINEAR de rot90 pode inflar uma linha de 1 px.
 
