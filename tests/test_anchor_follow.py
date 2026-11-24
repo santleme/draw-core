@@ -35,66 +35,29 @@ Contratos:
    byte-identico ao baseline).
 """
 
-import importlib.util
 import time
-from pathlib import Path
 
 import cv2
 import numpy as np
 import pytest
 
-import rr
 from draw.contracts import WarpedPage
 from draw.ink import anchor as anchor_mod
 from draw.ink import registration as registration_mod
 from draw.ink import worker as worker_mod
-
-
-def _load(name, path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-discipline = _load(
-    "test_reg_discipline_follow",
-    Path(__file__).resolve().parent / "test_reg_discipline.py",
+from rr import (
+    BASE,
+    GOLDEN,
+    SHAPE,
+    _drive,
+    _page,
+    _parity_canvas,
+    _ProbIsWarp,
+    _settled,
 )
 
-SHAPE = (120, 85)
-BASE = rr.base_quad(SHAPE)
 # Deslocamento sustentado: ~120 px de camera (~30 px da grade).
 STEP = BASE + np.float32([120.0, 0.0])
-
-
-class _ProbIsWarp:
-    threshold = 0.7
-
-    def ink_prob(self, warped):
-        return warped
-
-
-@pytest.fixture
-def fast(monkeypatch):
-    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.005)
-    monkeypatch.setattr(worker_mod, "_IDLE_PROBE_SECONDS", 0.005)
-    return monkeypatch
-
-
-def _content():
-    _drawing, settled = rr.synthetic_pages(SHAPE, stages=3, seed=3)
-    return settled[0].astype(np.float32)
-
-
-def _drive(worker, generation, sequence):
-    for prob, corners in sequence:
-        before = worker.stats()["passes_total"]
-        worker.submit(WarpedPage(prob, generation, corners))
-        deadline = time.monotonic() + 5.0
-        while worker.stats()["passes_total"] <= before:
-            assert time.monotonic() < deadline, "a passada nao executou"
-            time.sleep(0.001)
 
 
 def _run(sequence, stop=True, config=None):
@@ -110,10 +73,6 @@ def _run(sequence, stop=True, config=None):
     if stop:
         worker.stop()
     return worker, generation, confirmed
-
-
-def _settled(content, passes=4):
-    return [(content, BASE.copy()) for _ in range(passes)]
 
 
 def test_constants_reuse_the_migration_and_settled_specs():
@@ -137,7 +96,7 @@ def test_drift_divergence_reanchors_once_state_untouched(fast):
     primeiro quad do streak da arbitragem a cada 2 passadas (a
     consistencia par-a-par nunca fecha — nenhum veredito nasce e a
     geometria decide o episodio)."""
-    content = _content()
+    content = _page()
     # settle 4 + deriva de 5 px/passo: o evento abre no meio do
     # creep (degrau de ~30 px de camera passa dos 8 px de grade)
     # e o FOLLOW dispara na 3a assentada do streak — medido no
@@ -197,7 +156,7 @@ def test_drift_divergence_reanchors_once_state_untouched(fast):
 
 @pytest.mark.slow
 def test_jitter_and_single_pass_spikes_never_reanchor(fast):
-    content = _content()
+    content = _page()
     rng = np.random.default_rng(1)
     quads = []
     for i in range(16):
@@ -226,7 +185,7 @@ def test_jitter_and_single_pass_spikes_never_reanchor(fast):
 
 @pytest.mark.slow
 def test_open_event_births_no_confirmation(fast):
-    content = _content()
+    content = _page()
     other = np.zeros(SHAPE, np.float32)
     other[10:14, 10:40] = 1.0  # tinta nova, fora do canvas confirmado
     # Salto + 1 assentada: o evento esta aberto (streak 1 < 3) e
@@ -251,7 +210,7 @@ def _creep_sequence(content, steps=10):
 
 @pytest.mark.slow
 def test_slow_creep_reanchors(fast):
-    content = _content()
+    content = _page()
     worker, _generation, confirmed = _run(_creep_sequence(content), stop=False)
     try:
         snapshot = worker.telemetry_snapshot()
@@ -275,7 +234,7 @@ def test_slow_creep_reanchors(fast):
 
 @pytest.mark.slow
 def test_slow_creep_with_arbitration_verdictless_follow_unlocks(fast):
-    content = _content()
+    content = _page()
     worker, _generation, _confirmed = _run(_creep_sequence(content), stop=False)
     try:
         snapshot = worker.telemetry_snapshot()
@@ -293,7 +252,7 @@ def test_slow_creep_with_arbitration_verdictless_follow_unlocks(fast):
 
 @pytest.mark.slow
 def test_decisive_landing_preempts_follow(fast):
-    content = _content()
+    content = _page()
     # O pouso da bancada de arbitragem: o veredito landing sai na
     # 3a passada deslocada e a ancora anda pelo conteudo.
     sequence = _settled(content) + [(content, STEP.copy()) for _ in range(4)]
@@ -311,7 +270,7 @@ def test_decisive_landing_preempts_follow(fast):
 
 @pytest.mark.slow
 def test_spurious_verdict_holds_the_episode(fast):
-    content = _content()
+    content = _page()
     # O quad mente (construcao da bancada de arbitragem): o
     # conteudo decide spurious e o episodio fica retido — sem
     # re-ancoragem mesmo com passadas assentadas de sobra.
@@ -389,7 +348,7 @@ def _drive_hidden(worker, generation, prob, corners, count):
 
 @pytest.mark.slow
 def test_pending_identity_blocks_follow(fast):
-    content = _content()
+    content = _page()
     worker = worker_mod.PageCleanWorker(_ProbIsWarp()).start()
     try:
         generation = worker.new_generation()
@@ -440,8 +399,8 @@ def test_identity_judgment_is_not_crossed(fast):
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("scenario", sorted(discipline.GOLDEN))
+@pytest.mark.parametrize("scenario", sorted(GOLDEN))
 def test_follow_never_triggers_on_settled_jitter_replay(fast, scenario):
-    digest, snapshot = discipline._parity_canvas(scenario)
+    digest, snapshot = _parity_canvas(scenario)
     assert snapshot["anchor_reanchors"] == 0
-    assert digest == discipline.GOLDEN[scenario]
+    assert digest == GOLDEN[scenario]

@@ -514,29 +514,6 @@ def test_rotated_rectangle_outside_count_tolerates_roundoff():
         vectorize._reset_paper_mm()
 
 
-def main():
-    test_node_indexing_matches_naive_and_scales_linearly()
-    test_thick_shapes_axis_aligned_rect_circle_lines_and_freehand_wave()
-    test_stamps_order_strokes_chronologically_and_orient_direction()
-    test_paper_mm_flags_repoint_scale_and_restore_defaults()
-    test_paper_mm_flags_must_come_in_pairs_and_be_finite()
-    test_anisotropic_paper_measures_geometry_in_mm()
-    test_anisotropic_paper_decides_rectangle_in_mm()
-    test_anisotropic_paper_decides_circle_in_mm()
-    test_isotropic_paper_still_classifies_circle()
-    test_default_a4_measurements_stay_legacy()
-    test_explicit_paper_at_a4_ratio_still_measures_per_axis()
-    test_anisotropic_paper_does_not_export_ellipse_as_circle()
-    test_arc_gap_decided_in_paper_space()
-    test_rotated_rectangle_outside_count_tolerates_roundoff()
-    print("TESTES DE VECTORIZE V2 E CAMADA 2 OK.")
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
-
-
 def test_dp_open_keeps_collinear_backtrack_overshoot():
     """Douglas-Peucker media distancia a reta infinita das ancoras:
     um retrocesso colinear que ultrapassa a ancora tinha distancia

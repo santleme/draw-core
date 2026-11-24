@@ -196,13 +196,6 @@ class _InkFromWarp:
         return np.clip((255.0 - gray) / 200.0, 0.0, 1.0)
 
 
-@pytest.fixture
-def fast(monkeypatch):
-    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.005)
-    monkeypatch.setattr(worker_mod, "_IDLE_PROBE_SECONDS", 0.005)
-    return monkeypatch
-
-
 def _run(sequence, config, *, hand=None, coverage=None, spy=None):
     worker = worker_mod.PageCleanWorker(_InkFromWarp(), config=config)
     if spy is not None:
@@ -299,7 +292,7 @@ def test_rotated_and_stuck_page_is_corrected_not_vetoed(fast):
     rot = cv2.getRotationMatrix2D((600, 425), 0.3, 1.0)
     turned = _affine(page, rot)
     sequence = [page] * 4 + [turned] * 6
-    stats, records, conf = _run(sequence, InkConfig(motion_veto=True))
+    _stats, records, conf = _run(sequence, InkConfig(motion_veto=True))
     assert {r.get("motion_decision") for r in records[4:]} == {"correct"}
     assert _stray(conf, page > 0.5) < 0.02 * np.count_nonzero(page > 0.5)
 
@@ -334,7 +327,7 @@ def test_vetoed_passes_do_not_put_the_ink_to_rest(fast):
     n_far = motion.MOTION_FAIL_OPEN_PASSES + 3
     sequence = [page] * 4 + [far] * n_far
     hands = [True] * 5 + [False] * (n_far - 1)
-    stats, records, conf = _run(sequence, InkConfig(motion_veto=True), hand=hands)
+    stats, _records, conf = _run(sequence, InkConfig(motion_veto=True), hand=hands)
     assert stats["motion_fail_open_total"] >= 1
     line = stroke > 0.5
     assert np.count_nonzero(conf & line) > 0.8 * np.count_nonzero(line)

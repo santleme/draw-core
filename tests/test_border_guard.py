@@ -1383,10 +1383,3 @@ def test_corrupt_quad_guard_abstains_instead_of_wiping_provisional():
     assert snap is not None
     assert int(np.count_nonzero(snap.provisional)) == before
     assert int(np.count_nonzero(worker._accumulator._retracted_ever)) == 0
-
-
-def test_sim_writer_rejects_none_for_non_nullable_flags():
-    from lab import sim_writer
-
-    with pytest.raises(ValueError, match="booleano|invalido"):
-        sim_writer._parse_flags(["coverage=none"])

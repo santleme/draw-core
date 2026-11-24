@@ -1,12 +1,8 @@
-"""Provas da implementacao da pesquisa de performance (2026-11-03).
+"""Prova T10 da pesquisa de performance (2026-11-03).
 
-- T10: o acumulador em camadas com buffers reusados (sem np.stack
-  da janela) produz, passada a passada, exatamente o mesmo canvas
-  que a implementacao de referencia empilhada abaixo.
-- T3: o adaptador de presenca usa a assinatura de marcos quando o
-  masker a expoe, sem tocar na mascara.
-- T8: o rastreador faz backoff de deteccao sob ausencia sustentada
-  e volta a cadencia cheia com folha presente.
+O acumulador em camadas com buffers reusados (sem np.stack da
+janela) produz, passada a passada, exatamente o mesmo canvas que a
+implementacao de referencia empilhada abaixo.
 """
 
 from collections import deque
@@ -136,9 +132,3 @@ def test_accumulator_buffered_matches_stacked_reference():
             "turn",
         ):
             assert got[key] == want[key], (step, key)
-
-
-# --- T3: presenca por assinatura ---
-
-
-# --- T8: backoff sem folha ---
