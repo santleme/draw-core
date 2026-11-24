@@ -6,15 +6,15 @@ máscara de tinta verdadeira M_GT(t) de cada frame é conhecida por
 construção — não por rotulação. Uma câmera virtual compõe a folha
 sobre frames REAIS de mesa vazia (corpora de negativos do
 laboratório) com homografia H_t conhecida e salva por frame, e o
-corpus sai no formato que o tools/replay_lab.py consome
+corpus sai no formato que o lab/replay_lab.py consome
 (``frames/`` + arquivos ao lado), acrescido do ``sidecar.json``
 com GT, bandas, máscara de impressão e eventos.
 
 A auditoria (``audit``) roda o corpus pelo laço REAL
 (draw.pipeline.Pipeline + trabalhadora página→limpa real em
 pump(), o mesmo arranjo síncrono do replay_lab) com a pilha de
-produção — detector de folha FT-dyn (SHA e20a89f0…) e tinta v6
-(SHA 613e250f…) — e compara o canvas confirmado com o GT.
+produção — detector de folha FT-dyn (SHA 5e2c611f…) e tinta
+round-v2 (SHA 8359ff03…) — e compara o canvas confirmado com o GT.
 
 O simulador é camada de REGRESSÃO (quebra aparece em segundos,
 com número exato), NÃO portão de promoção: ele não modela textura
@@ -66,7 +66,6 @@ BG_ROOT = (
     / "train-negatives-v2"
     / "session_raw_capture"
 )
-_REPO_ROOT = Path(__file__).resolve().parents[1]
 SHEET_MODEL = _REPO_ROOT / "models" / "draw_seg_v3_dyn.onnx"
 INK_MODEL = _REPO_ROOT / "models" / "page_clean_unet.onnx"
 SCENE_FPS = 2.0
@@ -574,10 +573,6 @@ def generate_scenario(out_dir, name, seed=103):
         "events_spec": events,
         "bands": {b: f"bands/{b}.png" for b in bands},
         "frames": frames_meta,
-        "models_production": {
-            "sheet_sha16_expected": "5e2c611f34774245",
-            "ink_sha16_expected": "613e250f5f7e15e9",
-        },
     }
     (scen / "sidecar.json").write_text(json.dumps(sidecar, indent=1))
     return sidecar

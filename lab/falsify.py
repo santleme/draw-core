@@ -64,9 +64,7 @@ def _uniform(rng, lo, hi):
     return float(rng.uniform(lo, hi))
 
 
-def sample_config(
-    rng: np.random.Generator, index: int, texts: list[str] | None = None
-) -> dict:
+def sample_config(rng: np.random.Generator, texts: list[str] | None = None) -> dict:
     """Sorteia uma configuração de cenário no espaço do falsificador.
 
     Cada fase/efeito entra com probabilidade independente — o espaço
@@ -467,7 +465,7 @@ def main(argv=None):
     }
 
     results = []
-    batch = [sample_config(rng, i, texts) for i in range(args.trials)]
+    batch = [sample_config(rng, texts) for _ in range(args.trials)]
     tag_seq = 0
     for round_index in range(args.rounds + 1):
         evaluated = []

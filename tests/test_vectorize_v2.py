@@ -1,4 +1,4 @@
-"""Testes de tools/vectorize.py v2: grafo O(H*W), limpeza, carimbos e Camada 2."""
+"""Testes de draw.exporters.vectorize v2: grafo O(H*W), limpeza, carimbos e Camada 2."""
 
 import json
 import math

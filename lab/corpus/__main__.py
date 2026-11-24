@@ -122,8 +122,6 @@ def _cmd_run(args) -> int:
     bundles = _parse_bundles(args.bundle)
     baseline = args.baseline or next(iter(bundles))
     verify = _resolve_verify(args.verify)
-    # --models e reservado para futura passagem de diretorio de modelos customizados
-    _ = args.models
     results = run_corpus(
         args.root,
         bundles,
@@ -223,7 +221,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--bundle", action="append", required=True)
     p_run.add_argument("--baseline", default=None)
     p_run.add_argument("--only", action="append", default=[])
-    p_run.add_argument("--models", default=None)
     p_run.add_argument("--verify", choices=("manifest", "none"), default="manifest")
     p_run.add_argument("--out", default="corpus-out")
 
