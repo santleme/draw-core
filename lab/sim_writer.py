@@ -45,7 +45,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT))
 sys.path.insert(0, str(_REPO_ROOT / "src"))
 
-from lab.sync_workers import StepClock, SyncDetector  # noqa: E402
+from lab.sync_workers import build_sync_pipeline  # noqa: E402
 
 # ------------------------------------------------------------------
 # Geometria e constantes
@@ -646,10 +646,9 @@ def _parse_flags(flags):
     padrao), nao o padrao de producao: os presets das bancadas ("legado",
     "ganho", ...) sao deltas sobre ela, e a regua so compara se a linha de
     base nao mudar quando o padrao de producao muda."""
-    from draw.ink.config import InkConfig
     from draw.settings import PipelineConfig
 
-    config = PipelineConfig(ink=InkConfig(), ink_auto_gain=False, detect_wake=False)
+    config = PipelineConfig.legacy(paper_guard=True)
     ink = dataclasses.replace(config.ink)
     for kv in flags:
         name, sep, raw = kv.partition("=")
@@ -729,10 +728,6 @@ def audit_one(scen_dir, out_dir, flags, detector_kind="real"):
     braço real fica como medida do gap sintético→detector."""
     from draw.contracts import DetectionResult, FramePacket
     from draw.infra.manifest import verify_model
-    from draw.ink.worker import PageCleanWorker
-    from draw.page_clean import PageCleanInk
-    from draw.perception import NeuralSheetDetector
-    from draw.pipeline import Pipeline
 
     config = _parse_flags(flags)
     if config.ink_divnorm:
@@ -747,13 +742,8 @@ def audit_one(scen_dir, out_dir, flags, detector_kind="real"):
     scen_dir, out_dir = Path(scen_dir), Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     side = json.loads((scen_dir / "sidecar.json").read_text())
-    detector = NeuralSheetDetector(str(SHEET_MODEL), verify=verify_model)
-    detector.load()
-    page_clean = PageCleanInk(str(INK_MODEL), verify=verify_model)
-    page_clean.load()
 
-    clock = StepClock()
-
+    det_worker = None
     if detector_kind == "oracle":
         true_corners = {
             fr["index"]: np.asarray(fr["corners_camera"], float)
@@ -787,19 +777,20 @@ def audit_one(scen_dir, out_dir, flags, detector_kind="real"):
             def take_traces(self, upto_result_seq=None):
                 return []
 
-        det = OracleDet()
-    else:
-        det = SyncDetector(detector)
-    worker = PageCleanWorker(
-        page_clean, None, clock=clock, config=config.ink, ink_divnorm=config.ink_divnorm
-    )
-    loop = Pipeline(
-        detection_worker=det,
-        ink_worker=worker,
-        clock=clock,
-        log=lambda *_a: None,
+        det_worker = OracleDet()
+    # SHEET_MODEL entra nos dois braços: no oráculo o detector real não
+    # roda, mas o binário carrega e verifica do mesmo jeito (o builder
+    # o constrói e carrega sempre que sheet_model é informado).
+    bundle = build_sync_pipeline(
+        verify=verify_model,
         config=config,
+        sheet_model=SHEET_MODEL,
+        ink_model=INK_MODEL,
+        detection_worker=det_worker,
     )
+    clock = bundle.clock
+    worker = bundle.ink_worker
+    loop = bundle.pipeline
     files = sorted((scen_dir / "frames").glob("*.png"))
     series = []
     seg_gt = None
