@@ -86,6 +86,11 @@ class PipelineConfig:
     - detect_wake: cadência adaptativa do detector com sentinela de
       bordas (PR #69), ligada por padrão. Cai para 1 Hz quando a folha
       assenta e acorda no mesmo quadro se ela mexer.
+    - presence_grace_s: teto da renovação só-de-presença no
+      SheetTracker — detecção "paper" que nunca fecha quad segura o
+      relógio de perda por no máximo este tempo de cena; depois a
+      folha cai pelo critério de perda normal. A validação
+      (finito > 0) fica no construtor do rastreador.
     - spread_mode: como combinar contornos de duas páginas. `auto`
       conserva o limite de calha de 10%; `always` aceita calhas maiores
       quando tamanho e alinhamento combinam; `never` mantém as páginas
@@ -105,6 +110,7 @@ class PipelineConfig:
     ink: InkConfig = InkConfig.production()
     detect_wake: bool = True
     detect_wake_interval_s: float = 1.0
+    presence_grace_s: float = 2.0
     spread_mode: str = "auto"
 
     def __post_init__(self):
