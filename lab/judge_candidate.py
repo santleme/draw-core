@@ -72,26 +72,23 @@ def sha256_of(path):
     return h.hexdigest()
 
 
-def newest_report(results_dir, prefix, before, since):
+def newest_report(results_dir, prefix, before):
     """Relatório que ESTA rodada produziu, ou None.
 
-    `before` é o conjunto de `prefix_*.json` de antes do juiz rodar.
-    Arquivo novo (fora de `before`) vence pelo mtime — o filtro antigo
-    por `mtime >= t0` perdia relatório escrito com mtime para trás
-    (relógio grosso do kernel ou filesystem com timestamp próprio).
-    Sem arquivo novo, cai para o caso de sobrescrita: um `before` com
-    mtime >= `since`."""
-    created, touched = {}, {}
+    `before` é o snapshot `{path: mtime}` dos `prefix_*.json` de antes
+    do juiz rodar. Conta como produzido nesta rodada tanto o arquivo
+    novo (fora de `before`) quanto o sobrescrito — detectado por
+    `mtime != before[p]` em qualquer direção, o que cobre também o
+    mtime para trás de relógio grosso do kernel ou filesystem com
+    timestamp próprio. Entre os candidatos vence o de maior mtime."""
+    fresh = {}
     for p in results_dir.glob(f"{prefix}_*.json"):
         try:
             mtime = p.stat().st_mtime
         except OSError:
             continue
-        if p not in before:
-            created[p] = mtime
-        elif mtime >= since:
-            touched[p] = mtime
-    fresh = created or touched
+        if p not in before or mtime != before[p]:
+            fresh[p] = mtime
     return max(fresh, key=fresh.get) if fresh else None
 
 
@@ -108,7 +105,12 @@ def run_judge(
     """Roda um juiz da bancada e devolve (relatório, segundos)."""
     t0 = time.time()
     print(f"=== {script} ===", flush=True)
-    before = set(results_dir.glob(f"{prefix}_*.json"))
+    before = {}
+    for p in results_dir.glob(f"{prefix}_*.json"):
+        try:
+            before[p] = p.stat().st_mtime
+        except OSError:
+            pass
     try:
         r = subprocess.run(
             [str(python), str(scripts_dir / script), "--candidate", str(candidate)],
@@ -120,7 +122,7 @@ def run_judge(
     dt = time.time() - t0
     if r.returncode != 0:
         raise RuntimeError(f"{script} falhou (rc={r.returncode})")
-    report = newest_report(results_dir, prefix, before, t0)
+    report = newest_report(results_dir, prefix, before)
     if report is None:
         raise RuntimeError(f"{script} não gerou relatório novo")
     return report, dt

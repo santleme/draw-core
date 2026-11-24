@@ -395,7 +395,7 @@ def test_run_judge_report_com_mtime_atrasado_eh_encontrado(tmp_path, monkeypatch
 def test_run_judge_relatorio_sobrescrito_eh_encontrado(tmp_path, monkeypatch):
     """Juiz que sobrescreve o relatório anterior (mesmo nome, mtime
     novo): o arquivo está em `before`, então não conta como "criado" —
-    o fallback por mtime >= t0 o pega."""
+    a diferença de mtime com o snapshot o pega."""
     import subprocess as sp
 
     bench = _make_bench(tmp_path)
@@ -453,6 +453,78 @@ def test_run_judge_sem_relatorio_novo_falha(tmp_path, monkeypatch):
             "sheet",
             candidate,
         )
+
+
+def test_run_judge_sobrescrita_com_mtime_atrasado_eh_encontrada(tmp_path, monkeypatch):
+    """Sobrescrita com mtime para trás (relógio grosso do kernel ou fs
+    com timestamp próprio — NFS com skew): o arquivo estava em `before`
+    e o mtime novo ficou ABAIXO do t0 — a comparação com o snapshot
+    (`mtime != before[p]`) o pega em qualquer direção; o filtro
+    `mtime >= t0` antigo o perderia."""
+    import subprocess as sp
+
+    bench = _make_bench(tmp_path)
+    stale = bench / "results" / "sheet_run.json"
+    stale.write_text("{velho")
+    past = time.time() - 3600
+    os.utime(stale, (past, past))
+    candidate = tmp_path / "cand.onnx"
+    candidate.write_bytes(b"onnx")
+
+    def fake_run(cmd, cwd=None, **_kw):
+        stale.write_text(json.dumps(sheet_json()))
+        # Reescreve e carimba o arquivo com mtime ainda mais antigo —
+        # mudou em relação ao snapshot, então conta como desta rodada.
+        older = past - 60
+        os.utime(stale, (older, older))
+        return sp.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(jc.subprocess, "run", fake_run)
+    report, _dt = jc.run_judge(
+        sys.executable,
+        bench / "scripts",
+        bench / "results",
+        "judge_sheet.py",
+        "sheet",
+        candidate,
+    )
+    assert report == stale
+
+
+def test_run_judge_arquivo_criado_nao_ofusca_sobrescrito(tmp_path, monkeypatch):
+    """Se o juiz cria um auxiliar novo E sobrescreve o relatório real,
+    a união criado+sobrescrito decide pelo maior mtime — antes
+    `created or touched` descartava todos os sobrescritos quando
+    qualquer arquivo novo existia."""
+    import subprocess as sp
+
+    bench = _make_bench(tmp_path)
+    stale = bench / "results" / "sheet_run.json"
+    stale.write_text("{velho")
+    past = time.time() - 3600
+    os.utime(stale, (past, past))
+    candidate = tmp_path / "cand.onnx"
+    candidate.write_bytes(b"onnx")
+
+    def fake_run(cmd, cwd=None, **_kw):
+        # Auxiliar criado nesta rodada com mtime de "agora"...
+        (bench / "results" / "sheet_aux.json").write_text("{}")
+        # ...mas o relatório real veio por sobrescrita com mtime maior.
+        stale.write_text(json.dumps(sheet_json()))
+        future = time.time() + 1
+        os.utime(stale, (future, future))
+        return sp.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(jc.subprocess, "run", fake_run)
+    report, _dt = jc.run_judge(
+        sys.executable,
+        bench / "scripts",
+        bench / "results",
+        "judge_sheet.py",
+        "sheet",
+        candidate,
+    )
+    assert report == stale
 
 
 def test_main_juiz_travado_sai_dois_com_erro(tmp_path, monkeypatch, capsys):
