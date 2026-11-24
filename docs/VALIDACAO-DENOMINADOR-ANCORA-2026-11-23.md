@@ -598,6 +598,24 @@ nas subseções posteriores e no fechamento da seção 10.
   Isso prova que o replay completo roda com o código e que há uso real da máscara fotométrica;
   não exercita a correção `unregistered`, o empate sintético nem mede acerto de tinta. `pass_ms`
   foi 0,0 porque o replay injeta um relógio de cena síncrono; esse campo não mede tempo de CPU.
+- Segundo replay integral: `s3_geometria_1117_1754.drawcap`, também com 900/900 quadros, 420
+  passadas de tinta, 772 detecções e os mesmos modelos verificados e preset de produção. Na base
+  limpa `0bf0177`, o gate de movimento contou 400 `accept` e 5 `veto`; na worktree final contou
+  389 `accept`, 6 `correct` e 7 `veto`. Ambos fizeram três tentativas de estimar resíduo, todas
+  `(0, 0)`, e nenhum escolheu `unregistered`; portanto essa captura não valida nem exercita a
+  correção do ramo `unregistered` ou o tratamento de resíduo não nulo. As decisões de âncora
+  mudaram de 33 `indeterminate`, 6 `spurious`, 1 `landing_default` e 1 `landing_rotated` na base
+  para 12 `indeterminate` e 1 `landing_rotated` na worktree. Isso é uma diferença observada, não
+  uma melhora demonstrada: não há rótulos independentes para classificar essas decisões.
+- O canvas final desse replay tinha 37.014 px na base e 54.084 px na worktree. Comparando as
+  máscaras sem alinhamento adicional, havia 392 px só na base e 17.462 só na worktree (IoU
+  0,672). Esse IoU não mede qualidade: os quads finais também divergiram bastante (base:
+  `[[110.634,479.063],[161.367,206.672],[629.475,92.452],[634.379,479.063]]`; worktree:
+  `[[57.419,443.093],[276.183,125.557],[638.070,223.669],[638.750,510.014]]`), então as máscaras
+  não estão na mesma coordenada física da página. A inspeção visual das projeções sobre o último
+  quadro mostrou pixels vermelhos fora da escrita visível nos dois resultados; sem anotação por
+  pixel e registro independente da folha, não é possível separar tinta recuperada, fantasma e
+  erro de pose. Esse replay é uma evidência de integração e de mudança de estado, não de acurácia.
 - A revisão das fontes técnicas foi feita com Firecrawl sobre a documentação oficial do OpenCV
   4.13: `warpPerspective` define a matriz, o tamanho da saída `dsize`, a interpolação e o modo/
   valor de borda; isso sustenta o mecanismo de recorte e o acolchoamento da grade, não a
