@@ -655,13 +655,22 @@ def _estimate_identity_residual(
             recall, hit, observable = _exact_recall(
                 prior_c, seen_c, dx, dy, prior_px, cover_c
             )
+            # So concorre quem passa nos criterios de ACEITE (ganho sobre
+            # (0, 0) e recall minimo): ordenar tudo e checar so o vencedor
+            # deixava a pagina sem correcao quando o de maior escore era
+            # reprovado e outro candidato passava (review do #180).
+            if (
+                recall < base_recall + _RESIDUAL_MIN_GAIN
+                or recall < _RESIDUAL_MIN_RECALL
+            ):
+                continue
             # Pixels casados, menos uma fracao dos observaveis NAO casados: o
             # denominador por candidato informa (na cena da mesa escura o
             # certo deixa ~2.900 px observaveis a menos sem casar), mas um
             # deslocamento lateral que so esconde 4 px nao casados atras da
             # borda da cobertura nao pode vencer por isso.
             score = hit - _RESIDUAL_MISS_WEIGHT * (observable - hit)
-            scored.append((score, dx, dy, recall))
+            scored.append((score, dx, dy))
     if not scored:
         return 0, 0
     top = max(item[0] for item in scored)
@@ -669,10 +678,8 @@ def _estimate_identity_residual(
     near = [item for item in scored if item[0] >= top - tol]
     # Equivalentes: vence o de MENOR deslocamento. Um eixo extra de movimento
     # so e aceito se explicar mais tinta, nao se esconder a que sobra.
-    _score, dx, dy, recall = min(near, key=lambda i: (abs(i[1]) + abs(i[2]), -i[0]))
-    if recall >= base_recall + _RESIDUAL_MIN_GAIN and recall >= _RESIDUAL_MIN_RECALL:
-        return int(dx), int(dy)
-    return 0, 0
+    _score, dx, dy = min(near, key=lambda i: (abs(i[1]) + abs(i[2]), -i[0]))
+    return int(dx), int(dy)
 
 
 def _evaluate_page_identity(
@@ -3387,8 +3394,16 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 p.registration_corners,
                 p.prob.shape,
             )
+            # Duas leituras (ver anchor._pose_displacement): o residuo de erro
+            # de rastreio nao e movimento (pose_matrix); o de folha movida e
+            # acompanhada deixa a ancora efetiva parada (matrix) e a evidencia
+            # chega alinhada. A efetiva so vale se explica a pose por inteiro.
+            pose_px = anchor_mod._matrix_grid_displacement(pose_matrix, p.prob.shape)
+            effective_px = anchor_mod._matrix_grid_displacement(matrix, p.prob.shape)
             p.reg_info["registration_displacement_px"] = (
-                anchor_mod._matrix_grid_displacement(pose_matrix, p.prob.shape)
+                effective_px
+                if effective_px <= anchor_mod._RESIDUAL_EXPLAINS_PX
+                else pose_px
             )
             p.reg_info["registration_is_identity"] = (
                 registration._registration_is_identity(matrix)
@@ -3805,6 +3820,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             reg_deadband,
             p.watch_step_px,
             arb_event,
+            p.identity_residual,
         )
         p.follow_abstain = follow_status == "open"
         p.reg_info["follow_event_open"] = self._follow_event_open

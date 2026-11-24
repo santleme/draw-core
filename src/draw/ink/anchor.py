@@ -68,6 +68,11 @@ _ARB_MIN_PASS_PX = 200
 # geometria decidir. Mecanismo fixo do preset de producao
 # (a flag do Tier A foi removida).
 _FOLLOW_DISPLACEMENT_PX = _ANCHOR_MIGRATION_DISPLACEMENT_PX
+# A ancora COM o residuo so explica a pose quando a deixa (quase) parada: o
+# residuo e inteiro, o erro de arredondamento fica abaixo disto. Reduzir
+# o deslocamento pela metade nao explica nada — um deslize real de 14 px com
+# residuo de 6 nao pode virar 8 (review do #180).
+_RESIDUAL_EXPLAINS_PX = 2.0
 _FOLLOW_PASSES = _ANCHOR_MIGRATION_PASSES
 _FOLLOW_SETTLE_PX = 6.0
 
@@ -82,14 +87,19 @@ def _matrix_grid_displacement(matrix, shape):
     return float(np.mean(np.linalg.norm(moved - grid, axis=-1)))
 
 
-def _total_after_clip(raw_total, before, after):
-    """`raw_total` menos a massa que a translacao do residuo cortou da grade.
+def _overlap_fraction(prob, snapshot):
+    """Fracao da massa de `prob` que cai no canvas confirmado.
 
-    Sem corte (sem residuo, ou nada na borda) `before == after` e o retorno
-    e exatamente `raw_total`. Nunca devolve <= 0: cai para `raw_total`."""
-    clipped = float(np.sum(before)) - float(np.sum(after))
-    total = raw_total - max(clipped, 0.0)
-    return total if total > 0.0 else raw_total
+    Numerador e denominador usam a mesma imagem ja permutada e transladada.
+    Isso importa nas rotacoes de quarto de volta: `_permute_prob` redimensiona
+    a grade e pode mudar a soma da probabilidade, entao normalizar pela massa
+    anterior ao resize mistura dominios e pode produzir escore acima de 1.
+    """
+    total = float(np.sum(prob, dtype=np.float64))
+    if total <= 0.0:
+        return 0.0
+    matched = float(np.sum(prob[snapshot], dtype=np.float64))
+    return min(matched / total, 1.0)
 
 
 class _AnchorSteps:
@@ -107,15 +117,33 @@ class _AnchorSteps:
         self._follow_streak_quads = []
         self._follow_hold = False
 
-    def _pose_displacement(self, corners, shape):
-        """Deslocamento posicional do quad contra a ancora, em px da grade."""
+    def _pose_displacement(self, corners, shape, residual=(0, 0)):
+        """Deslocamento posicional do quad contra a ancora, em px da grade.
+
+        Com residuo de registro (F-11) ha duas leituras: contra a ancora SEM
+        o residuo (erro de rastreio: os cantos nao andaram, so o conteudo do
+        warp; o residuo nao e movimento da pagina) e contra a ancora COM ele
+        (folha movida de verdade e acompanhada pelo tracker: o warp ja esta
+        alinhado e o residuo so cancela o registro). A segunda so vale
+        quando EXPLICA a pose por inteiro (<= _RESIDUAL_EXPLAINS_PX): medir
+        so a primeira deixava o evento reabrir sem fim neste ultimo caso e
+        a passada abstinha para sempre (review do #180)."""
         trigger_anchor = (
             self._anchor_corners
             if self._anchor_roll == 0
             else np.roll(self._anchor_corners, -self._anchor_roll, axis=0)
         )
         matrix = registration._registration_matrix(trigger_anchor, corners, shape)
-        return _matrix_grid_displacement(matrix, shape)
+        displacement = _matrix_grid_displacement(matrix, shape)
+        dx, dy = residual
+        if displacement > _RESIDUAL_EXPLAINS_PX and (dx or dy):
+            shifted = registration._shift_anchor_corners(trigger_anchor, dx, dy, shape)
+            effective = _matrix_grid_displacement(
+                registration._registration_matrix(shifted, corners, shape), shape
+            )
+            if effective <= _RESIDUAL_EXPLAINS_PX:
+                return effective
+        return displacement
 
     def _arb_restart_streak(self):
         confirmed = self._accumulator._confirmed
@@ -166,7 +194,7 @@ class _AnchorSteps:
         # fazer toda passada seguinte parecer deslocada pela
         # permutacao — o deslocamento que abre evento e o da pose,
         # nao o da rotulacao.
-        displacement = self._pose_displacement(corners, shape)
+        displacement = self._pose_displacement(corners, shape, grid_shift)
         if displacement <= _ANCHOR_MIGRATION_DISPLACEMENT_PX:
             self._arb_close_event()
             return "closed", None
@@ -208,14 +236,12 @@ class _AnchorSteps:
             # T . Pi_k(P). A camera ja o recebe pela ancora efetiva (T . M . P).
             dx, dy = grid_shift
             translated = registration._translate_grid(page_prob, dx, dy)
-            # A translacao corta a tinta que sai da grade; ela continua no
-            # raw_total mas nunca poderia casar, e a camera so conta o que
-            # sobra depois do registro: o denominador desconta so a massa
-            # cortada (sem residuo, nada muda).
-            page_total = _total_after_clip(raw_total, page_prob, translated)
+            # Pontua a probabilidade ja permutada e transladada contra a
+            # referencia no mesmo dominio. A translacao corta a massa que
+            # saiu da grade; `_overlap_fraction` usa apenas o que restou.
             page_prob = translated
-            score_page = float(np.sum(page_prob * snapshot) / page_total)
-            score_camera = float(np.sum(registered_prob * snapshot) / registered_total)
+            score_page = _overlap_fraction(page_prob, snapshot)
+            score_camera = _overlap_fraction(registered_prob, snapshot)
             # Colocacoes ciclicas (frentes 23/24): a hipotese "a
             # folha assentou rodada de k x 90 graus" pontuada como a
             # medicao manda — a prob ENTREGUE permutada por -k
@@ -232,12 +258,7 @@ class _AnchorSteps:
                 for k in (1, 2, 3):
                     permuted = registration._permute_prob(raw_prob, -k)
                     moved = registration._translate_grid(permuted, dx, dy)
-                    cyclic.append(
-                        float(
-                            np.sum(moved * snapshot)
-                            / _total_after_clip(raw_total, permuted, moved)
-                        )
-                    )
+                    cyclic.append(_overlap_fraction(moved, snapshot))
                 cyclic = tuple(cyclic)
         pass_mass = int(np.count_nonzero(raw_prob > 0.5))
         self._arb_scores.append(
@@ -331,6 +352,7 @@ class _AnchorSteps:
         reg_deadband,
         step_px,
         arb_event,
+        grid_shift=(0, 0),
     ):
         """Avanca o evento de divergencia assentada; re-ancora no
         fecho do streak.
@@ -368,7 +390,7 @@ class _AnchorSteps:
             return "closed", None
         # O gatilho compara em termos POSICIONAIS, como o da
         # arbitragem: o roll parado nao e deslocamento de pose.
-        displacement = self._pose_displacement(corners, shape)
+        displacement = self._pose_displacement(corners, shape, grid_shift)
         if displacement <= _FOLLOW_DISPLACEMENT_PX:
             self._follow_close_event()
             return "closed", None

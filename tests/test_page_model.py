@@ -3445,3 +3445,24 @@ def test_return_with_residual_keeps_the_canvas_without_ghosting(dy, monkeypatch)
     decision, before, after = _return_with_residual(dy)
     assert decision == "same_page"
     assert after == pytest.approx(before, rel=0.1)
+
+
+def test_identity_residual_ranks_only_candidates_that_pass_acceptance(monkeypatch):
+    """Review do #180: o estimador ordenava todos os deslocamentos e so
+    conferia o recall do vencedor; reprovado o de maior escore, a pagina
+    ficava sem correcao mesmo com outro candidato aprovado."""
+    ref, candidate = _shifted_evidence(6)
+    real = worker_mod._exact_recall
+
+    def scripted(prior, seen, dx, dy, prior_px, coverage=None):
+        recall, hit, observable = real(prior, seen, dx, dy, prior_px, coverage)
+        if (dx, dy) == (0, -6):  # o melhor escore, mas reprovado no recall
+            return 0.3, hit, observable
+        return recall, hit, observable
+
+    monkeypatch.setattr(worker_mod, "_exact_recall", scripted)
+    dx, dy = worker_mod._estimate_identity_residual(
+        ref, None, candidate, None, None, 0.5
+    )
+    assert (dx, dy) != (0, 0)  # outro candidato aprovado e aplicado
+    assert (dx, dy) != (0, -6)  # o reprovado nunca e aplicado

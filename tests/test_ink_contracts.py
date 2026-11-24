@@ -948,3 +948,72 @@ def test_dark_band_and_residual_land_normally_on_a_vertical_slide(ink, residual)
     got = _confirmed(worker, gen2) > 0
     assert _frac(got, drawn) >= 0.95
     assert _beyond(got, drawn, 1) == 0
+
+
+# ------------------------------------------------------------------
+# Folha movida DE VERDADE entre as capturas e acompanhada pelo tracker
+# (review do #180): o warp ja esta alinhado com o desenho, mas o registro
+# (que supoe a folha parada) gera uma correcao diferente de zero. Essa
+# correcao nao pode (a) manter o evento de arbitragem aberto para sempre
+# nem (b) duplicar o desenho num deslize posterior.
+# ------------------------------------------------------------------
+
+_MOVED_A, _MOVED_B = (90, 96, 60, 260), (150, 156, 60, 200)
+
+
+def _return_moved_sheet(worker, clock, quad_delta):
+    generation = worker.new_generation()
+    scene = _Scene()
+    _passes(worker, clock, generation, scene, 4, dt=_DT_IDLE)
+    for stroke in (_MOVED_A, _MOVED_B):
+        _write_stroke(worker, clock, generation, scene, stroke)
+    drawn = _stroke_mask(scene)
+    returned = _Scene()
+    for stroke in (_MOVED_A, _MOVED_B):
+        returned.draw(stroke)  # o warp segue alinhado com o desenho
+    returned.corners = Q0 + np.float32(quad_delta)  # mas a folha andou
+    gen2 = worker.new_generation(preserve_identity=True)
+    _passes(worker, clock, gen2, returned, 6, dt=_DT_IDLE)
+    return gen2, drawn, returned
+
+
+@pytest.mark.parametrize("quad_delta", [(0, 10), (12, 6), (-12, -6)])
+def test_eraser_works_after_a_physically_moved_sheet_returns(ink, quad_delta):
+    worker, clock = ink
+    gen2, drawn, returned = _return_moved_sheet(worker, clock, quad_delta)
+    y0, y1, x0, x1 = _MOVED_A
+    cut = x0 + (x1 - x0) // 3
+    returned.hand_on(_MOVED_A)
+    worker.set_hand_presence(True, moved=True)
+    _passes(worker, clock, gen2, returned, 2)
+    returned.page[y0:y1, x0:cut] = PAPER
+    returned.hand_on((y0, y1, x0, cut))
+    _passes(worker, clock, gen2, returned, 2)
+    returned.hand_off()
+    worker.set_hand_presence(False)
+    _passes(worker, clock, gen2, returned, 8, dt=_DT_IDLE)
+
+    got = _confirmed(worker, gen2) > 0
+    erased = np.zeros_like(drawn)
+    erased[y0:y1, x0:cut] = True
+    assert np.count_nonzero(got & erased) <= 0.05 * np.count_nonzero(erased)
+    assert _frac(got, drawn & ~erased) >= 0.90  # a testemunha segue confirmada
+
+
+# Barras horizontais nao determinam x: o estimador se abstem em deslocamentos so
+# em x, entao os casos carregam componente em y.
+@pytest.mark.parametrize("quad_delta", [(5, 3), (-5, -3), (4, 8)])
+def test_slide_after_a_physically_moved_sheet_does_not_duplicate(ink, quad_delta):
+    worker, clock = ink
+    gen2, drawn, returned = _return_moved_sheet(worker, clock, quad_delta)
+    slide = np.float32([14 if quad_delta[0] < 0 else -14, 0])
+    returned.corners = Q0 + np.float32(quad_delta) + slide
+    worker.set_hand_presence(True, moved=True)
+    for _ in range(10):
+        _feed(worker, clock, returned.frame(gen2), dt=_DT_ACTIVE, must=False)
+    worker.set_hand_presence(False)
+    _passes(worker, clock, gen2, returned, 4, dt=_DT_IDLE)
+
+    got = _confirmed(worker, gen2) > 0
+    assert _frac(got, drawn) >= 0.95
+    assert _beyond(got, drawn, 1) == 0
