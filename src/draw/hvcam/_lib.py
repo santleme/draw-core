@@ -108,6 +108,16 @@ class _PurePythonHvcamLib:
     Mantem a mesma assinatura e semantica de hvcam_client.c:
     - hvcam_connect(port) -> fd ou -errno
     - hvcam_connect_tcp(host_bytes, port) -> fd ou -1
+
+    Os kwargs `timeout_ms` e `socket_factory` sao extensoes so-Python:
+    limitam o connect() (que senao espera o SYN timeout do kernel) e dao
+    uma seam de teste. A libhvcam.so nativa tem ABI C fixa — quem chama
+    nunca repassa kwargs para ela. O orcamento e por candidato do
+    getaddrinfo (dual-stack pode custar N x timeout_ms) e nao cobre a
+    resolucao DNS em si; timeout_ms <= 0 ou NaN devolve -ETIMEDOUT na
+    hora, como o _transport.py.
+    - hvcam_connect(port, *, timeout_ms=None, socket_factory=socket.socket)
+    - hvcam_connect_tcp(host_bytes, port, *, timeout_ms=None, socket_factory=socket.socket)
     - hvcam_grab_next(fd, hdr_ptr, buf, cap, last_ptr, timeout_ms) -> bytes, -2 (timeout) ou -1 (erro)
     - hvcam_close(fd)
 
@@ -133,22 +143,38 @@ class _PurePythonHvcamLib:
         self._sockets[fd] = sock
         return sock
 
-    def hvcam_connect(self, port):
+    @staticmethod
+    def _connect_errno(error):
+        if error.errno is not None:
+            return error.errno
+        # socket.timeout/TimeoutError nao carrega errno; o chamador usa
+        # -ETIMEDOUT para exibir a dica de "host nao respondeu".
+        return errno.ETIMEDOUT if isinstance(error, TimeoutError) else errno.EIO
+
+    def hvcam_connect(self, port, *, timeout_ms=None, socket_factory=socket.socket):
+        if timeout_ms is not None and not timeout_ms > 0:
+            # <= 0 ou NaN: settimeout() levantaria ValueError (nao
+            # OSError) e vazaria o socket — responde -ETIMEDOUT.
+            return -errno.ETIMEDOUT
         af_vsock = getattr(socket, "AF_VSOCK", 40)
         cid_host = getattr(socket, "VMADDR_CID_HOST", 2)
         try:
-            sock = socket.socket(af_vsock, socket.SOCK_STREAM)
+            sock = socket_factory(af_vsock, socket.SOCK_STREAM)
         except OSError as error:
             return -(error.errno or errno.EIO)
         try:
+            if timeout_ms is not None:
+                sock.settimeout(timeout_ms / 1000.0)
             sock.connect((cid_host, int(port)))
             sock.setblocking(True)
             return self._register(sock)
         except OSError as error:
             sock.close()
-            return -(error.errno or errno.EIO)
+            return -self._connect_errno(error)
 
-    def hvcam_connect_tcp(self, host_bytes, port):
+    def hvcam_connect_tcp(
+        self, host_bytes, port, *, timeout_ms=None, socket_factory=socket.socket
+    ):
         host = (
             host_bytes.decode("utf-8", errors="replace")
             if isinstance(host_bytes, (bytes, bytearray))
@@ -156,16 +182,21 @@ class _PurePythonHvcamLib:
         )
         if not host:
             host = "127.0.0.1"
+        if timeout_ms is not None and not timeout_ms > 0:
+            return -errno.ETIMEDOUT
         try:
             infos = socket.getaddrinfo(
                 host, int(port), socket.AF_UNSPEC, socket.SOCK_STREAM
             )
         except OSError:
             return -1
+        timeout_s = None if timeout_ms is None else timeout_ms / 1000.0
         for family, socktype, proto, _canon, sockaddr in infos:
             sock = None
             try:
-                sock = socket.socket(family, socktype, proto)
+                sock = socket_factory(family, socktype, proto)
+                if timeout_s is not None:
+                    sock.settimeout(timeout_s)
                 sock.connect(sockaddr)
                 sock.setblocking(True)
                 return self._register(sock)
@@ -289,7 +320,6 @@ class _PurePythonHvcamLib:
             or payload_bytes > _MAX_PAYLOAD
         ):
             return -1
-        stored = min(payload_bytes, int(cap))
         if (
             buf is not None
             and payload_bytes > 0
@@ -306,12 +336,15 @@ class _PurePythonHvcamLib:
                     return -1
                 if rc != 0:
                     return rc
-                return stored
+                return payload_bytes
         raw_payload, rc = cls._read_full(sock, payload_bytes, deadline)
         if rc == -2:
             return -1
         if rc != 0:
             return rc
+        # O payload inteiro ja saiu do fio; so a parte que cabe no buffer
+        # do chamador e copiada. Sem o min(), o memmove transborda buf.
+        stored = min(payload_bytes, int(cap))
         if stored > 0 and buf is not None:
             ctypes.memmove(buf, raw_payload, stored)
         return stored

@@ -10,6 +10,7 @@ e _check_hvcam_source.
 
 import errno
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -141,6 +142,19 @@ def test_parse_hvcam_endpoint_invalido(url):
         parse_hvcam_endpoint(url)
 
 
+@pytest.mark.parametrize(
+    "url,hint",
+    [
+        ("hvcam://[::1]", "hvcam+tcp://[::1]:8765"),
+        ("hvcam://[::1]:9100", "hvcam+tcp://[::1]:9100"),
+    ],
+)
+def test_parse_hvcam_endpoint_ipv6_hint_uses_brackets(url, hint):
+    # "::1:8765" nao parseia — a sugestao TCP precisa de colchetes.
+    with pytest.raises(ValueError, match=re.escape(hint)):
+        parse_hvcam_endpoint(url)
+
+
 def test_hvcam_capture_reads_frame():
     cam = FakeCamera([(_info(seq=7, ts_us=250_000), _payload())])
     capture = HvcamCapture("hvcam://", camera_factory=_factory(cam))
@@ -199,6 +213,23 @@ def test_hvcam_capture_tcp_ipv6_endpoint_passed():
     seen = []
     HvcamCapture("hvcam+tcp://[::1]:9999", camera_factory=_factory(cam, seen))
     assert seen == [{"host": "::1", "port": 9999}]
+
+
+@pytest.mark.parametrize(
+    "source,expected",
+    [
+        ("hvcam://:9100", {"port": 9100, "connect_timeout_ms": 2500}),
+        (
+            "hvcam+tcp://10.0.0.5:9999",
+            {"host": "10.0.0.5", "port": 9999, "connect_timeout_ms": 2500},
+        ),
+    ],
+)
+def test_hvcam_capture_forwards_connect_timeout_to_direct_paths(source, expected):
+    cam = FakeCamera([])
+    seen = []
+    HvcamCapture(source, connect_timeout_ms=2500, camera_factory=_factory(cam, seen))
+    assert seen == [expected]
 
 
 def test_hvcam_capture_counts_seq_gaps_as_source_dropped():
@@ -459,6 +490,45 @@ def test_camera_timeout_suggests_reverse_mode(monkeypatch):
     with pytest.raises(OSError, match=r"hvcam\+reverse://:9100") as error:
         hvcam_module.Camera(port=9100)
     assert "--register-vsock --port 9100" in str(error.value)
+
+
+def test_camera_connect_timeout_reaches_only_pure_python_lib(monkeypatch):
+    """connect_timeout_ms e um parametro so-Python: a libhvcam.so nativa
+    tem ABI C fixa (e fakes com a mesma assinatura) e nunca recebe
+    kwargs extras."""
+    lib = _FakeLib()
+    monkeypatch.setattr(hvcam_module._lib, "_LIB", lib)
+    cam = hvcam_module.Camera(port=9100, connect_timeout_ms=1500)
+    assert lib.calls == [("vsock", 9100)]
+    cam.close()
+
+    seen = {}
+
+    class _RecordingLib(hvcam_module._lib._PurePythonHvcamLib):
+        def hvcam_connect(self, port, **kwargs):
+            seen["vsock"] = (port, kwargs)
+            return 51
+
+        def hvcam_connect_tcp(self, host, port, **kwargs):
+            seen["tcp"] = (host, port, kwargs)
+            return 52
+
+        def hvcam_close(self, _fd):
+            pass
+
+    monkeypatch.setattr(hvcam_module._lib, "_LIB", _RecordingLib())
+    cam = hvcam_module.Camera(port=9100, connect_timeout_ms=1500)
+    assert seen["vsock"] == (9100, {"timeout_ms": 1500})
+    cam.close()
+    cam = hvcam_module.Camera(host="10.0.0.5", port=8765, connect_timeout_ms=1500)
+    assert seen["tcp"] == (b"10.0.0.5", 8765, {"timeout_ms": 1500})
+    cam.close()
+
+    # Sem connect_timeout_ms o fallback recebe a mesma chamada
+    # posicional da ABI C — nenhum kwarg a mais.
+    cam = hvcam_module.Camera(port=9100)
+    assert seen["vsock"] == (9100, {})
+    cam.close()
 
 
 def test_listen_vsock_bounded_times_out_and_filters_non_host_cid(monkeypatch):
@@ -742,6 +812,115 @@ def test_pure_python_hvcam_lib_tcp_loopback_end_to_end(monkeypatch):
     finally:
         cap.release()
         t.join(timeout=2.0)
+
+
+class _FakeConnectSock:
+    """Socket de connect() fake: aplica falha roteada pelo teste."""
+
+    def __init__(self, error=None, fd=51):
+        self._error = error
+        self._fd = fd
+        self.timeout = None
+        self.blocking = None
+        self.connected_to = None
+        self.closed = False
+
+    def settimeout(self, value):
+        self.timeout = value
+
+    def connect(self, addr):
+        self.connected_to = addr
+        if self._error is not None:
+            raise self._error
+
+    def setblocking(self, flag):
+        self.blocking = flag
+
+    def fileno(self):
+        return self._fd
+
+    def close(self):
+        self.closed = True
+
+
+def test_pure_python_vsock_connect_applies_bounded_timeout():
+    """No fallback Python, hvcam_connect aplica settimeout(ms/1000) antes
+    do connect: socket.timeout vira -ETIMEDOUT (dica de host fora do ar)
+    e o socket e fechado. Sem timeout_ms nenhum settimeout roda."""
+    import socket as socket_mod
+
+    lib = hvcam_module._lib._PurePythonHvcamLib()
+
+    timed = _FakeConnectSock(socket_mod.timeout("timed out"))
+    rc = lib.hvcam_connect(8765, timeout_ms=1500, socket_factory=lambda *_a: timed)
+    assert rc == -errno.ETIMEDOUT
+    assert timed.timeout == 1.5
+    assert timed.connected_to[0] == getattr(socket_mod, "VMADDR_CID_HOST", 2)
+    assert timed.closed
+
+    refused = _FakeConnectSock(OSError(errno.ECONNREFUSED, "refused"))
+    rc = lib.hvcam_connect(8765, timeout_ms=1500, socket_factory=lambda *_a: refused)
+    assert rc == -errno.ECONNREFUSED
+    assert refused.closed
+
+    ok = _FakeConnectSock(fd=53)
+    fd = lib.hvcam_connect(8765, socket_factory=lambda *_a: ok)
+    assert fd == 53
+    assert ok.timeout is None  # sem timeout_ms: settimeout nao roda
+    assert ok.blocking is True
+
+
+def test_pure_python_tcp_connect_timeout_falls_through_to_next_candidate(
+    monkeypatch,
+):
+    """Um candidato cujo connect expira e descartado e o proximo
+    endereco do getaddrinfo e tentado — o fd vem do socket que conectou."""
+    import socket as socket_mod
+
+    infos = [
+        (socket_mod.AF_INET, socket_mod.SOCK_STREAM, 6, "", ("10.0.0.1", 8765)),
+        (socket_mod.AF_INET, socket_mod.SOCK_STREAM, 6, "", ("10.0.0.2", 8765)),
+    ]
+    monkeypatch.setattr(socket_mod, "getaddrinfo", lambda *_a, **_k: infos)
+    made = []
+
+    def factory(*_a):
+        sock = _FakeConnectSock(
+            error=socket_mod.timeout("timed out") if not made else None,
+            fd=77,
+        )
+        made.append(sock)
+        return sock
+
+    lib = hvcam_module._lib._PurePythonHvcamLib()
+    fd = lib.hvcam_connect_tcp(
+        b"10.0.0.1", 8765, timeout_ms=2000, socket_factory=factory
+    )
+    assert fd == 77
+    assert len(made) == 2
+    assert made[0].timeout == 2.0 and made[0].closed
+    assert made[1].timeout == 2.0 and made[1].blocking is True
+
+
+@pytest.mark.parametrize("bad_ms", [0, -1, float("nan")])
+def test_pure_python_connect_timeout_nao_positivo_vira_etimedout(bad_ms):
+    """timeout_ms <= 0 ou NaN: settimeout() levantaria ValueError (que
+    nao e OSError) depois de o socket ja existir — vazava o fd e furava
+    o contrato de -errno. Devolve -ETIMEDOUT sem criar socket."""
+    lib = hvcam_module._lib._PurePythonHvcamLib()
+    called = []
+
+    def factory(*_a):
+        called.append(1)
+        return _FakeConnectSock(fd=1)
+
+    rc = lib.hvcam_connect(8765, timeout_ms=bad_ms, socket_factory=factory)
+    assert rc == -errno.ETIMEDOUT
+    rc = lib.hvcam_connect_tcp(
+        b"10.0.0.1", 8765, timeout_ms=bad_ms, socket_factory=factory
+    )
+    assert rc == -errno.ETIMEDOUT
+    assert called == []
 
 
 def test_run_check_on_wsl_without_dev_video_uses_hvcam_fallback(monkeypatch, capsys):
@@ -1923,6 +2102,95 @@ def test_decoder_kills_worker_that_never_reports_ready(monkeypatch):
         assert decoder._process is None
     finally:
         decoder.close()
+
+
+def test_decoder_close_waits_for_inflight_decode(monkeypatch):
+    """close() concorrente nao mata o worker no meio do decode: espera
+    decode() liberar _lock e so entao desmonta o processo. O
+    interleaving e forjado por eventos, sem sleeps."""
+    import io
+
+    in_read = threading.Event()
+    release_read = threading.Event()
+    decode_returned = threading.Event()
+    results = {}
+
+    class _GatedStdout:
+        def __init__(self):
+            self._calls = 0
+            self.closed = False
+
+        def read(self, _n=-1):
+            self._calls += 1
+            if self._calls == 1:
+                return mjpeg_module._READY  # handshake do _serve
+            in_read.set()
+            if not release_read.wait(timeout=10):
+                raise AssertionError("leitura nao liberada pelo teste")
+            return mjpeg_module._RESULT.pack(2, 1)
+
+        def readinto(self, view):
+            view[:] = b"\x07" * len(view)
+            return len(view)
+
+        def close(self):
+            self.closed = True
+
+    class _GatedProc:
+        def __init__(self):
+            self.stdin = io.BytesIO()
+            self.stdout = _GatedStdout()
+            self.kills = 0
+
+        def kill(self):
+            self.kills += 1
+            # Se o watchdog derrubar o filho, a leitura travada acorda.
+            release_read.set()
+
+        def wait(self, timeout=None):
+            return -9
+
+    procs = []
+
+    def fake_popen(*_a, **_k):
+        proc = _GatedProc()
+        procs.append(proc)
+        return proc
+
+    monkeypatch.setattr(mjpeg_module.subprocess, "Popen", fake_popen)
+    decoder = mjpeg_module._MjpegDecoder(timeout_s=30)
+
+    def run_decode():
+        try:
+            results["image"] = decoder.decode(np.zeros(16, np.uint8))
+        except Exception as error:  # noqa: BLE001 - reportado via results
+            results["error"] = error
+        finally:
+            decode_returned.set()
+
+    def run_close():
+        decoder.close()
+        results["close_after_decode"] = decode_returned.is_set()
+
+    t_decode = threading.Thread(target=run_decode)
+    t_close = threading.Thread(target=run_close)
+    try:
+        t_decode.start()
+        assert in_read.wait(timeout=5)
+        t_close.start()
+        release_read.set()
+        t_decode.join(timeout=10)
+        t_close.join(timeout=10)
+        assert not t_decode.is_alive() and not t_close.is_alive()
+        assert "error" not in results, results.get("error")
+        assert results["image"].shape == (1, 2, 3)
+        assert results["close_after_decode"] is True
+        assert decoder._process is None
+        assert procs[0].kills == 1
+    finally:
+        release_read.set()
+        if not t_decode.is_alive() and not t_close.is_alive():
+            decoder.close()
 
 
 @pytest.mark.parametrize("input_size", [16, 2 * 1024 * 1024])

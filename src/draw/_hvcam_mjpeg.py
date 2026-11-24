@@ -113,6 +113,10 @@ class _MjpegDecoder:
     def __init__(
         self, *, timeout_s=_DECODE_TIMEOUT_S, startup_timeout_s=_STARTUP_TIMEOUT_S
     ):
+        # _lock serializa decode()/close(); _watch protege _process,
+        # _deadline e _timed_out lidos pelo watchdog. Ordem de aquisicao:
+        # sempre _lock -> _watch; o watchdog nao toca em _lock, entao
+        # nunca ha inversao.
         self._lock = threading.Lock()
         self._watch = threading.Condition()
         self._timeout_s = timeout_s
@@ -188,10 +192,10 @@ class _MjpegDecoder:
                     proc.stdin.flush()
                     return self._receive(proc.stdout)
             except TimeoutError as error:
-                self.close()
+                self._close_locked()
                 raise ValueError(str(error)) from error
             except (OSError, EOFError) as error:
-                self.close()
+                self._close_locked()
                 raise ValueError(
                     "hvcam: processo de decode MJPEG indisponivel"
                 ) from error
@@ -212,7 +216,8 @@ class _MjpegDecoder:
             raise EOFError("quadro incompleto do decoder MJPEG")
         return image
 
-    def close(self):
+    def _close_locked(self):
+        """Desmonta o worker; o chamador precisa ja deter `self._lock`."""
         with self._watch:
             proc, self._process = self._process, None
             watchdog, self._watchdog = self._watchdog, None
@@ -225,6 +230,12 @@ class _MjpegDecoder:
             proc.stdout.close()
         if watchdog is not None:
             watchdog.join()
+
+    def close(self):
+        # Serializa com decode(): um close() externo nunca mata o
+        # processo no meio de um decode em voo.
+        with self._lock:
+            self._close_locked()
 
 
 _decoder = _MjpegDecoder()
