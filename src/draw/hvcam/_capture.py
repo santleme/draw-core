@@ -307,18 +307,19 @@ class HvcamCapture:
             kwargs = {"port": port}
             if host is not None:
                 kwargs["host"] = host
-                if self._connect_timeout_ms is not None:
-                    kwargs["connect_timeout_ms"] = self._connect_timeout_ms
             elif scheme == "hvcam+reverse":
                 kwargs["listen"] = True
-                if self._connect_timeout_ms is not None:
-                    kwargs["timeout_ms"] = self._connect_timeout_ms
                 if self._on_listening is not None:
                     kwargs["on_listening"] = self._on_listening
                 if self._abort_check is not None:
                     kwargs["abort_check"] = self._abort_check
-            elif self._connect_timeout_ms is not None:
-                kwargs["connect_timeout_ms"] = self._connect_timeout_ms
+            if self._connect_timeout_ms is not None:
+                # No modo reverse, o timeout cobre o accept do listener
+                # (kwarg `timeout_ms`); nos diretos, o connect().
+                key = (
+                    "timeout_ms" if scheme == "hvcam+reverse" else "connect_timeout_ms"
+                )
+                kwargs[key] = self._connect_timeout_ms
             self._cam = camera_factory(**kwargs)
         except OSError as error:
             self._cam = None
