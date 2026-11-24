@@ -94,7 +94,10 @@ def seen(monkeypatch):
             seen["pipeline_obj"] = self
 
     def _make_presence(model_path, *, verify):
+        """Espelha make_hand_presence: None quando o modelo não resolve."""
         seen["presence_ctor"] = (model_path, verify)
+        if not hand_module.hand_model_available(model_path):
+            return None
         return seen["presence_obj"]
 
     monkeypatch.setattr(page_clean_module, "PageCleanInk", _FakePageClean)
@@ -222,7 +225,7 @@ def test_builder_hand_none_resolves_masker_and_presence_via_default(seen):
     comportamento do eval/app; derrubar a presença aqui apagava
     hand_presence_samples dos relatórios)."""
     bundle = build_sync_pipeline(verify=None, config=_config(), hand_model=None)
-    assert seen["masker_available"] == [None]
+    assert seen["masker_available"] == [None, None]  # masker + adaptador
     assert bundle.hand_masker is not None
     assert seen["presence_ctor"] == (None, None)
     assert bundle.presence is seen["presence_obj"]
@@ -232,12 +235,18 @@ def test_builder_hand_none_resolves_masker_and_presence_via_default(seen):
     assert seen["pipeline_ctor"]["hand_presence_worker"] is bundle.presence_worker
 
 
-def test_builder_hand_unavailable_model_drops_the_masker(seen):
+def test_builder_hand_unavailable_model_drops_the_whole_hand_stack(seen):
+    """Modelo ausente derruba masker E presença: o make_hand_presence
+    real devolve None quando hand_model_available falha — o stub
+    espelha esse gate, senão o teste passaria com presença fantasma."""
     seen["masker_exists"] = False
     bundle = build_sync_pipeline(
         verify=None, config=_config(), hand_model="missing.task"
     )
     assert bundle.hand_masker is None
+    assert bundle.presence is None
+    assert bundle.presence_worker is None
+    assert seen["pipeline_ctor"]["hand_presence_worker"] is None
 
 
 def test_builder_hand_model_path_builds_the_full_stack(seen):
@@ -326,10 +335,14 @@ class _Worker:
         return self._pumped
 
 
-def test_step_sync_frame_collects_only_when_pumped():
+def test_step_sync_frame_collects_every_frame():
+    """Sem passada a colheita roda mesmo assim: a entrada do descanso
+    devolve pump()=False mas publica a limpeza do provisório
+    (_announce_rest_locked), visível só via poll_display. Gatear por
+    pumped adiava essa versão um quadro — ou a engolia no último."""
     pipe = _Pipe()
     assert step_sync_frame(pipe, _Worker(False), object()) is False
-    assert pipe.steps == 1 and pipe.collects == 0
+    assert pipe.steps == 1 and pipe.collects == 1
     pipe = _Pipe()
     assert step_sync_frame(pipe, _Worker(True), object()) is True
     assert pipe.collects == 1
