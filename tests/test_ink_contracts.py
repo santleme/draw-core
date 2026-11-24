@@ -32,6 +32,7 @@ import numpy as np
 import pytest
 
 from draw.contracts import WarpedPage
+from draw.ink import worker as worker_mod
 from draw.ink.config import InkConfig
 from draw.ink.worker import PageCleanWorker
 
@@ -286,6 +287,16 @@ def ink(regime):
     except RuntimeError:
         # Modo pump(): a thread nunca foi iniciada e stop() tenta o
         # join do mesmo jeito — sem thread para esperar, nada a fazer.
+        pass
+
+
+@pytest.fixture
+def production_ink():
+    clock, worker = _worker(PRODUCTION)
+    yield worker, clock
+    try:
+        worker.stop()
+    except RuntimeError:
         pass
 
 
@@ -668,3 +679,690 @@ def test_startup_occluder_never_seeds_nor_inks(ink, regime):
     want = _stroke_mask(scene)
     got = _confirmed(worker, generation) > 0
     assert _frac(got, want) >= 0.9
+
+
+# Contratos 8-9 (F-11): a mesma folha devolvida depois de uma queda do
+# tracker. O erro de cantos entre geracoes chega ao motor como residuo
+# de registro: o conteudo da pagina retificada volta deslocado na
+# grade. O produto deve (a) reconhecer a mesma folha, (b) devolver o
+# desenho confirmado e (c) nao engrossar nem duplicar os tracos.
+#
+# Nenhum atributo privado: new_generation(preserve_identity=True),
+# submit/pump e poll.
+# ------------------------------------------------------------------
+
+_F11_STROKES = ((50, 56, 40, 280), (90, 96, 40, 280), (130, 136, 40, 280))
+
+
+def _f11_draw_session(worker, clock, residual):
+    """Escreve tres tracos, derruba, devolve a folha deslocada de
+    `residual` px. Devolve (gen2, mascara esperada, confirmado antes)."""
+    generation = worker.new_generation()
+    scene = _Scene()
+    _passes(worker, clock, generation, scene, 4, dt=_DT_IDLE)
+    for stroke in _F11_STROKES:
+        _write_stroke(worker, clock, generation, scene, stroke)
+    before = _confirmed(worker, generation) > 0
+
+    returned = _Scene()
+    for y0, y1, x0, x1 in _F11_STROKES:
+        returned.draw((y0 + residual, y1 + residual, x0, x1))
+    gen2 = worker.new_generation(preserve_identity=True)
+    _passes(worker, clock, gen2, returned, 6, dt=_DT_IDLE)
+    return gen2, before
+
+
+@pytest.mark.parametrize("residual", [0, 2, 6])
+def test_sheet_returned_after_drop_keeps_the_drawing(ink, residual):
+    worker, clock = ink
+    gen2, before = _f11_draw_session(worker, clock, residual)
+    assert np.count_nonzero(before) > 0
+    got = _confirmed(worker, gen2) > 0
+    # (b) o desenho confirmado volta
+    assert np.count_nonzero(got & before) >= 0.95 * np.count_nonzero(before)
+    # (c) sem engrossar nem duplicar: nada alem de 1 px do que ja existia
+    assert np.count_nonzero(got & ~_dilate(before, 1)) == 0
+
+
+# ------------------------------------------------------------------
+# Contrato 9 (F-11): a folha devolvida com erro de rastreio E cobertura
+# parcial. O conteudo do warp anda `residual` px, a faixa que o quad nao
+# cobre vira mesa escura (o modelo a le como tinta se a cobertura nao
+# acompanhar a evidencia) e parte da folha segue descoberta. O desenho
+# confirmado — inclusive o traco escondido na regiao descoberta e o
+# encostado nela — volta intacto, sem fantasma e sem tinta de mesa.
+# ------------------------------------------------------------------
+
+_F11_EDGE_STROKES = (
+    (30, 36, 40, 280),
+    (90, 96, 40, 280),
+    (188, 194, 40, 280),  # encostado na regiao descoberta
+    (210, 216, 40, 280),  # escondido nela
+)
+_F11_UNCOVERED_FROM = 200  # linha da pagina onde a cobertura acaba
+
+
+@pytest.mark.parametrize("residual", [2, 6])
+def test_sheet_returned_with_tracking_error_and_partial_coverage(ink, residual):
+    worker, clock = ink
+    generation = worker.new_generation()
+    scene = _Scene()
+    _passes(worker, clock, generation, scene, 4, dt=_DT_IDLE)
+    for stroke in _F11_EDGE_STROKES:
+        _write_stroke(worker, clock, generation, scene, stroke)
+    before = _confirmed(worker, generation) > 0
+    assert np.count_nonzero(before) > 0
+
+    returned = _Scene()
+    for stroke in _F11_EDGE_STROKES:
+        returned.draw(stroke)
+    img = returned.shifted((0, 0), (0, -residual))
+    # Faixa descoberta (oclusao/sombra): mesa escura e sem cobertura.
+    uncovered = np.zeros(img.shape, dtype=bool)
+    uncovered[_F11_UNCOVERED_FROM - residual :, :] = True
+    img[uncovered] = TABLE_GRAY
+    returned.table = returned.table | uncovered
+    gen2 = worker.new_generation(preserve_identity=True)
+    for _ in range(6):
+        _feed(worker, clock, returned.frame(gen2, img), dt=_DT_IDLE, must=False)
+
+    got = _confirmed(worker, gen2) > 0
+    assert np.count_nonzero(got & before) >= 0.95 * np.count_nonzero(before)
+    assert np.count_nonzero(got & ~_dilate(before, 1)) == 0
+
+
+def test_slide_after_a_return_with_residual_keeps_the_drawing(ink):
+    """O residuo corrigido persiste na geracao: um deslize posterior (o
+    tracker acompanha, o conteudo do warp nao anda) segue limpo, como no
+    caso sem residuo. Cobre a arbitragem/follow de ancora ligadas."""
+    worker, clock = ink
+    generation = worker.new_generation()
+    scene = _Scene()
+    _passes(worker, clock, generation, scene, 4, dt=_DT_IDLE)
+    for stroke in _F11_STROKES:
+        _write_stroke(worker, clock, generation, scene, stroke)
+    before = _confirmed(worker, generation) > 0
+
+    returned = _Scene()
+    for y0, y1, x0, x1 in _F11_STROKES:
+        returned.draw((y0 + 6, y1 + 6, x0, x1))
+    gen2 = worker.new_generation(preserve_identity=True)
+    _passes(worker, clock, gen2, returned, 6, dt=_DT_IDLE)
+    returned.corners = Q0 + np.float32([5, 3])
+    for _ in range(10):
+        _feed(worker, clock, returned.frame(gen2), dt=_DT_IDLE, must=False)
+
+    got = _confirmed(worker, gen2) > 0
+    assert np.count_nonzero(got & before) >= 0.95 * np.count_nonzero(before)
+    assert np.count_nonzero(got & ~_dilate(before, 1)) == 0
+
+
+@pytest.mark.parametrize("residual", [2, 6])
+def test_new_stroke_after_a_return_with_residual_confirms_in_place(ink, residual):
+    """Depois da devolucao com erro de rastreio, tinta NOVA precisa
+    confirmar no lugar certo da grade do canvas. A evidencia nova passa
+    pela cobertura, pelo cinza do PageModel e pela pegada; este contrato e
+    sensivel ao CONJUNTO desses mapas na grade corrigida (um mutante que
+    desalinha os tres de uma vez o reprova), sem isolar qual deles. O
+    desenho antigo, restaurado, continua intacto e esconde a falha — so um
+    traco novo a expoe."""
+    worker, clock = ink
+    generation = worker.new_generation()
+    scene = _Scene()
+    _passes(worker, clock, generation, scene, 4, dt=_DT_IDLE)
+    for stroke in _F11_STROKES:
+        _write_stroke(worker, clock, generation, scene, stroke)
+    old = _stroke_mask(scene)
+
+    returned = _Scene()
+    for y0, y1, x0, x1 in _F11_STROKES:
+        returned.draw((y0 + residual, y1 + residual, x0, x1))
+    gen2 = worker.new_generation(preserve_identity=True)
+    _passes(worker, clock, gen2, returned, 6, dt=_DT_IDLE)
+
+    new = (170, 176, 40, 280)  # lugar vazio da pagina, na grade do canvas
+    truth = _Scene()
+    truth.draw(new)
+    want = _stroke_mask(truth)
+    # A folha anda `residual` px na grade do warp: o traco novo tambem.
+    _write_stroke(
+        worker, clock, gen2, returned, (170 + residual, 176 + residual, 40, 280)
+    )
+    got = _confirmed(worker, gen2) > 0
+    assert _frac(got, want) >= 0.9
+    assert _beyond(got, want | old, 1) == 0
+
+
+@pytest.mark.parametrize(
+    "table_shift",
+    [None, 9, 11],  # sem mesa (controle) e com banda escura fora da folha
+)
+def test_dark_uncovered_band_does_not_steer_the_residual(ink, table_shift):
+    worker, clock = ink
+    generation = worker.new_generation()
+    scene = _Scene()
+    _passes(worker, clock, generation, scene, 4, dt=_DT_IDLE)
+    for stroke in _F11_STROKES:
+        _write_stroke(worker, clock, generation, scene, stroke)
+    drawn = _stroke_mask(scene)
+    returned = _Scene()
+    for y0, y1, x0, x1 in _F11_STROKES:
+        returned.draw((y0 + 6, y1 + 6, x0, x1))
+        if table_shift:  # banda escura fora da folha, sem cobertura
+            returned.table[y0 + table_shift : y1 + table_shift + 6, x0:x1] = True
+    gen2 = worker.new_generation(preserve_identity=True)
+    _passes(worker, clock, gen2, returned, 8, dt=_DT_IDLE)
+
+    got = _confirmed(worker, gen2) > 0
+    assert _frac(got, drawn) >= 0.95
+    assert _beyond(got, drawn, 1) == 0
+
+
+def _return_with_residual(worker, clock, residual, strokes=_F11_STROKES):
+    generation = worker.new_generation()
+    scene = _Scene()
+    _passes(worker, clock, generation, scene, 4, dt=_DT_IDLE)
+    for stroke in strokes:
+        _write_stroke(worker, clock, generation, scene, stroke)
+    drawn = _stroke_mask(scene)
+    returned = _Scene()
+    for y0, y1, x0, x1 in strokes:
+        returned.draw((y0 + residual, y1 + residual, x0, x1))
+    gen2 = worker.new_generation(preserve_identity=True)
+    _passes(worker, clock, gen2, returned, 6, dt=_DT_IDLE)
+    return gen2, drawn, returned
+
+
+@pytest.mark.parametrize("residual", [0, 6])
+def test_confirmed_ink_after_residual_stays_protected_from_photo_removal(
+    ink, monkeypatch, residual
+):
+    """A residual must align the photo guard's confirmed-ink witness too.
+
+    The returned page keeps the original marks at the same position or six
+    pixels lower in the warp. After identity recovery, force the model to miss
+    those still-dark pixels. The confirmed-canvas mask must land on the same
+    physical pixels in the photometric guard, or the guard can call them paper
+    and authorize removal.
+    """
+    worker, clock = ink
+    generation, drawn, returned = _return_with_residual(worker, clock, residual)
+    assert _frac(_confirmed(worker, generation) > 0, drawn) >= 0.95
+
+    observed_confirmed_masks = []
+    observed_guard_calls = []
+    observe = worker_mod.occlusion.PaperExposureGuard.observe
+
+    def capture_confirmed_mask(guard, *args, confirmed_ink=None, **kwargs):
+        observed_guard_calls.append(confirmed_ink is not None)
+        if confirmed_ink is not None:
+            observed_confirmed_masks.append(np.asarray(confirmed_ink).copy())
+        return observe(guard, *args, confirmed_ink=confirmed_ink, **kwargs)
+
+    monkeypatch.setattr(
+        worker_mod.occlusion.PaperExposureGuard, "observe", capture_confirmed_mask
+    )
+
+    original_model = worker._page_clean
+
+    class _MissReturnedInk:
+        def ink_prob(self, warped):
+            probability = original_model.ink_prob(warped)
+            for y0, y1, x0, x1 in _F11_STROKES:
+                probability[y0 + residual : y1 + residual, x0:x1] = 0.05
+            return probability
+
+    worker._page_clean = _MissReturnedInk()
+    for _ in range(8):
+        # A reported movement keeps the injected hand signal from entering
+        # its full-rest state during this deterministic guard probe.
+        worker.set_hand_presence(True, moved=True)
+        _passes(worker, clock, generation, returned, 1, dt=_DT_ACTIVE, must=True)
+    worker.set_hand_presence(False)
+    _passes(worker, clock, generation, returned, 10, dt=_DT_IDLE)
+
+    expected_confirmed = np.zeros((H, W), dtype=bool)
+    for y0, y1, x0, x1 in _F11_STROKES:
+        expected_confirmed[y0 + residual : y1 + residual, x0:x1] = True
+    assert observed_guard_calls
+    assert observed_confirmed_masks
+    assert _frac(observed_confirmed_masks[-1], expected_confirmed) >= 0.95
+
+    got = _confirmed(worker, generation) > 0
+    assert _frac(got, drawn) >= 0.95
+    assert _beyond(got, drawn, 1) == 0
+
+
+@pytest.mark.parametrize(
+    "residual",
+    [6, 9, 12],  # 6 funcionava; 9 e 12 passam do limite de 8 px do portao
+)
+def test_eraser_removes_a_stroke_after_a_return_with_residual(ink, residual):
+    worker, clock = ink
+    stroke_a, stroke_b = (90, 96, 60, 260), (150, 156, 60, 200)
+    gen2, drawn, returned = _return_with_residual(
+        worker, clock, residual, (stroke_a, stroke_b)
+    )
+    want_a = np.zeros_like(drawn)
+    want_a[stroke_a[0] : stroke_a[1], stroke_a[2] : stroke_a[3]] = True
+    y0, y1, x0, x1 = stroke_a
+    cut = x0 + (x1 - x0) // 3
+    ya, yb = y0 + residual, y1 + residual
+    returned.hand_on((ya, yb, x0, x1))
+    worker.set_hand_presence(True, moved=True)
+    _passes(worker, clock, gen2, returned, 2)
+    returned.page[ya:yb, x0:cut] = PAPER
+    returned.hand_on((ya, yb, x0, cut))
+    _passes(worker, clock, gen2, returned, 2)
+    returned.hand_off()
+    worker.set_hand_presence(False)
+    _passes(worker, clock, gen2, returned, 8, dt=_DT_IDLE)
+
+    got = _confirmed(worker, gen2) > 0
+    erased = want_a.copy()
+    erased[:, cut:] = False
+    assert np.count_nonzero(got & erased) <= 0.05 * np.count_nonzero(erased)
+    assert _frac(got, drawn & ~erased) >= 0.90  # a testemunha segue confirmada
+
+
+@pytest.mark.parametrize("slide", [(14, 0), (0, 14)], ids=["x", "y"])
+@pytest.mark.parametrize("residual", [0, 2, 6])
+def test_new_stroke_after_a_slide_that_follows_a_return_with_residual(
+    ink, residual, slide
+):
+    worker, clock = ink
+    gen2, drawn, returned = _return_with_residual(worker, clock, residual)
+    returned.corners = Q0 + np.float32(slide)
+    worker.set_hand_presence(True, moved=True)
+    for _ in range(9):
+        _feed(worker, clock, returned.frame(gen2), dt=_DT_ACTIVE, must=False)
+    worker.set_hand_presence(False)
+    _passes(worker, clock, gen2, returned, 4, dt=_DT_IDLE)
+
+    new = (170, 176, 40, 280)
+    truth = _Scene()
+    truth.draw(new)
+    want = _stroke_mask(truth)
+    _write_stroke(
+        worker, clock, gen2, returned, (170 + residual, 176 + residual, 40, 280)
+    )
+    got = _confirmed(worker, gen2) > 0
+    assert _frac(got, want) >= 0.9
+    assert _beyond(got, want | drawn, 1) == 0
+
+
+@pytest.mark.parametrize("residual", [0, 6])
+def test_dark_band_and_residual_land_normally_on_a_vertical_slide(ink, residual):
+    """A banda escura deve mudar a evidência, não a ordem das hipóteses de
+    pose. A nova tinta é coberta por uma assimetria de coverage já existente;
+    este contrato fica restrito ao veredito, à pose e à retenção do canvas."""
+    worker, clock = ink
+    gen2, drawn, returned = _return_with_residual(worker, clock, residual)
+    for y0, y1, x0, x1 in _F11_STROKES:
+        returned.table[y0 + 11 : y1 + 17, x0:x1] = True
+    before = worker.anchor_corners
+    returned.corners = Q0 + np.float32([0, 14])
+    worker.set_hand_presence(True, moved=True)
+    for _ in range(9):
+        _feed(worker, clock, returned.frame(gen2), dt=_DT_ACTIVE, must=False)
+    worker.set_hand_presence(False)
+    _passes(worker, clock, gen2, returned, 4, dt=_DT_IDLE)
+
+    verdicts = {
+        record.get("arb_verdict") for record in worker.telemetry_snapshot()["records"]
+    }
+    assert "landing" in verdicts
+    assert "landing_rotated" not in verdicts
+    np.testing.assert_allclose(
+        worker.anchor_corners, before + np.float32([0, 14]), atol=1.5
+    )
+    got = _confirmed(worker, gen2) > 0
+    assert _frac(got, drawn) >= 0.95
+    assert _beyond(got, drawn, 1) == 0
+
+
+# ------------------------------------------------------------------
+# Folha movida DE VERDADE entre as capturas e acompanhada pelo tracker
+# (review do #180): o warp ja esta alinhado com o desenho, mas o registro
+# (que supoe a folha parada) gera uma correcao diferente de zero. Essa
+# correcao nao pode (a) manter o evento de arbitragem aberto para sempre
+# nem (b) duplicar o desenho num deslize posterior.
+# ------------------------------------------------------------------
+
+_MOVED_A, _MOVED_B = (90, 96, 60, 260), (150, 156, 60, 200)
+
+
+def _return_moved_sheet(worker, clock, quad_delta):
+    generation = worker.new_generation()
+    scene = _Scene()
+    _passes(worker, clock, generation, scene, 4, dt=_DT_IDLE)
+    for stroke in (_MOVED_A, _MOVED_B):
+        _write_stroke(worker, clock, generation, scene, stroke)
+    drawn = _stroke_mask(scene)
+    returned = _Scene()
+    for stroke in (_MOVED_A, _MOVED_B):
+        returned.draw(stroke)  # o warp segue alinhado com o desenho
+    returned.corners = Q0 + np.float32(quad_delta)  # mas a folha andou
+    gen2 = worker.new_generation(preserve_identity=True)
+    _passes(worker, clock, gen2, returned, 6, dt=_DT_IDLE)
+    return gen2, drawn, returned
+
+
+@pytest.mark.parametrize("quad_delta", [(0, 10), (12, 6), (-12, -6)])
+def test_eraser_works_after_a_physically_moved_sheet_returns(ink, quad_delta):
+    worker, clock = ink
+    gen2, drawn, returned = _return_moved_sheet(worker, clock, quad_delta)
+    y0, y1, x0, x1 = _MOVED_A
+    cut = x0 + (x1 - x0) // 3
+    returned.hand_on(_MOVED_A)
+    worker.set_hand_presence(True, moved=True)
+    _passes(worker, clock, gen2, returned, 2)
+    returned.page[y0:y1, x0:cut] = PAPER
+    returned.hand_on((y0, y1, x0, cut))
+    _passes(worker, clock, gen2, returned, 2)
+    returned.hand_off()
+    worker.set_hand_presence(False)
+    _passes(worker, clock, gen2, returned, 8, dt=_DT_IDLE)
+
+    got = _confirmed(worker, gen2) > 0
+    erased = np.zeros_like(drawn)
+    erased[y0:y1, x0:cut] = True
+    assert np.count_nonzero(got & erased) <= 0.05 * np.count_nonzero(erased)
+    assert _frac(got, drawn & ~erased) >= 0.90  # a testemunha segue confirmada
+
+
+# Barras horizontais nao determinam x: o estimador se abstem em deslocamentos so
+# em x, entao os casos carregam componente em y.
+@pytest.mark.parametrize("quad_delta", [(5, 3), (-5, -3), (4, 8)])
+def test_slide_after_a_physically_moved_sheet_does_not_duplicate(ink, quad_delta):
+    worker, clock = ink
+    gen2, drawn, returned = _return_moved_sheet(worker, clock, quad_delta)
+    slide = np.float32([14 if quad_delta[0] < 0 else -14, 0])
+    returned.corners = Q0 + np.float32(quad_delta) + slide
+    worker.set_hand_presence(True, moved=True)
+    for _ in range(10):
+        _feed(worker, clock, returned.frame(gen2), dt=_DT_ACTIVE, must=False)
+    worker.set_hand_presence(False)
+    _passes(worker, clock, gen2, returned, 4, dt=_DT_IDLE)
+
+    got = _confirmed(worker, gen2) > 0
+    assert _frac(got, drawn) >= 0.95
+    assert _beyond(got, drawn, 1) == 0
+
+
+def test_residual_is_retired_after_a_confirmed_raw_page_landing(ink):
+    """A residual from recovery belongs to the old anchor only.
+
+    The sheet returns 6 page pixels lower while the tracker follows it;
+    the page warp still contains the original drawing. Recovery estimates
+    (0, -6). After a further 12 px physical slide, anchor arbitration must
+    land on the raw page hypothesis. That commit must retire the old residual
+    before re-registering the landing pass and before later passes can vote.
+    """
+    worker, clock = ink
+    strokes = ((45, 57, 40, 280), (85, 97, 55, 265), (125, 137, 70, 250))
+    generation = worker.new_generation()
+    scene = _Scene()
+    _passes(worker, clock, generation, scene, 4, dt=_DT_IDLE, must=True)
+    for stroke in strokes:
+        _write_stroke(worker, clock, generation, scene, stroke)
+    drawn = _confirmed(worker, generation) > 0
+
+    returned = _Scene()
+    for stroke in strokes:
+        returned.draw(stroke)
+    returned.corners = Q0 + np.float32([0, 6])
+    returned_generation = worker.new_generation(preserve_identity=True)
+    _passes(worker, clock, returned_generation, returned, 8, dt=_DT_IDLE)
+
+    return_records = worker.telemetry_snapshot()["records"]
+    residual_estimates = [
+        record
+        for record in return_records
+        if record.get("identity_residual_estimated_dy") is not None
+    ]
+    assert residual_estimates
+    assert residual_estimates[-1]["identity_residual_estimated_dy"] == -6
+    assert worker.telemetry_snapshot()["page_identity_events"][-1]["decision"] == (
+        "same_page"
+    )
+
+    # The tracker follows a second, settled physical slide; the raw warp
+    # remains page-aligned. The 12 px step clears the 8 px arbitration gate.
+    returned.corners = Q0 + np.float32([0, 18])
+    worker.set_hand_presence(True, moved=True)
+    for _ in range(10):
+        _feed(worker, clock, returned.frame(returned_generation), must=False)
+    worker.set_hand_presence(False)
+    _passes(
+        worker,
+        clock,
+        returned_generation,
+        returned,
+        5,
+        dt=_DT_IDLE,
+    )
+
+    snapshot = worker.telemetry_snapshot()
+    events = snapshot["anchor_arbitration_events"]
+    assert events and events[-1]["verdict"] == "landing"
+    retirements = [
+        record
+        for record in snapshot["records"]
+        if record.get("identity_residual_retired_on_anchor_landing")
+    ]
+    assert retirements
+    assert retirements[-1]["identity_residual_retired_shift"] == [0, -6]
+    after_landing = _confirmed(worker, returned_generation) > 0
+    assert _frac(after_landing, drawn) >= 0.95
+    assert _beyond(after_landing, drawn, 1) == 0
+
+    # Also exercise a mark written after the anchor change: current and
+    # subsequent passes must use the new transform, without a shifted copy.
+    new_stroke = (170, 176, 40, 280)
+    expected = _Scene()
+    for stroke in strokes:
+        expected.draw(stroke)
+    expected.draw(new_stroke)
+    _write_stroke(worker, clock, returned_generation, returned, new_stroke)
+    final = _confirmed(worker, returned_generation) > 0
+    expected_mask = _stroke_mask(expected)
+    assert _frac(final, expected_mask) >= 0.95
+    assert _beyond(final, expected_mask, 1) == 0
+
+
+def test_default_landing_with_stale_residual_abstains_without_evidence(ink):
+    """An empty observation cannot decide whether the old residual is needed."""
+    worker, clock = ink
+    generation, drawn, returned = _return_with_residual(worker, clock, 6)
+    _passes(worker, clock, generation, returned, 4, dt=_DT_IDLE)
+    confirmed_before = _confirmed(worker, generation).copy()
+    anchor_before = worker.anchor_corners.copy()
+
+    blank = _Scene()
+    blank.corners = Q0 + np.float32([0, 14])
+    blank.hand[:] = True
+    worker.set_hand_presence(True, moved=True)
+    for _ in range(10):
+        _feed(worker, clock, blank.frame(generation), dt=_DT_ACTIVE, must=False)
+    worker.set_hand_presence(False)
+    _passes(worker, clock, generation, blank, 4, dt=_DT_IDLE)
+
+    telemetry = worker.telemetry_snapshot()
+    event = telemetry["anchor_arbitration_events"][-1]
+    assert event["verdict"] == "indeterminate"
+    assert event["action"] is False
+    assert event["identity_residual_pending"] is True
+    assert event["score_page"] == 0.0
+    assert event["score_page_without_residual"] == 0.0
+    assert event["score_camera"] == 0.0
+    np.testing.assert_array_equal(worker.anchor_corners, anchor_before)
+    np.testing.assert_array_equal(_confirmed(worker, generation), confirmed_before)
+
+    # Once the old marks become observable again, the same page hypothesis
+    # resolves the hold and keeps the residual because it aligns the canvas.
+    returned.corners = Q0 + np.float32([0, 14])
+    worker.set_hand_presence(True, moved=True)
+    for _ in range(10):
+        _feed(worker, clock, returned.frame(generation), dt=_DT_ACTIVE, must=False)
+    worker.set_hand_presence(False)
+    _passes(worker, clock, generation, returned, 4, dt=_DT_IDLE)
+
+    telemetry = worker.telemetry_snapshot()
+    resolved = telemetry["anchor_arbitration_events"][-1]
+    assert resolved["verdict"] == "landing"
+    assert resolved["identity_residual_pending"] is False
+    np.testing.assert_allclose(
+        worker.anchor_corners, Q0 + np.float32([0, 14]), atol=1.5
+    )
+    final = _confirmed(worker, generation) > 0
+    assert _frac(final, drawn) >= 0.95
+    assert _beyond(final, drawn, 1) == 0
+    assert telemetry["records"][-1]["arb_hold_reason"] is None
+    assert telemetry["records"][-1]["identity_residual_shift"] == [0, -6]
+
+
+def test_pending_residual_can_resolve_when_pose_returns_inside_migration_gate(ink):
+    """A pending residual must not keep the worker abstaining after recovery."""
+    worker, clock = ink
+    generation, drawn, returned = _return_with_residual(worker, clock, 6)
+    _passes(worker, clock, generation, returned, 4, dt=_DT_IDLE)
+
+    blank = _Scene()
+    blank.corners = Q0 + np.float32([0, 14])
+    blank.hand[:] = True
+    worker.set_hand_presence(True, moved=True)
+    for _ in range(10):
+        _feed(worker, clock, blank.frame(generation), dt=_DT_ACTIVE, must=False)
+    worker.set_hand_presence(False)
+    _passes(worker, clock, generation, blank, 4, dt=_DT_IDLE)
+    assert worker.telemetry_snapshot()["records"][-1]["arb_hold_reason"] == (
+        "identity_residual_pending"
+    )
+
+    # The same page returns at its original pose, so no new migration event
+    # opens. Visible matching ink should resolve the residual and resume voting.
+    returned.corners = Q0.copy()
+    worker.set_hand_presence(True, moved=True)
+    _passes(worker, clock, generation, returned, 4, dt=_DT_ACTIVE)
+    worker.set_hand_presence(False)
+    _passes(worker, clock, generation, returned, 8, dt=_DT_IDLE)
+
+    record = worker.telemetry_snapshot()["records"][-1]
+    assert record["arb_hold_reason"] is None
+    assert record["arb_abstained"] is False
+    assert record["follow_abstained"] is False
+
+    # Recovery must preserve existing ink at its page coordinates and resume
+    # confirming new ink. A cleared hold alone would not catch a lost or
+    # double-applied residual in the published canvas.
+    before_new_stroke = _confirmed(worker, generation) > 0
+    assert _frac(before_new_stroke, drawn) >= 0.95
+    assert _beyond(before_new_stroke, drawn, 1) == 0
+    assert any(
+        item.get("identity_residual_pending_resolution") == "retained"
+        for item in worker.telemetry_snapshot()["records"]
+    )
+
+    new = (170, 176, 40, 280)
+    truth = _Scene()
+    truth.draw(new)
+    want_new = _stroke_mask(truth)
+    residual = 6
+    _write_stroke(
+        worker,
+        clock,
+        generation,
+        returned,
+        (new[0] + residual, new[1] + residual, new[2], new[3]),
+    )
+    final = _confirmed(worker, generation) > 0
+    assert _frac(final, want_new) >= 0.9
+    assert _beyond(final, want_new | drawn, 1) == 0
+
+
+def test_pending_residual_hold_clears_when_residual_disappears_without_event(
+    monkeypatch,
+):
+    """A zero residual closes its hold even when the pose opens no new event."""
+    worker = PageCleanWorker(_ScriptInk())
+    worker._anchor_arbitration_hold_reason = "identity_residual_pending"
+    monkeypatch.setattr(
+        worker, "_anchor_arbitration_step", lambda *_a: ("closed", None)
+    )
+    monkeypatch.setattr(
+        worker, "_anchor_follow_step", lambda *_a, **_k: ("closed", None)
+    )
+
+    p = worker_mod._Pass()
+    p.generation = 1
+    p.corners = Q0.copy()
+    p.prob = np.ones((H, W), dtype=np.float32)
+    p.camera_prob = p.prob
+    p.identity_owned = False
+    p.identity_residual = (0, 0)
+    p.camera_denominator_mass = float(H * W)
+
+    worker._pass_anchor_gates(p)
+
+    assert worker._anchor_arbitration_hold_reason is None
+    assert p.reg_info["arb_hold_resolved"] == "residual_cleared"
+    assert p.arbitration_abstain is False
+    assert p.follow_abstain is False
+
+
+@pytest.mark.parametrize("rotation_k", [1, 2, 3])
+@pytest.mark.parametrize("warp_bias_persists", [False, True])
+def test_rotated_landing_compares_residual_with_the_winning_hypothesis(
+    production_ink, rotation_k, warp_bias_persists
+):
+    worker, clock = production_ink
+    strokes = (
+        (35, 105, 35, 95),
+        (50, 80, 165, 225),
+        (130, 190, 60, 95),
+        (145, 205, 180, 250),
+    )
+    generation, _drawn, returned = _return_with_residual(worker, clock, 6, strokes)
+    if warp_bias_persists:
+        page = returned.page.copy()
+    else:
+        page = np.full((H, W), PAPER, dtype=np.float32)
+        for y0, y1, x0, x1 in strokes:
+            page[y0:y1, x0:x1] = INK
+
+    page = np.rot90(page, rotation_k)
+    if rotation_k in (1, 3):
+        page = cv2.resize(page, (W, H), interpolation=cv2.INTER_LINEAR)
+    returned.page = page
+    returned.corners = Q0 + np.float32([15, 0])
+
+    worker.set_hand_presence(True, moved=True)
+    for _ in range(9):
+        _feed(worker, clock, returned.frame(generation), dt=_DT_ACTIVE, must=False)
+    worker.set_hand_presence(False)
+    _passes(worker, clock, generation, returned, 4, dt=_DT_IDLE)
+
+    telemetry = worker.telemetry_snapshot()
+    event = telemetry["anchor_arbitration_events"][-1]
+    assert event["verdict"] == "landing_rotated"
+    assert event["rotation_k"] == rotation_k
+    with_residual = event["scores_cyclic"][rotation_k]
+    without_residual = event["scores_cyclic_without_residual"][rotation_k - 1]
+    if warp_bias_persists:
+        assert with_residual > without_residual
+        assert not any(
+            record.get("identity_residual_retired_on_anchor_transition")
+            for record in telemetry["records"]
+        )
+    else:
+        assert without_residual > with_residual
+        retirements = [
+            record
+            for record in telemetry["records"]
+            if record.get("identity_residual_retired_on_anchor_transition")
+        ]
+        assert retirements
+        assert retirements[-1]["identity_residual_retirement_hypothesis"] == (
+            f"cyclic_{rotation_k}"
+        )

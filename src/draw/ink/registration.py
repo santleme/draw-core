@@ -81,12 +81,331 @@ def _registration_matrix(anchor_corners, corners, shape):
     return anchor @ np.linalg.inv(current)
 
 
+def _shift_anchor_corners(anchor_corners, dx, dy, shape):
+    """Quad de ancora equivalente a deslocar a grade em (dx, dy) px.
+
+    Devolve cantos Q' tais que _registration_matrix(Q', c, shape) ==
+    T(dx, dy) @ _registration_matrix(anchor_corners, c, shape): toda
+    evidencia registrada por esta ancora (prob, visibilidade, pegada,
+    cobertura, cinza/BGR, papel) chega na grade ja deslocada, sem que
+    cada consumidor precise saber do residuo.
+    """
+    height, width = shape
+    page = _corners_page_matrix(anchor_corners, width, height)
+    rect = np.array(
+        [(0, 0), (width, 0), (width, height), (0, height)], dtype=np.float32
+    ) - np.float32([dx, dy])
+    moved = cv2.perspectiveTransform(rect[None], np.linalg.inv(page))[0]
+    return moved.astype(np.float32)
+
+
+def _translate_grid(arr, dx, dy):
+    """Desloca o conteudo de (dx, dy) px inteiros; o que entra vira zero."""
+    if dx == 0 and dy == 0:
+        return arr
+    h, w = arr.shape[:2]
+    out = np.zeros_like(arr)
+    y0, y1 = max(0, dy), min(h, h + dy)
+    x0, x1 = max(0, dx), min(w, w + dx)
+    if y1 > y0 and x1 > x0:
+        out[y0:y1, x0:x1] = arr[y0 - dy : y1 - dy, x0 - dx : x1 - dx]
+    return out
+
+
 def _registration_is_identity(matrix):
     """True se a matriz nao move pixel nenhum (tol sub-pixel)."""
     return bool(
         np.max(np.abs(matrix - np.eye(3, dtype=np.float64)))
         < _REGISTRATION_IDENTITY_TOL
     )
+
+
+def _normalize_homography_scale(matrix):
+    """Canonicalize a projective matrix without changing its mapping."""
+    matrix = np.asarray(matrix, dtype=np.float64)
+    if matrix.shape != (3, 3) or not np.isfinite(matrix).all():
+        return None
+    flat = matrix.reshape(-1)
+    scale = float(flat[int(np.argmax(np.abs(flat)))])
+    if scale == 0.0:
+        return None
+    return matrix / scale
+
+
+def _padded_warp_geometry(matrix, shape, *, margin=1):
+    """Geometria que contém o suporte bilinear e a grade de destino.
+
+    `warpPerspective` descarta a parte projetada fora de `dsize`. Para medir
+    a massa sem esse corte, projetamos o suporte da interpolacao linear
+    `[-1, W] x [-1, H]`, deslocamos a matriz por uma origem inteira e
+    ampliamos a saida. A grade de destino original tambem fica contida, para
+    aplicar mascaras como o canvas confirmado.
+    """
+    height, width = shape[:2]
+    if height <= 0 or width <= 0 or margin < 0:
+        return None
+
+    # Homographies are unchanged by any nonzero scalar. Canonicalize the
+    # largest-magnitude coefficient (including its sign) before determinant,
+    # projection, and OpenCV interpolation; otherwise equivalent matrices can
+    # cross the singularity cutoff or round differently inside warpPerspective.
+    matrix = _normalize_homography_scale(matrix)
+    if matrix is None:
+        return None
+    determinant_sign, _log_abs_determinant = np.linalg.slogdet(matrix)
+    if determinant_sign == 0.0:
+        return None
+
+    corners = np.array(
+        [
+            [-1.0, -1.0, 1.0],
+            [float(width), -1.0, 1.0],
+            [float(width), float(height), 1.0],
+            [-1.0, float(height), 1.0],
+        ],
+        dtype=np.float64,
+    )
+    projected = corners @ matrix.T
+    denominator = projected[:, 2]
+    if (
+        not np.isfinite(projected).all()
+        or np.any(np.abs(denominator) < 1e-9)
+        or (np.min(denominator) < 0.0 < np.max(denominator))
+    ):
+        # A projective horizon crosses the source rectangle; finite padded
+        # bounds cannot represent that mapping safely.
+        return None
+    xy = projected[:, :2] / denominator[:, None]
+    if not np.isfinite(xy).all():
+        return None
+
+    x0 = int(np.floor(min(0.0, float(np.min(xy[:, 0]))))) - margin
+    y0 = int(np.floor(min(0.0, float(np.min(xy[:, 1]))))) - margin
+    x1 = int(np.ceil(max(width - 1.0, float(np.max(xy[:, 0]))))) + margin
+    y1 = int(np.ceil(max(height - 1.0, float(np.max(xy[:, 1]))))) + margin
+    out_width, out_height = x1 - x0 + 1, y1 - y0 + 1
+    if (
+        out_width <= 0
+        or out_height <= 0
+        or out_width * out_height > 32 * height * width
+    ):
+        return None
+
+    offset = np.array(
+        [[1.0, 0.0, -x0], [0.0, 1.0, -y0], [0.0, 0.0, 1.0]],
+        dtype=np.float64,
+    )
+    return (x0, y0), (out_height, out_width), offset @ matrix
+
+
+def _warp_probability_padded(prob, matrix, *, source_mask=None):
+    """Warp probability without clipping projected mass at the page border.
+
+    Returns `(warped, origin, padded_matrix)`, where `origin` is the padded
+    canvas origin in the ordinary destination grid. A source mask is applied
+    before interpolation, matching the registration path's visibility gate.
+    Returns `None` for malformed or unbounded geometry.
+    """
+    source = np.asarray(prob, dtype=np.float32)
+    if source.ndim != 2:
+        return None
+    if source_mask is not None:
+        mask = np.asarray(source_mask, dtype=bool)
+        if mask.shape != source.shape:
+            return None
+        source = np.where(mask, source, 0.0).astype(np.float32, copy=False)
+
+    geometry = _padded_warp_geometry(matrix, source.shape)
+    if geometry is None:
+        return None
+    origin, out_shape, padded_matrix = geometry
+    try:
+        warped = cv2.warpPerspective(
+            source,
+            padded_matrix,
+            (out_shape[1], out_shape[0]),
+            flags=cv2.INTER_LINEAR,
+            borderValue=0.0,
+        )
+    except cv2.error:
+        return None
+    return warped, origin, padded_matrix
+
+
+def _sum_probability_warp_padded(
+    prob,
+    matrix,
+    *,
+    source_mask=None,
+    output_mask=None,
+    output_mask_matrix=None,
+    output_masks=(),
+    destination_mask=None,
+    tile_size=1024,
+):
+    """Sum a complete padded warp in bounded output tiles.
+
+    ``output_mask_matrix`` maps ``output_mask`` coordinates into the ordinary
+    destination grid. ``destination_mask`` already lives in that grid and is
+    embedded into the padded output by ``origin``. ``output_masks`` contains
+    additional ``(mask, matrix)`` pairs that are intersected after that
+    destination-mask exception. Tiling preserves the bilinear samples of
+    :func:`_warp_probability_padded` without allocating a canvas as large as
+    the full projected support.
+    """
+    source = np.asarray(prob, dtype=np.float32)
+    if source.ndim != 2 or tile_size <= 0:
+        return None
+    height, width = source.shape
+    if source_mask is not None:
+        source_mask = np.asarray(source_mask, dtype=bool)
+        if source_mask.shape != source.shape:
+            return None
+        source = np.where(source_mask, source, 0.0).astype(np.float32, copy=False)
+
+    geometry = _padded_warp_geometry(matrix, source.shape)
+    if geometry is None:
+        return None
+    origin, out_shape, padded_matrix = geometry
+    if output_mask is not None:
+        output_mask = np.asarray(output_mask, dtype=np.uint8)
+        if output_mask.ndim != 2:
+            return None
+        mask_matrix = matrix if output_mask_matrix is None else output_mask_matrix
+        mask_matrix = _normalize_homography_scale(mask_matrix)
+        if mask_matrix is None:
+            return None
+        padding = np.array(
+            [
+                [1.0, 0.0, -origin[0]],
+                [0.0, 1.0, -origin[1]],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=np.float64,
+        )
+        padded_mask_matrix = padding @ mask_matrix
+    else:
+        output_mask = None
+        padded_mask_matrix = None
+
+    padded_output_masks = []
+    try:
+        for mask, mask_matrix in output_masks:
+            mask = np.asarray(mask, dtype=np.uint8)
+            if mask.ndim != 2:
+                return None
+            mask_matrix = matrix if mask_matrix is None else mask_matrix
+            mask_matrix = _normalize_homography_scale(mask_matrix)
+            if mask_matrix is None:
+                return None
+            padding = np.array(
+                [
+                    [1.0, 0.0, -origin[0]],
+                    [0.0, 1.0, -origin[1]],
+                    [0.0, 0.0, 1.0],
+                ],
+                dtype=np.float64,
+            )
+            padded_output_masks.append((mask, padding @ mask_matrix))
+    except (TypeError, ValueError):
+        return None
+
+    if destination_mask is not None:
+        destination_mask = np.asarray(destination_mask, dtype=bool)
+        if destination_mask.shape != source.shape:
+            return None
+
+    out_height, out_width = out_shape
+    mass = 0.0
+    try:
+        for y in range(0, out_height, tile_size):
+            tile_height = min(tile_size, out_height - y)
+            for x in range(0, out_width, tile_size):
+                tile_width = min(tile_size, out_width - x)
+                tile_offset = np.array(
+                    [
+                        [1.0, 0.0, -float(x)],
+                        [0.0, 1.0, -float(y)],
+                        [0.0, 0.0, 1.0],
+                    ],
+                    dtype=np.float64,
+                )
+                tile_matrix = tile_offset @ padded_matrix
+                size = (tile_width, tile_height)
+                warped = cv2.warpPerspective(
+                    source,
+                    tile_matrix,
+                    size,
+                    flags=cv2.INTER_LINEAR,
+                    borderValue=0.0,
+                )
+                allowed = None
+                if output_mask is not None:
+                    output_mask_tile = cv2.warpPerspective(
+                        output_mask,
+                        tile_offset @ padded_mask_matrix,
+                        size,
+                        flags=cv2.INTER_NEAREST,
+                        borderValue=0,
+                    )
+                    allowed = output_mask_tile > 0
+
+                if destination_mask is not None:
+                    destination_x0 = x + origin[0]
+                    destination_y0 = y + origin[1]
+                    source_x0 = max(0, destination_x0)
+                    source_y0 = max(0, destination_y0)
+                    source_x1 = min(width, destination_x0 + tile_width)
+                    source_y1 = min(height, destination_y0 + tile_height)
+                    if source_x1 > source_x0 and source_y1 > source_y0:
+                        if allowed is None:
+                            allowed = np.zeros((tile_height, tile_width), dtype=bool)
+                        tile_x0 = source_x0 - destination_x0
+                        tile_y0 = source_y0 - destination_y0
+                        tile_x1 = tile_x0 + source_x1 - source_x0
+                        tile_y1 = tile_y0 + source_y1 - source_y0
+                        allowed[tile_y0:tile_y1, tile_x0:tile_x1] |= destination_mask[
+                            source_y0:source_y1, source_x0:source_x1
+                        ]
+
+                for mask, mask_matrix in padded_output_masks:
+                    mask_tile = cv2.warpPerspective(
+                        mask,
+                        tile_offset @ mask_matrix,
+                        size,
+                        flags=cv2.INTER_NEAREST,
+                        borderValue=0,
+                    )
+                    if allowed is None:
+                        allowed = mask_tile > 0
+                    else:
+                        allowed &= mask_tile > 0
+
+                if allowed is None:
+                    mass += float(np.sum(warped, dtype=np.float64))
+                else:
+                    mass += float(np.sum(warped, where=allowed, dtype=np.float64))
+    except cv2.error:
+        return None
+    return mass if np.isfinite(mass) else None
+
+
+def _embed_destination_mask(mask, origin, output_shape):
+    """Place an ordinary destination-grid mask in a padded warp canvas."""
+    mask = np.asarray(mask, dtype=bool)
+    output = np.zeros(output_shape, dtype=bool)
+    x0, y0 = origin
+    offset_x, offset_y = -x0, -y0
+    height, width = mask.shape
+    if (
+        offset_x < 0
+        or offset_y < 0
+        or offset_x + width > output.shape[1]
+        or offset_y + height > output.shape[0]
+    ):
+        return None
+    output[offset_y : offset_y + height, offset_x : offset_x + width] = mask
+    return output
 
 
 # Protocolo inicial F-10: ausência forte, visível e persistente, com
