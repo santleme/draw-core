@@ -976,6 +976,7 @@ def _resize_canvas(image, width, height, version):
 def compose_view(
     camera_img,
     canvas_img,
+    *,
     size=(_BASE_W, _BASE_H),
     rec_on=True,
     buttons=None,
