@@ -76,7 +76,8 @@ def frame_sort_key(path):
 
 
 def clip_frames(clip_dir) -> list[Path]:
-    """Quadros ``f*.png`` do nivel raiz, em ordem numerica de sufixo.
+    """Quadros ``f*.png`` do nivel raiz: ``f<digitos>`` em ordem
+    numerica, demais nomes ao fim por nome.
 
     Inventario unico do clipe: a contagem de ``count_frames``, o hash
     do manifesto e o replay do corpus compartilham esta lista — o que
@@ -86,6 +87,11 @@ def clip_frames(clip_dir) -> list[Path]:
     sufixos sao 0..n-1 continuos; ``validate_clip`` aponta a lacuna
     que faria as duas leituras divergir.
 
+    A ordem numerica vale só para o padrão da captura (``f<digitos>``):
+    um ``f_backup0.png`` terminaria em dígito e cairia na posição 0,
+    deslocando todos os rótulos posicionais — fora do padrão ele vai
+    ao fim, como já ia na ordem léxica.
+
     O manifesto NAO muda com a ordem numerica: ``hash_clip`` reordena
     por nome antes de hashear, entao o sha256 de clipes ja registrados
     se mantem.
@@ -94,8 +100,16 @@ def clip_frames(clip_dir) -> list[Path]:
     if not clip_dir.is_dir():
         return []
     return sorted(
-        (p for p in clip_dir.glob("f*.png") if p.is_file()), key=frame_sort_key
+        (p for p in clip_dir.glob("f*.png") if p.is_file()), key=_clip_sort_key
     )
+
+
+def _clip_sort_key(path):
+    """``f<digitos>`` pelo número; demais ``f*`` ao fim por nome."""
+    match = re.fullmatch(r"f(\d+)", path.stem)
+    if match is not None:
+        return (0, int(match.group(1)), path.name)
+    return (1, 0, path.name)
 
 
 def count_frames(clip_dir) -> int:

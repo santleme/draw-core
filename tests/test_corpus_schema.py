@@ -257,6 +257,23 @@ def test_clip_frames_ordena_por_sufixo_numerico(tmp_path):
     assert verify_manifest(tmp_path) == []
 
 
+def test_clip_frames_nome_fora_do_padrao_vai_ao_fim(tmp_path):
+    """f_backup0.png termina em dígito mas não é f<dígitos>: vai ao
+    fim em vez de ocupar a posição 0 e deslocar todos os rótulos
+    posicionais do clipe."""
+    clip_dir = tmp_path / "cl"
+    clip_dir.mkdir()
+    img = np.zeros((8, 8, 3), dtype=np.uint8)
+    for name in ("f_backup0.png", "f0001.png", "f0000.png"):
+        cv2.imwrite(str(clip_dir / name), img)
+
+    assert [p.name for p in clip_frames(clip_dir)] == [
+        "f0000.png",
+        "f0001.png",
+        "f_backup0.png",
+    ]
+
+
 def test_frame_sort_key_ordena_qualquer_sufixo_numerico():
     """A chave vale alem de f<N>: todo stem que termina em digito
     ordena pelo valor; sem sufixo numerico vai ao fim e empate de

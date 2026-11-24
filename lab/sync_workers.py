@@ -7,11 +7,11 @@ submit/poll dos workers de detecção e presença.
 
 O driver de paridade do legado (parity_legacy_driver.py) NÃO usa
 este módulo: roda num subprocesso com PYTHONPATH do repo legado e
-fica auto-contido de propósito. Assimetria assumida: a ordenação de
-diretório dele continua léxica, então um corpus sem zero-padding
-(f2.png/f10.png) alimenta os dois lados em sequências diferentes —
-corpora de paridade precisam de nomes f%04d, que é o que a captura
-grava.
+fica auto-contido de propósito. A ordenação de diretório dele
+espelha ``frame_sort_key`` inline (mesma chave, duplicada lá), então
+os dois lados leem o mesmo quadro no mesmo índice — inclusive sem
+zero-padding ou além do quadro 9999, quando a captura f%04d já não
+alinha mais com a ordem léxica.
 """
 
 from dataclasses import dataclass, field
