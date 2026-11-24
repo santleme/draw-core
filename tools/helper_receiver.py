@@ -20,7 +20,7 @@ de alocar e decode_jpeg devolve None para JPEG malformado.
 Uso (a partir da raiz do repositório):
   python tools/helper_receiver.py --selfcheck
   DRAW_HELPER_TOKEN=... python tools/helper_receiver.py --record \
-      --host 192.168.0.10 --out sessao.drawcap [--max-frames 600]
+      --host 192.168.0.10 --out sessao.drawcap [--max-frames 600] [--timeout 30]
   python tools/helper_receiver.py --dump sessao.drawcap
   DRAW_HELPER_TOKEN=... python tools/helper_receiver.py --dump \
       --host 192.168.0.10 --max-frames 5
@@ -82,10 +82,18 @@ _frames_from_socket = _protocol.frames_from_socket
 _record = _protocol.record
 _resolve_token = _protocol.resolve_token
 
+# Teto de silêncio por recv pós-handshake, alinhado ao
+# HelperCapture(timeout=5.0) e ao HANDSHAKE_TIMEOUT_S: o ajudante
+# emite ~30 quadros/s, então 5 s sem nenhum byte = emissor morto.
+# Sem o teto, o _connect devolve o socket com settimeout(None) e
+# cada recv bloqueia para sempre.
+DEFAULT_RECV_TIMEOUT_S = 5.0
+
 __all__ = [
     "ACCEPT",
     "AuthenticationError",
     "DEFAULT_PORT",
+    "DEFAULT_RECV_TIMEOUT_S",
     "HANDSHAKE_TIMEOUT_S",
     "HEADER",
     "HEADER_SIZE",
@@ -127,12 +135,22 @@ def resolve_token(token=None, token_file=None):
 
 
 def frames_from_socket(
-    host, port=DEFAULT_PORT, timeout=None, token=None, max_payload=MAX_PAYLOAD_LEN
+    host,
+    port=DEFAULT_PORT,
+    timeout=DEFAULT_RECV_TIMEOUT_S,
+    token=None,
+    max_payload=MAX_PAYLOAD_LEN,
 ):
     """Itera (frame_id, capture_ts_us, jpeg_bytes) do ajudante via TCP.
 
     Autentica com o token (argumento ou DRAW_HELPER_TOKEN) antes de ler.
+    `timeout` vale por recv pós-handshake (o connect+handshake fica
+    sob o mesmo teto): silêncio maior que isso sobe como TimeoutError.
+    timeout=None é o opt-out da biblioteca e devolve o recv
+    bloqueante; timeout<=0 é rejeitado antes de qualquer conexão.
     """
+    if timeout is not None and timeout <= 0:
+        raise ValueError("timeout precisa ser um numero positivo de segundos")
     return _frames_from_socket(
         host,
         port,
@@ -147,17 +165,21 @@ def record(
     port,
     out_path,
     max_frames=None,
-    timeout=None,
+    timeout=DEFAULT_RECV_TIMEOUT_S,
     token=None,
     max_payload=MAX_PAYLOAD_LEN,
 ):
     """Grava o fluxo do socket byte a byte num arquivo. Retorna n.
 
     max_frames<=0 é rejeitado antes de qualquer conexão ou resolução
-    de token.
+    de token; timeout<=0 vem logo depois, ainda antes de conectar.
+    `timeout` vale por recv pós-handshake; None mantém o recv
+    bloqueante (opt-out da biblioteca).
     """
     if max_frames is not None and max_frames <= 0:
         raise ValueError("max_frames precisa ser um inteiro positivo")
+    if timeout is not None and timeout <= 0:
+        raise ValueError("timeout precisa ser um numero positivo de segundos")
     return _record(
         host,
         port,
@@ -316,7 +338,7 @@ def _selfcheck():
     return 0
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Receptor do protocolo do ajudante (bridge/PROTOCOL.md)"
     )
@@ -349,42 +371,81 @@ def main():
         default=None,
         help=f"arquivo com o token do ajudante (padrao: ${TOKEN_ENV})",
     )
-    args = parser.parse_args()
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=DEFAULT_RECV_TIMEOUT_S,
+        help="teto em segundos para o silencio de cada recv "
+        "pos-handshake; estourado, o emissor e dado como morto "
+        "(TimeoutError). Padrao: %(default)s s",
+    )
+    args = parser.parse_args(argv)
 
     if args.selfcheck:
         return _selfcheck()
 
     if args.max_frames is not None and args.max_frames <= 0:
         parser.error("--max-frames exige um inteiro positivo")
+    if args.timeout <= 0:
+        parser.error("--timeout exige um numero positivo de segundos")
 
     if args.record:
         if not args.host or not args.out:
             parser.error("--record exige --host e --out")
-        token = resolve_token(token_file=args.token_file)
-        count = record(
-            args.host, args.port, args.out, max_frames=args.max_frames, token=token
-        )
+        try:
+            count = record(
+                args.host,
+                args.port,
+                args.out,
+                max_frames=args.max_frames,
+                timeout=args.timeout,
+                token=resolve_token(token_file=args.token_file),
+            )
+        except TimeoutError:
+            print(
+                f"erro: emissor parado: recv silencioso por "
+                f"{args.timeout} s; registros completos ja estao em {args.out}",
+                file=sys.stderr,
+            )
+            return 2
+        except (OSError, ProtocolError) as error:
+            print(f"erro: {error}", file=sys.stderr)
+            return 2
         print(f"Gravados {count} frames em {args.out}.")
         return 0
 
     if args.dump is not None:
-        if args.dump:
-            frames = frames_from_file(args.dump)
-        elif args.host:
-            frames = frames_from_socket(
-                args.host, args.port, token=resolve_token(token_file=args.token_file)
-            )
-        else:
-            parser.error("--dump sem arquivo exige --host")
         count = 0
-        for frame_id, capture_ts_us, payload in frames:
+        try:
+            if args.dump:
+                frames = frames_from_file(args.dump)
+            elif args.host:
+                frames = frames_from_socket(
+                    args.host,
+                    args.port,
+                    timeout=args.timeout,
+                    token=resolve_token(token_file=args.token_file),
+                )
+            else:
+                parser.error("--dump sem arquivo exige --host")
+            for frame_id, capture_ts_us, payload in frames:
+                print(
+                    f"frame_id={frame_id} capture_ts_us={capture_ts_us} "
+                    f"jpeg={len(payload)} bytes"
+                )
+                count += 1
+                if args.max_frames is not None and count >= args.max_frames:
+                    break
+        except TimeoutError:
             print(
-                f"frame_id={frame_id} capture_ts_us={capture_ts_us} "
-                f"jpeg={len(payload)} bytes"
+                f"erro: emissor parado: recv silencioso por {args.timeout} s "
+                f"(apos {count} frames listados)",
+                file=sys.stderr,
             )
-            count += 1
-            if args.max_frames is not None and count >= args.max_frames:
-                break
+            return 2
+        except (OSError, ProtocolError) as error:
+            print(f"erro: {error}", file=sys.stderr)
+            return 2
         print(f"Total: {count} frames.")
         return 0
 
