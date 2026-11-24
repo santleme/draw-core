@@ -373,9 +373,9 @@ def test_drawcap_pace_interrompido_pelo_release(tmp_path, monkeypatch):
     thread = threading.Thread(
         target=lambda: results.append(capture.read()), daemon=True
     )
-    started = time.monotonic()
     thread.start()
     assert sleeping.wait(timeout=3)  # leitor entrou na espera de pacing
+    started = time.monotonic()  # mede a latencia do wake-up, nao o startup
     capture.release()
     thread.join(timeout=3)
     assert not thread.is_alive()
