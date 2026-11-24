@@ -902,6 +902,27 @@ def test_pure_python_tcp_connect_timeout_falls_through_to_next_candidate(
     assert made[1].timeout == 2.0 and made[1].blocking is True
 
 
+@pytest.mark.parametrize("bad_ms", [0, -1, float("nan")])
+def test_pure_python_connect_timeout_nao_positivo_vira_etimedout(bad_ms):
+    """timeout_ms <= 0 ou NaN: settimeout() levantaria ValueError (que
+    nao e OSError) depois de o socket ja existir — vazava o fd e furava
+    o contrato de -errno. Devolve -ETIMEDOUT sem criar socket."""
+    lib = hvcam_module._lib._PurePythonHvcamLib()
+    called = []
+
+    def factory(*_a):
+        called.append(1)
+        return _FakeConnectSock(fd=1)
+
+    rc = lib.hvcam_connect(8765, timeout_ms=bad_ms, socket_factory=factory)
+    assert rc == -errno.ETIMEDOUT
+    rc = lib.hvcam_connect_tcp(
+        b"10.0.0.1", 8765, timeout_ms=bad_ms, socket_factory=factory
+    )
+    assert rc == -errno.ETIMEDOUT
+    assert called == []
+
+
 def test_run_check_on_wsl_without_dev_video_uses_hvcam_fallback(monkeypatch, capsys):
     cam = FakeCamera([(_info(), _payload())])
     seen = []

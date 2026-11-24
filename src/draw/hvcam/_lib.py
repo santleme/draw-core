@@ -112,7 +112,10 @@ class _PurePythonHvcamLib:
     Os kwargs `timeout_ms` e `socket_factory` sao extensoes so-Python:
     limitam o connect() (que senao espera o SYN timeout do kernel) e dao
     uma seam de teste. A libhvcam.so nativa tem ABI C fixa — quem chama
-    nunca repassa kwargs para ela.
+    nunca repassa kwargs para ela. O orcamento e por candidato do
+    getaddrinfo (dual-stack pode custar N x timeout_ms) e nao cobre a
+    resolucao DNS em si; timeout_ms <= 0 ou NaN devolve -ETIMEDOUT na
+    hora, como o _transport.py.
     - hvcam_connect(port, *, timeout_ms=None, socket_factory=socket.socket)
     - hvcam_connect_tcp(host_bytes, port, *, timeout_ms=None, socket_factory=socket.socket)
     - hvcam_grab_next(fd, hdr_ptr, buf, cap, last_ptr, timeout_ms) -> bytes, -2 (timeout) ou -1 (erro)
@@ -149,6 +152,10 @@ class _PurePythonHvcamLib:
         return errno.ETIMEDOUT if isinstance(error, TimeoutError) else errno.EIO
 
     def hvcam_connect(self, port, *, timeout_ms=None, socket_factory=socket.socket):
+        if timeout_ms is not None and not timeout_ms > 0:
+            # <= 0 ou NaN: settimeout() levantaria ValueError (nao
+            # OSError) e vazaria o socket — responde -ETIMEDOUT.
+            return -errno.ETIMEDOUT
         af_vsock = getattr(socket, "AF_VSOCK", 40)
         cid_host = getattr(socket, "VMADDR_CID_HOST", 2)
         try:
@@ -175,6 +182,8 @@ class _PurePythonHvcamLib:
         )
         if not host:
             host = "127.0.0.1"
+        if timeout_ms is not None and not timeout_ms > 0:
+            return -errno.ETIMEDOUT
         try:
             infos = socket.getaddrinfo(
                 host, int(port), socket.AF_UNSPEC, socket.SOCK_STREAM
