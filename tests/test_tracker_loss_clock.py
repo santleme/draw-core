@@ -30,12 +30,14 @@ CORNERS = np.array([[100, 100], [500, 100], [500, 400], [100, 400]], dtype=np.fl
 _DT = 1.0 / 30.0
 
 
-def _run_async(verdict, detect_s, duration, remove_at=None):
+def _run_async(verdict, detect_s, duration, remove_at=None, remove_verdict=None):
     """Regime assíncrono sobre o rastreador real, em tempo simulado.
 
     verdict: o que o detector devolve enquanto a folha está lá.
-    remove_at: a partir deste instante o detector só devolve
-    (None, None) — a folha saiu da mesa.
+    remove_at: a partir deste instante o detector nunca mais fecha
+    quadrilátero — devolve (None, remove_verdict). O default
+    remove_verdict=None reproduz a folha fora da mesa; "paper"
+    simula o detector afirmando presença sem nunca fechar posição.
     Retorna (primeira confirmação, quedas, instante da 1ª queda).
     """
     tracker = SheetTracker()
@@ -64,6 +66,8 @@ def _run_async(verdict, detect_s, duration, remove_at=None):
             now = captured_at
             if remove_at is None or captured_at < remove_at:
                 detected, verd = CORNERS.copy(), verdict
+            else:
+                verd = remove_verdict
         if tracker.should_detect(frame_no):
             if current is None:
                 current = (t + detect_s, t)
@@ -107,3 +111,23 @@ def test_sheet_removed_still_drops():
     # depois de _SHEET_LOST_SECONDS (0,5 s), nunca segundos tarde.
     assert first_drop is not None
     assert 5.0 < first_drop < 7.0
+
+
+def test_paper_verdict_without_quad_eventually_drops():
+    """Detector afirmando 'paper' sem nunca fechar quad não segura
+    a folha para sempre: esgotada a graça presence_grace_s, o
+    relógio de perda volta a contar e a folha cai.
+
+    Regressão do relógio de perda infinito: sem o teto, cada
+    resultado (None, 'paper') renovava _frames_since_seen e
+    _last_seen_at para sempre — quedas = 0 em qualquer cenário."""
+    confirm, drops, first_drop = _run_async(
+        "paper", 0.15, 12.0, remove_at=5.0, remove_verdict="paper"
+    )
+    assert confirm is not None
+    assert drops >= 1
+    # Remoção aos 5 s + graça de 2,0 s + o piso de frames: a queda
+    # chega alguns resultados depois do fim da graça — nunca perto
+    # do fim do cenário como seria sem o teto (lá ela não vinha).
+    assert first_drop is not None
+    assert 5.0 < first_drop < 9.5

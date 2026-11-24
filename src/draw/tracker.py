@@ -180,35 +180,46 @@ class SheetTracker:
     da janela da mao (medido no replay: 11 quadros sem folha e
     atraso de remocao de 0,30 s, contra 0,53 s com a renovacao).
 
+    A renovacao so-de-presenca tem teto (presence_grace_s, padrao
+    2,0 s de tempo de cena contado da primeira renovacao do
+    episodio): um detector que afirma "paper" para sempre sem
+    fechar quad nao segura a folha indefinidamente — esgotada a
+    graca, o quadro conta falta como qualquer outro e a folha cai
+    por _SHEET_LOST_*. Um quad detectado, a queda ou o reset
+    fecham o episodio; quadros sem deteccao no meio nao rearmam a
+    janela (anti-evasao, ver o ramo no update).
+
     Os limites em px (_SHEET_NEAR_LIMIT_PX, _SHEET_DEADBAND_PX,
     _SHEET_BIG_JUMP_PX) vivem no quadro de referencia 1280x720; o
     limiar efetivo e a constante vezes o pixel_scale recebido no
     update corrente (ver camera_pixel_scale, issue #105).
     """
 
-    def __init__(self):
+    def __init__(self, presence_grace_s=2.0):
+        if not isinstance(presence_grace_s, (int, float)) or not np.isfinite(
+            presence_grace_s
+        ):
+            raise ValueError(
+                f"presence_grace_s precisa ser float finito: {presence_grace_s!r}"
+            )
+        if presence_grace_s <= 0:
+            raise ValueError(f"presence_grace_s precisa ser > 0: {presence_grace_s}")
+        # Teto da renovacao so-de-presenca (ver o ramo no update):
+        # veredito "paper" sem quadrilatero segura o relogio de
+        # perda por no maximo presence_grace_s segundos de cena sem
+        # um quad fechado; esgotada a graca, o quadro presence-only
+        # passa a contar falta como qualquer outro.
+        self.presence_grace_s = float(presence_grace_s)
         self.corners = None
         self.verdict = None
         self.missed = False
-        # Salto grande confirmado (fato geometrico, so leitura):
-        # seq monotonica + retrato do ultimo salto, para o app
-        # armar o juiz de identidade quando a pose salta com a
-        # folha presente (frente 28, 2026-11-10). O tracker nao
-        # decide nada com isto — so reporta.
-        self.big_jump_seq = 0
-        self.last_big_jump = None
-        # Episodio do salto em curso foi DESCONTINUO? (candidato
-        # substituido no meio, veredito nao-paper com candidato
-        # ativo, ou candidato morto por perda de deteccao). Um
-        # reposicionamento continuo da mesma folha nao marca nada
-        # disto — e a distincao que a vigia v3 usa para armar (ou
-        # nao) o juiz de identidade num salto de pose.
-        self._episode_discontinuous = False
-        self._pending_sustain_count = 0
         self._pending = None
         self._pending_since = None
         self._frames_since_seen = 0
         self._last_seen_at = None
+        # Carimbo de captura da PRIMEIRA renovacao so-de-presenca
+        # do episodio sem quad corrente; None fora de episodio.
+        self._presence_only_since = None
         self._recent = deque(maxlen=_SHEET_FILTER_WINDOW)
         self._absent_calls = 0
         # Escala de px do quadro dos cantos (camera_pixel_scale):
@@ -218,7 +229,7 @@ class SheetTracker:
 
     def reset(self):
         """Volta ao estado inicial: sem folha, sem candidato, sem historico."""
-        self.__init__()
+        self.__init__(presence_grace_s=self.presence_grace_s)
 
     @property
     def has_pending(self):
@@ -234,8 +245,6 @@ class SheetTracker:
             "missed": bool(self.missed),
             "pending": _corners_json(self._pending),
             "pending_since": self._pending_since,
-            "big_jump_seq": int(self.big_jump_seq),
-            "last_big_jump": self.last_big_jump,
             "frames_since_seen": int(self._frames_since_seen),
             "last_seen_at": self._last_seen_at,
             "absent_calls": int(self._absent_calls),
@@ -252,22 +261,8 @@ class SheetTracker:
         return self._absent_calls % _SHEET_ABSENT_BACKOFF_INTERVAL == 0
 
     def _confirm(self, corners, verdict, now):
-        # Limites em px da referencia escalados pelo quadro atual.
+        # Limite em px da referencia escalado pelo quadro atual.
         near_px = _SHEET_NEAR_LIMIT_PX * self._pixel_scale
-        big_jump_px = _SHEET_BIG_JUMP_PX * self._pixel_scale
-        if self.corners is not None:
-            jump_distance = corner_distance(self.corners, corners)
-            if jump_distance > big_jump_px:
-                self.big_jump_seq += 1
-                self.last_big_jump = {
-                    "seq": self.big_jump_seq,
-                    "distance_px": float(jump_distance),
-                    "at": now,
-                    "episode_discontinuous": bool(self._episode_discontinuous),
-                }
-        # Toda confirmacao encerra o episodio do candidato: o
-        # marcador de descontinuidade nao vaza pro proximo salto.
-        self._episode_discontinuous = False
         # Confirmacao que SALTA (primeira folha ou candidato a
         # salto) recomeca a janela do filtro na posicao nova: sem
         # isso, a mediana das proximas deteccoes misturaria a
@@ -279,7 +274,6 @@ class SheetTracker:
         self.verdict = verdict
         self._pending = None
         self._pending_since = None
-        self._pending_sustain_count = 0
         self._frames_since_seen = 0
         self._last_seen_at = now
         self.missed = False
@@ -323,11 +317,43 @@ class SheetTracker:
             # fechou). A folha esta la; a posicao e que nao veio.
             # Renova o relogio de perda, nao mexe no quadrilatero
             # exibido nem no candidato pendente.
-            self._frames_since_seen = 0
-            self._last_seen_at = now
-            self.missed = True
-            return None
+            #
+            # A renovacao tem TETO (presence_grace_s): sem ele, uma
+            # deteccao que afirma "paper" para sempre sem fechar
+            # quad (fantasma persistente do detector) renovava o
+            # relogio de perda indefinidamente — a folha nunca
+            # caia, o DetectWake nunca assentava e warps velhos
+            # seguiam votando pixels da mesa. O episodio abre na
+            # primeira renovacao e esgotada a graca o quadro cai
+            # no fluxo normal de ausencia de quad adiante: o
+            # contador de perda volta a andar e a folha cai por
+            # _SHEET_LOST_*.
+            #
+            # O marcador NAO zera nos quadros intercalados sem
+            # deteccao (None, None): zerar ali rearmaria a graca a
+            # cada resultado vazio e uma alternancia
+            # paper/vazio/paper seguraria a folha para sempre —
+            # a janela fecha so num quad detectado, na queda ou no
+            # reset.
+            if self._presence_only_since is None:
+                self._presence_only_since = now
+            if now - self._presence_only_since <= self.presence_grace_s:
+                self._frames_since_seen = 0
+                self._last_seen_at = now
+                # O episodio tambem suspende a persistencia do
+                # candidato pendente: sem o reinicio, o
+                # _pending_since velho satisfaz a janela de salto
+                # no primeiro quad da volta e um candidato de
+                # posicao morta confirma instantaneamente.
+                if self._pending is not None:
+                    self._pending_since = now
+                self.verdict = verdict
+                self.missed = True
+                return None
         if detected is not None:
+            # Quad fechado encerra o episodio so-de-presenca: a
+            # proxima ausencia de quad abre janela de graca nova.
+            self._presence_only_since = None
             detected = self._filtered(detected)
             if self.corners is None and verdict == "paper":
                 self._confirm(detected.copy(), verdict, now)
@@ -364,33 +390,19 @@ class SheetTracker:
                     confirm_seconds = max(
                         confirm_seconds, _SHEET_BIG_JUMP_PERSIST_SECONDS
                     )
-                if self._pending is not None and verdict != "paper":
-                    # Candidato ativo julgado nao-papel no meio do
-                    # episodio: a transicao nao foi uma folha so
-                    # andando em cena.
-                    self._episode_discontinuous = True
-                if (
-                    self._pending is not None
-                    and corner_distance(self._pending, detected) <= near_px
+                if self._pending is None or (
+                    corner_distance(self._pending, detected) > near_px
                 ):
-                    # Candidato FIXO: a deteccao nova sustenta o
-                    # candidato que ja existe, sem move-lo. Misturar
-                    # o candidato a cada deteccao deixava ele andar
-                    # atras dos modos errantes do detector e
-                    # confirmar um salto que nenhuma posicao fixa
-                    # sustentou pelo tempo de persistencia.
-                    self._pending_sustain_count += 1
-                else:
-                    if self._pending is not None and self._pending_sustain_count >= 2:
-                        # Candidato ESTABELECIDO substituido no meio
-                        # do episodio: transicao descontinua. (A
-                        # troca nas primeiras deteccoes e o transi-
-                        # ente do filtro temporal varrendo da pose
-                        # velha pra nova — nao marca.)
-                        self._episode_discontinuous = True
+                    # Candidato novo ou substituido: fica FIXO na
+                    # deteccao que o abriu ate confirmar ou morrer.
+                    # Deteccao nova que sustenta o candidato que ja
+                    # existe NAO o move — misturar o candidato a
+                    # cada deteccao deixava ele andar atras dos
+                    # modos errantes do detector e confirmar um
+                    # salto que nenhuma posicao fixa sustentou pelo
+                    # tempo de persistencia.
                     self._pending = detected.copy()
                     self._pending_since = now
-                    self._pending_sustain_count = 0
 
                 if (
                     self._pending_since is not None
@@ -410,13 +422,12 @@ class SheetTracker:
                     self.missed = True
         elif self.corners is not None:
             if ran_detection:
-                if self._pending is not None:
-                    # Candidato morto por perda de deteccao no meio
-                    # do episodio: transicao descontinua.
-                    self._episode_discontinuous = True
+                # Deteccao sem quad utilizavel (veredito vazio ou
+                # presence-only com a graca esgotada): qualquer
+                # candidato pendente morre — a posicao que ele
+                # guarda nao tem mais sustento.
                 self._pending = None
                 self._pending_since = None
-                self._pending_sustain_count = 0
                 self.missed = True
             self._frames_since_seen += 1
         elif ran_detection and verdict != "paper":
@@ -427,7 +438,6 @@ class SheetTracker:
             # os cantos do candidato morto.
             self._pending = None
             self._pending_since = None
-            self._pending_sustain_count = 0
             self._recent.clear()
 
         # A perda so e avaliada em quadro com resultado de deteccao.
@@ -458,8 +468,7 @@ class SheetTracker:
             self.verdict = None
             self._pending = None
             self._pending_since = None
-            self._pending_sustain_count = 0
-            self._episode_discontinuous = False
+            self._presence_only_since = None
             self._frames_since_seen = 0
             self._recent.clear()
             self.missed = False

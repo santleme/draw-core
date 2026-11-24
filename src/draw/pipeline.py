@@ -290,7 +290,9 @@ class Pipeline:
         self._hand_mask_needs_refresh = False
         self._hand_mask_with_sheet = False
 
-        self.tracker = tracker.SheetTracker()
+        self.tracker = tracker.SheetTracker(
+            presence_grace_s=self._config.presence_grace_s
+        )
         self._detect_wake = (
             tracker.DetectWakeGate(
                 settled_interval_s=self._config.detect_wake_interval_s
