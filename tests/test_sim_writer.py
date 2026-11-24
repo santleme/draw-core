@@ -100,7 +100,7 @@ def test_audit_timeout_imprime_rabos_e_sai(monkeypatch, tmp_path, capsys):
             cmd, kw["timeout"], output="stdout parcial", stderr="stderr parcial"
         )
 
-    monkeypatch.setattr(sim_writer.subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "run", fake_run)
     with pytest.raises(SystemExit, match="tempo limite.*cursive"):
         sim_writer.audit("corpus", tmp_path, [], ["cursive"])
     assert captured["timeout"] == 900

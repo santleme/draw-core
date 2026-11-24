@@ -171,6 +171,33 @@ def run_new(
     return records, canvases, hand_samples
 
 
+def run_captured(cmd, what, timeout, *, detail=None, **kwargs):
+    """subprocess.run com capture_output/text e teto de tempo.
+
+    TimeoutExpired imprime os últimos 3 KB de stdout/stderr parciais
+    do filho e sai com SystemExit nomeando `what` — seguido de
+    ": detail" quando `detail` é dado. Kwargs extras (env, cwd, ...)
+    passam direto para o subprocess.run.
+    """
+    try:
+        return subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout, **kwargs
+        )
+    except subprocess.TimeoutExpired as error:
+        out = error.stdout or ""
+        err = error.stderr or ""
+        # Até o Python 3.11 a saída parcial chega em bytes mesmo com
+        # text=True; o 3.12+ já entrega decodificada.
+        if isinstance(out, bytes):
+            out = out.decode(errors="replace")
+        if isinstance(err, bytes):
+            err = err.decode(errors="replace")
+        print(out[-3000:])
+        print(err[-3000:], file=sys.stderr)
+        msg = f"{what} excedeu o tempo limite ({timeout} s)"
+        raise SystemExit(msg if detail is None else f"{msg}: {detail}") from None
+
+
 def run_legacy(
     legacy_repo,
     corpus,
@@ -211,24 +238,7 @@ def run_legacy(
         "--hand-model",
         str(hand_model),
     ]
-    try:
-        result = subprocess.run(
-            cmd, env=env, capture_output=True, text=True, timeout=timeout
-        )
-    except subprocess.TimeoutExpired as error:
-        out = error.stdout or ""
-        err = error.stderr or ""
-        # Até o Python 3.11 a saída parcial chega em bytes mesmo com
-        # text=True; o 3.12+ já entrega decodificada.
-        if isinstance(out, bytes):
-            out = out.decode(errors="replace")
-        if isinstance(err, bytes):
-            err = err.decode(errors="replace")
-        print(out[-3000:])
-        print(err[-3000:], file=sys.stderr)
-        raise SystemExit(
-            f"driver legado excedeu o tempo limite ({timeout} s)"
-        ) from None
+    result = run_captured(cmd, "driver legado", timeout, env=env)
     if result.returncode != 0:
         print(result.stdout[-3000:])
         print(result.stderr[-3000:], file=sys.stderr)

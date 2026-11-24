@@ -81,19 +81,18 @@ def newest_report(results_dir, prefix, before, since):
     (relógio grosso do kernel ou filesystem com timestamp próprio).
     Sem arquivo novo, cai para o caso de sobrescrita: um `before` com
     mtime >= `since`."""
-    created = []
-    touched = []
+    created, touched = {}, {}
     for p in results_dir.glob(f"{prefix}_*.json"):
         try:
             mtime = p.stat().st_mtime
         except OSError:
             continue
         if p not in before:
-            created.append((mtime, p))
+            created[p] = mtime
         elif mtime >= since:
-            touched.append((mtime, p))
-    files = created or touched
-    return max(files)[1] if files else None
+            touched[p] = mtime
+    fresh = created or touched
+    return max(fresh, key=fresh.get) if fresh else None
 
 
 def run_judge(
