@@ -5,13 +5,15 @@ Pesquisa inicial: 2026-11-23. Implementação e validação local: 2026-11-24. B
 snapshots cronológicos da implementação; a seção 10 é a auditoria final da evidência local e
 remota.
 
-**Estado final verificado:** a implementação está no commit `59ceb39`; o contrato explícito para
-massa não positiva foi acrescentado e validado nesta revisão local. A branch usa `5e530879` como
-merge-base com `origin/main`. O PR #180
-remoto continua no head `93f1c28`; nesse head os jobs `fast` e `slow` passaram, mas Devin Review
-segue pendente e há quatro threads não resolvidas. O CI remoto não cobre o código local. A
-suíte local final passou com **2553 passed, 2 skipped**. Sem anotações
-independentes de tinta e pose, nenhuma diferença de canvas é chamada de melhora de acurácia.
+**Estado final verificado:** o código de runtime desta worktree está na série local até `c57ed60`
+(correção principal em `59ceb39`; contratos de acompanhamento em `c57ed60`). A branch usa
+`5e530879` como merge-base com `origin/main`. O PR #180 remoto continua no head `93f1c28`; nesse
+head os jobs `fast` e `slow` passaram, mas Devin Review segue pendente e há quatro threads não
+resolvidas. O CI remoto não cobre o código local, que não foi enviado. A suíte local passou com
+**2553 passed, 2 skipped**; o ensaio geométrico adicional com máscaras humanas passou em **576/576**
+transformações controladas. Existe verdade-terreno independente para segmentação estática, mas
+nenhuma para os replays dinâmicos de câmera e a pose do tracker; nenhuma diferença de canvas do
+#180 é chamada de melhora de acurácia.
 
 ## 0. Snapshot da pesquisa inicial — superado pelas seções 9–10
 
@@ -39,20 +41,27 @@ os limites de arbitragem continuam sem calibração em holdout anotado.
    (máx. 0,94–0,99). O que passa de 1 é o escore **sem** correção: +0,3% em traços, até
    +11,2% em linhas verticais de 1 px (`INTER_LINEAR`); +2,2% a +52% com `INTER_NEAREST`.
    `INTER_CUBIC` gera pixels negativos (até −0,32): único caso em que o clamp é necessário.
-3. **O escore não penaliza massa recortada** (simetria com o escore de câmera, que também
-   divide pela massa sobrevivente). É decisão de projeto: uma hipótese com 5% da massa dentro
-   da grade que acerta o snapshot pontua 1. Só os portões de recall/ganho do estimador limitam
-   esse caso. Deve constar na descrição do PR.
+3. **A versão final penaliza massa recortada.** O denominador é calculado antes da translação e
+   do recorte; a massa que sai da grade reduz o escore. Para a câmera, a massa projetada é somada
+   com a grade acolchoada antes de intersectar a saída. Os contratos cobrem esses domínios e a
+   abstenção quando a geometria projetada é inválida; a distribuição desses casos em câmera real
+   ainda não foi medida.
 4. **Nada na literatura valida o desenho em volta**: a tolerância de 2 px, o rival de 90% por
    eixo e a margem absoluta de 0,05 não têm fonte. A literatura só apoia princípios gerais
    (verificar hipóteses com portão antes de ranquear; margens relativas e calibradas; refino
    local após pico grosso).
-5. **Maior risco**: o `identity_residual` persistido não tem metadados de frescor. Um resíduo
-   velho pode "explicar" a pose por coincidência dentro de 2 px e suprimir um gatilho real.
-6. **Evidência é toda sintética.** Não existe dataset público com queda e retorno do tracker,
-   e a duplicação apontada pelo revisor **não foi reproduzida**.
-7. **Prontidão**: #180 **não** está pronto para merge. #203 não é coberto pelas fontes
-   (sem veredito de pesquisa; só CI limpo no código rebaseado).
+5. **Maior risco restante**: os limites de 2 px, 6 px e 0,05 não foram calibrados em captura
+   rotulada. O resíduo persistido agora tem geração, instante, suporte, margem e pose de referência;
+   saltos, deriva e lacunas invalidam seu uso geométrico. Esses contratos reduzem modos de falha
+   conhecidos, mas ainda não medem a taxa de falso aceite em câmera.
+6. **A evidência dinâmica da âncora continua sem rótulo independente.** Há um holdout estático
+   com máscaras humanas e 576 translações controladas dessas máscaras; isso verifica a resposta
+   geométrica do estimador, não tracking em câmera. Os replays reais S3/S4 não têm máscara de tinta
+   nem pose independente por quadro. A duplicação relatada não foi medida em vídeo rotulado; o
+   caso state-level construído tem contrato de regressão.
+7. **Prontidão**: #180 **não** está pronto para merge pelo estado remoto atual. O PR remoto está
+   no head antigo `93f1c28`, com Devin Review pendente e quatro threads abertas; o código local
+   ainda não foi enviado. #203 é uma correção separada e não recebe veredito desta validação.
 
 ## 2. O que as fontes primárias sustentam
 
@@ -102,16 +111,24 @@ métrica é Jaccard por quadro); MIDV-500 (500 clipes, condições "Hand" e "Par
 dos clipes não confirmada); MIDV-Holo (CC BY-SA 2.5, share-alike: revisão jurídica). VOT
 reinicia 5 quadros após a falha e ignora 10 (curto prazo); longo prazo sem reinício.
 
+O corpus local `draw-data/holdout-v1` tem verdade-terreno independente para segmentação estática:
+36 páginas em seis sessões, com máscaras binárias rotuladas `human_from_scratch`, revisadas e
+fora do treino. Isso permite medir o `PageCleanInk`, mas não tem vídeo, pose por quadro, perda ou
+retorno do tracker; não valida o resíduo de identidade nem a arbitragem de âncora.
+
 Protocolo proposto (desenho da pesquisa, sem fonte): ~60 clipes estratificados por movimento
 no retorno (parado; 4/8/12/14 px; deslize durante o desenho; rotação k×90°; folha levantada),
 iluminação e oclusão por mão; moldura ArUco/ChArUco só offline para pose; tinta A antes e B
 depois da queda; apagamento roteirizado e scan plano como verdade; controle sem o fix e sem
 queda. Unidade estatística: o clipe. Fixar alvo e n antes e não parar cedo.
 
-## 5. Experimentos (fora do repositório)
+## 5. Experimentos
 
 Scripts em scratchpad temporário (opencv 5.0.0, numpy 2.5.5), mapas float32 240×320, polilinhas
-aleatórias de 1–5 px, 1000 sementes, `INTER_LINEAR/AREA/NEAREST/CUBIC`. Não são tinta real.
+aleatórias de 1–5 px, 1000 sementes, `INTER_LINEAR/AREA/NEAREST/CUBIC`. Não são tinta real. O
+ensaio controlado com máscaras humanas é reproduzível por
+`lab/validate_identity_residual_holdout.py`; as formas vêm de tinta anotada, mas os movimentos
+continuam simulados.
 
 ## 6. Lacunas
 
@@ -120,7 +137,8 @@ deu 404; Chow 1970 e El-Yaniv & Wiener 2010 não lidos; Guizar-Sicairos via espe
 academia.edu; comportamento de não convergência do `findTransformECC` não está na doc; sem
 fonte para 2 px, 90% e 0,05; Hartley & Zisserman não consultados; protocolo do LaSOT não
 obtido; Firecrawl limitou taxa; afirmações sobre o código vêm do coordenador, não dos
-pesquisadores; mapas sintéticos não são tinta real.
+pesquisadores; as polilinhas sintéticas não são tinta real e os deslocamentos do holdout não
+são capturas de câmera.
 
 ## 7. Plano de validação e estado de execução
 
@@ -138,8 +156,8 @@ O plano abaixo veio da pesquisa inicial. O status final foi auditado em 24/11/20
 
 Continuam como trabalho de validação com produto: fundir hipóteses equivalentes antes da
 margem, explorar margem relativa e observabilidade por eixo, testar propriedades, coletar 30–60
-clipes rotulados, medir o custo do estimador no fluxo completo contra um orçamento de CPU
-definido e avaliar o `SheetTracker` com relógio real.
+clipes dinâmicos com máscaras de tinta e pose/tracker rotulados, medir o custo do estimador no
+fluxo completo contra um orçamento de CPU definido e avaliar o `SheetTracker` com relógio real.
 
 ## 8. Execução local das recomendações — snapshot intermediário
 
@@ -574,15 +592,82 @@ nas subseções posteriores e no fechamento da seção 10.
   o defeito de geometria no estágio do worker; o replay de câmera ainda não selecionou
   `unregistered`.
 - Gate final nesta worktree após adicionar os contratos do worker e de massa não positiva:
-  `ruff check .` passou, `ruff format --check .` confirmou **221 arquivos já formatados**, e
-  `pytest -q` terminou com **2553 passed, 2 skipped em 161,11 s**. O contrato
+  `ruff check .` passou, `ruff format --check .` confirmou **222 arquivos já formatados**, e
+  `pytest -q` terminou com **2553 passed, 2 skipped em 161,35 s**. O contrato
   `test_overlap_fraction_returns_zero_for_nonpositive_mass` passou isoladamente (**1 passed**).
   `git diff --check` também passou.
+
+### Holdout independente do segmentador — não mede tracking
+
+`draw-data/holdout-v1` contém 36 imagens de 850×1200 em seis sessões, cada uma com máscara binária
+revisada (`label_reviewed=true`, `label_source=human_from_scratch`, `origin=independent_label`,
+`prior_training=false`). Conferi as 36 entradas do manifesto, os SHA-256, as formas e os pares
+imagem/máscara; o cache de avaliação reproduz exatamente os mesmos arrays. Reavaliei os dois
+modelos em `PageCleanInk` do branch atual, com limiar 0,97 e quatro threads; o modelo atual foi
+validado pelo manifesto. O IoU, precisão, recall e recall de traço fino são médias por sessão
+(média das páginas de cada sessão, depois média das seis sessões):
+
+| Modelo | SHA-256 | IoU macro | Precisão | Recall | Recall fino | FP em páginas vazias | p50 | p90 |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| FP32, mosaico (incumbente) | `22a883f5…` | 0,869993 | 0,949787 | 0,914764 | 0,910465 | 0,04250% | 221,2 ms | 231,3 ms |
+| INT8, página inteira (atual) | `8359ff03…` | 0,881216 | 0,948876 | 0,927673 | 0,923818 | 0,03666% | 85,6 ms | 92,8 ms |
+
+O IoU aumentou em **6/6 sessões**; os deltas pareados foram:
+
+| Sessão | FP32 | INT8 atual | Delta |
+|---|---:|---:|---:|
+| `notebook-t00` | 0,849300 | 0,865326 | +1,603 pp |
+| `notebook-t01` | 0,898272 | 0,905242 | +0,697 pp |
+| `notebook-t02` | 0,827080 | 0,841728 | +1,465 pp |
+| `notebook-t03` | 0,909295 | 0,914914 | +0,562 pp |
+| `notebook-t04` | 0,865916 | 0,877958 | +1,204 pp |
+| `notebook-t05` | 0,870097 | 0,882128 | +1,203 pp |
+
+A média das seis diferenças é **+1,122 pp** (desvio-padrão entre sessões: 0,414 pp; intervalo
+observado: +0,562 a +1,603 pp). As seis sessões são os grupos da comparação; os 36 quadros não
+foram tratados como 36 unidades independentes.
+
+No holdout estático, o modelo atual ganhou **1,12 ponto percentual de IoU**, **1,29 pp de recall**
+e **1,34 pp de recall em traços finos**; a precisão caiu **0,09 pp**. O FP em 11 páginas vazias
+caiu 0,00584 ponto percentual. Na bancada de páginas reais já capturadas, a latência caiu cerca
+de **61% no p50** e **60% no p90**. O host foi Ryzen 7 7700X/WSL2, ONNX Runtime 1.32.0, OpenCV
+5.0.0, quatro threads; a latência veio de três passagens pelo conjunto de páginas retificadas
+de `bench-clips`. Isso confirma uma melhoria do segmentador anteriormente integrado, não uma
+melhoria causada pelos commits locais do #180.
+
+Esse holdout não tem sequência temporal, movimento de folha, hand-off do tracker, resíduo ou pose
+por quadro. Portanto não valida a arbitragem de âncora. Os replays S3/S4 também não têm máscaras
+independentes para seus quadros; seus deltas de canvas não são usados como medidas de precisão.
+
+### Resposta geométrica do estimador em formas manuscritas rotuladas
+
+Para obter evidência adicional sem confundir o teste com uma captura, adicionei
+[`lab/validate_identity_residual_holdout.py`](../lab/validate_identity_residual_holdout.py). O
+script valida no manifesto `split=holdout`, `origin=independent_label`, rótulo humano revisado e
+`prior_training=false`; confere o SHA-256 das imagens de entrada, dimensões e máscaras binárias.
+Para cada uma das 36 máscaras, aplica oito translações inteiras conhecidas (`dx,dy ∈ {−6,0,6}`,
+exceto `(0,0)`) com `cv2.warpAffine`, `INTER_NEAREST` e preenchimento zero. Mede a estimativa
+inversa em dois regimes: cobertura total e ocultação de uma faixa vertical de 140 px no lado
+esquerdo (16,5% da largura de 850 px). O comando é:
+
+```bash
+uv run python lab/validate_identity_residual_holdout.py \
+  --holdout-root ~/draw-data/holdout-v1
+```
+
+Resultado: **576/576 estimativas corretas**, sem abstenções e sem deslocamentos errados: 288/288
+com cobertura total e 288/288 com a faixa oculta. Cada uma das seis sessões teve 48/48 corretas
+em cada regime. São repetições controladas nas mesmas 36 páginas, não 576 observações
+independentes nem uma estimativa de taxa de sucesso. O ensaio confirma que a correlação e a
+seleção de candidatos recuperam esses deslocamentos em formas manuscritas reais sob essas
+condições ideais. Não inclui ruído fotométrico, perspectiva, deformação, oclusão irregular por
+mão, retorno do tracker, estado temporal ou arbitragem da âncora; por isso não calibra os limiares
+nem demonstra melhoria na câmera.
+
 - Os testes mostram que os casos sintéticos reproduzidos deixam de inverter o denominador ou
   aposentar um resíduo ainda ambíguo. Não provam a taxa de ocorrência nem melhoria funcional em
-  câmera. Não há rótulo independente por pixel, e o empate foi construído com o resíduo já
-  semeado; não se percorreu nesse caso a sequência inteira de captura, estimação, ocultação
-  periódica e retorno.
+  câmera. O empate foi construído com o resíduo já semeado; não se percorreu nesse caso a sequência
+  inteira de captura, estimação, ocultação periódica e retorno.
 - Replay adicional da captura real `s4_escrita_1117_1800.drawcap`, com os modelos ONNX conferidos
   por `verify_model` e `PipelineConfig()` de produção: **900/900** frames decodificados, **215**
   passadas em 42,08 s offline. A guarda fotométrica forneceu máscara em 206 passadas. O gate de
@@ -618,9 +703,10 @@ nas subseções posteriores e no fechamento da seção 10.
 - GitHub foi consultado em leitura: PR #180 segue aberto e mergeável, head remoto `93f1c28`, com
   4 threads de revisão ainda não resolvidas. O workflow `ci` desse head concluiu os jobs `fast` e
   `slow` com sucesso (run `45276928495`); Devin Review permanece pendente. Esses checks cobrem
-  `93f1c28`, não o código local em `59ceb39`, que ainda não foi enviado.
+  `93f1c28`, não o código local até `c57ed60`, que ainda não foi enviado.
 - Conferência do commit do relatório informado: `4d6f924` existe, mas a consulta local de
   `git branch --contains 4d6f924` retorna apenas `backup/work-180-d7ded1e`; a branch ativa
   `work/180-on-main`, cuja série local parte de `0bf0177` sobre `origin/main` em `5e530879`, não
-  contém esse commit como ancestral. Não movi refs nem reescrevi o histórico; o documento ativo
-  incorpora a síntese e acrescenta os resultados da implementação.
+  contém esse commit como ancestral. Não movi refs nem reescrevi o histórico; a versão ativa deste
+  relatório incorpora a síntese e acrescenta os resultados da implementação e do ensaio
+  reproduzível.
