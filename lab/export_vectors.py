@@ -24,7 +24,10 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+# `python lab/export_vectors.py` põe só lab/ no path: lab._cli vem da raiz.
+sys.path.insert(0, str(_REPO_ROOT))
+sys.path.insert(0, str(_REPO_ROOT / "src"))
 
 from draw import config  # noqa: E402
 from draw.exporters.export_vectors import (  # noqa: E402
@@ -45,8 +48,8 @@ from draw.exporters.export_vectors import (  # noqa: E402
     write_svg,
     zhang_suen_thin,
 )
+from lab._cli import main_errors  # noqa: E402
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ONNX = _REPO_ROOT / "models" / "page_clean_unet.onnx"
 
 
@@ -173,6 +176,7 @@ def export_vectors(
     }
 
 
+@main_errors
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Exporta uma página/canvas do Draw para SVG + DXF vetoriais."
@@ -244,120 +248,111 @@ def main(argv=None):
     if bgr is None:
         print(f"erro: não foi possível ler {args.input}", file=sys.stderr)
         return 2
-    try:
-        img_h, img_w = bgr.shape[:2]
-        out_dir = Path(args.out_dir)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        stem = Path(args.input).stem
+    img_h, img_w = bgr.shape[:2]
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stem = Path(args.input).stem
 
-        verify = None if args.allow_unverified else "manifest"
-        t0 = time.perf_counter()
-        result = export_vectors(
-            bgr,
-            mask_source=args.mask,
-            onnx_path=args.onnx,
-            epsilon=args.epsilon,
-            paper_mm=args.paper_mm,
-            paper_format=args.format,
-            verify=verify,
-            threshold=args.threshold,
-            orientation=args.orientation,
-        )
-        paper_w_mm, paper_h_mm = result["paper_mm"]
-        svg_path = out_dir / f"{stem}.svg"
-        dxf_path = out_dir / f"{stem}.dxf"
-        write_svg(
-            result["polylines"],
-            svg_path,
-            img_w,
-            img_h,
-            paper_w_mm,
-            paper_h_mm,
-            result["stroke_width_mm"],
-            scale_mm_per_px=result["scale_mm_per_px"],
-        )
-        write_dxf(
-            result["polylines"],
-            dxf_path,
-            img_w,
-            img_h,
-            paper_w_mm,
-            paper_h_mm,
-            result["stroke_width_mm"],
-            scale_mm_per_px=result["scale_mm_per_px"],
-        )
+    verify = None if args.allow_unverified else "manifest"
+    t0 = time.perf_counter()
+    result = export_vectors(
+        bgr,
+        mask_source=args.mask,
+        onnx_path=args.onnx,
+        epsilon=args.epsilon,
+        paper_mm=args.paper_mm,
+        paper_format=args.format,
+        verify=verify,
+        threshold=args.threshold,
+        orientation=args.orientation,
+    )
+    paper_w_mm, paper_h_mm = result["paper_mm"]
+    svg_path = out_dir / f"{stem}.svg"
+    dxf_path = out_dir / f"{stem}.dxf"
+    write_svg(
+        result["polylines"],
+        svg_path,
+        img_w,
+        img_h,
+        paper_w_mm,
+        paper_h_mm,
+        result["stroke_width_mm"],
+        scale_mm_per_px=result["scale_mm_per_px"],
+    )
+    write_dxf(
+        result["polylines"],
+        dxf_path,
+        img_w,
+        img_h,
+        paper_w_mm,
+        paper_h_mm,
+        result["stroke_width_mm"],
+        scale_mm_per_px=result["scale_mm_per_px"],
+    )
 
-        # Prova: relê os DOIS arquivos do disco, rasteriza e compara com
-        # a máscara. Cada traço rasteriza na largura gravada no arquivo
-        # (grupo 43 / stroke-width) — largura global só cobre quem saiu
-        # sem width_px.
-        sx, sy = result["scale_mm_per_px"]
-        thickness = max(int(round(result["stroke_width_px"])), 1)
-        ink = result["ink"]
+    # Prova: relê os DOIS arquivos do disco, rasteriza e compara com a máscara.
+    # Cada traço rasteriza na largura gravada no arquivo (grupo 43 /
+    # stroke-width) — largura global só cobre quem saiu sem width_px.
+    sx, sy = result["scale_mm_per_px"]
+    thickness = max(int(round(result["stroke_width_px"])), 1)
+    ink = result["ink"]
 
-        def _rasterize_weighted(parsed, widths, **kw):
-            # Uma varredura de página por arquivo; weighted_segments
-            # expande em segmentos com a espessura da SUA perpendicular
-            # (cotovelos sob escala anisotrópica) e colapsa pontos
-            # duplicados do DXF.
-            parts, ths = weighted_segments(parsed, widths, sx, sy, thickness)
-            return rasterize(
-                parts, ink.shape, sx, sy, thickness, thicknesses_px=ths, **kw
-            )
+    def _rasterize_weighted(parsed, widths, **kw):
+        # Uma varredura de página por arquivo; weighted_segments expande
+        # em segmentos com a espessura da SUA perpendicular (cotovelos
+        # sob escala anisotrópica) e colapsa pontos duplicados do DXF.
+        parts, ths = weighted_segments(parsed, widths, sx, sy, thickness)
+        return rasterize(parts, ink.shape, sx, sy, thickness, thicknesses_px=ths, **kw)
 
-        widths_svg, widths_dxf = [], []
-        raster_svg = _rasterize_weighted(
-            parse_svg_paths(svg_path, widths_svg), widths_svg
-        )
-        raster_dxf = _rasterize_weighted(
-            parse_dxf_polylines(dxf_path, widths_dxf),
-            widths_dxf,
-            flip_y=True,
-            paper_h_mm=paper_h_mm,
-        )
-        iou_svg = iou(raster_svg, ink)
-        iou_dxf = iou(raster_dxf, ink)
+    widths_svg, widths_dxf = [], []
+    raster_svg = _rasterize_weighted(parse_svg_paths(svg_path, widths_svg), widths_svg)
+    raster_dxf = _rasterize_weighted(
+        parse_dxf_polylines(dxf_path, widths_dxf),
+        widths_dxf,
+        flip_y=True,
+        paper_h_mm=paper_h_mm,
+    )
+    iou_svg = iou(raster_svg, ink)
+    iou_dxf = iou(raster_dxf, ink)
 
-        overlay = bgr.copy()
-        overlay[raster_svg] = (0, 0, 255)
-        cv2.imwrite(str(out_dir / f"{stem}_overlay.png"), overlay)
-        cv2.imwrite(str(out_dir / f"{stem}_mask.png"), (ink.astype(np.uint8) * 255))
+    overlay = bgr.copy()
+    overlay[raster_svg] = (0, 0, 255)
+    cv2.imwrite(str(out_dir / f"{stem}_overlay.png"), overlay)
+    cv2.imwrite(str(out_dir / f"{stem}_mask.png"), (ink.astype(np.uint8) * 255))
 
-        proof = {
-            "input": str(args.input),
-            "mask_source": (
-                f"draw.page_clean.PageCleanInk sobre {args.onnx} "
-                f"(mosaico 256x256, limiar da mascara de quadro unico "
-                f"{result['mask_threshold']}; o canvas ao vivo vota com "
-                "InkConfig.seen_threshold, nao com este limiar)"
-                if args.mask == "model"
-                else "otsu invertido (declarado)"
-            ),
-            "page_px": [img_w, img_h],
-            "paper_mm": [paper_w_mm, paper_h_mm],
-            "orientation": result["orientation"] if args.paper_mm is None else None,
-            "paper_format": args.format if args.paper_mm is None else None,
-            "scale_mm_per_px": result["scale_mm_per_px"],
-            "epsilon_px": args.epsilon,
-            "ink_px": int(ink.sum()),
-            "skeleton_px": int(result["skeleton"].sum()),
-            "polylines": len(result["polylines"]),
-            "points_before_simplification": result["points_raw"],
-            "points_after_simplification": result["points_simplified"],
-            "stroke_width_px_median": round(result["stroke_width_px"], 2),
-            "svg_bytes": svg_path.stat().st_size,
-            "dxf_bytes": dxf_path.stat().st_size,
-            "iou_svg_roundtrip": round(iou_svg, 4),
-            "iou_dxf_roundtrip": round(iou_dxf, 4),
-            "seconds": round(time.perf_counter() - t0, 2),
-        }
-        (out_dir / f"{stem}_proof.json").write_text(
-            json.dumps(proof, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
-        print(json.dumps(proof, indent=2, ensure_ascii=False))
-    except (ValueError, RuntimeError, OSError, KeyError, cv2.error) as error:
-        parser.exit(2, f"erro: {error}\n")
+    proof = {
+        "input": str(args.input),
+        "mask_source": (
+            f"draw.page_clean.PageCleanInk sobre {args.onnx} "
+            f"(mosaico 256x256, limiar da mascara de quadro unico "
+            f"{result['mask_threshold']}; o canvas ao vivo vota com "
+            "InkConfig.seen_threshold, nao com este limiar)"
+            if args.mask == "model"
+            else "otsu invertido (declarado)"
+        ),
+        "page_px": [img_w, img_h],
+        "paper_mm": [paper_w_mm, paper_h_mm],
+        "orientation": result["orientation"] if args.paper_mm is None else None,
+        "paper_format": args.format if args.paper_mm is None else None,
+        "scale_mm_per_px": result["scale_mm_per_px"],
+        "epsilon_px": args.epsilon,
+        "ink_px": int(ink.sum()),
+        "skeleton_px": int(result["skeleton"].sum()),
+        "polylines": len(result["polylines"]),
+        "points_before_simplification": result["points_raw"],
+        "points_after_simplification": result["points_simplified"],
+        "stroke_width_px_median": round(result["stroke_width_px"], 2),
+        "svg_bytes": svg_path.stat().st_size,
+        "dxf_bytes": dxf_path.stat().st_size,
+        "iou_svg_roundtrip": round(iou_svg, 4),
+        "iou_dxf_roundtrip": round(iou_dxf, 4),
+        "seconds": round(time.perf_counter() - t0, 2),
+    }
+    (out_dir / f"{stem}_proof.json").write_text(
+        json.dumps(proof, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    print(json.dumps(proof, indent=2, ensure_ascii=False))
     return 0
 
 

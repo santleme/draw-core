@@ -26,6 +26,7 @@ if __package__ in (None, ""):
 
 from draw.paper import perspective_matrix  # noqa: E402
 from lab import sim_isp  # noqa: E402
+from lab._cli import main_errors  # noqa: E402
 from lab.eval_capture import pixel_metrics, run_pipeline  # noqa: E402
 
 
@@ -713,6 +714,7 @@ def audit(video, gt_path, *, fps=None, models=None, save_masks=None, verify="man
     return report
 
 
+@main_errors
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--video", type=Path, required=True)
@@ -728,23 +730,20 @@ def main(argv=None):
         help="grava a máscara confirmada de cada checkpoint como PNG",
     )
     args = parser.parse_args(argv)
-    try:
-        report = audit(
-            args.video,
-            args.gt,
-            fps=args.fps,
-            models={
-                "neural": args.neural_model,
-                "page_clean": args.page_clean_model,
-                "hand": args.hand_model,
-            },
-            save_masks=args.save_masks,
-        )
-        text = json.dumps(report, ensure_ascii=False, indent=2)
-        if args.out:
-            args.out.write_text(text + "\n", encoding="utf-8")
-    except (ValueError, RuntimeError, OSError, KeyError, cv2.error) as error:
-        parser.exit(2, f"erro: {error}\n")
+    report = audit(
+        args.video,
+        args.gt,
+        fps=args.fps,
+        models={
+            "neural": args.neural_model,
+            "page_clean": args.page_clean_model,
+            "hand": args.hand_model,
+        },
+        save_masks=args.save_masks,
+    )
+    text = json.dumps(report, ensure_ascii=False, indent=2)
+    if args.out:
+        args.out.write_text(text + "\n", encoding="utf-8")
     print(text)
     return 0
 

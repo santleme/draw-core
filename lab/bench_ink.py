@@ -45,6 +45,8 @@ for _p in (str(_REPO_ROOT / "src"), str(_REPO_ROOT)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from lab._cli import main_errors  # noqa: E402
+
 # Glifos do requisito (c): traços horizontais curtos de E, T, S e H.
 SHORT_STROKE_GLYPHS = ("E", "T", "T2", "S", "H")
 
@@ -729,6 +731,7 @@ def _print_clips(rows):
         )
 
 
+@main_errors
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--synthetic", action="store_true", help="roda o sintético")
@@ -788,53 +791,42 @@ def main(argv=None):
         from draw.infra.manifest import verify_model
         from draw.page_clean import PageCleanInk
         from draw.perception import NeuralSheetDetector
-        from lab.corpus.clip import ClipError
 
-        try:
-            models = Path(args.models)
+        models = Path(args.models)
 
-            def fresh_detector():
-                # O detector guarda bordas e máscara entre detecções:
-                # reusá-lo entre clipes/presets faria o resultado
-                # depender da ordem de execução (review do PR #54).
-                detector = NeuralSheetDetector(
-                    str(models / "draw_seg_v3_dyn.onnx"), verify=verify_model
-                )
-                detector.load()
-                return detector
-
-            page_clean = PageCleanInk(
-                str(models / "page_clean_unet.onnx"), verify=verify_model
+        def fresh_detector():
+            # O detector guarda bordas e máscara entre detecções: reusá-lo
+            # entre clipes/presets faria o resultado depender da ordem de
+            # execução (review do PR #54).
+            detector = NeuralSheetDetector(
+                str(models / "draw_seg_v3_dyn.onnx"), verify=verify_model
             )
-            page_clean.load()
-            rows = []
-            for clip in sorted(Path(args.clips).iterdir()):
-                if not (clip / "clip.json").exists() or (
-                    args.only and clip.name != args.only
-                ):
-                    continue
-                for preset in args.presets.split(","):
-                    row = run_clip(
-                        clip,
-                        preset_flags(preset),
-                        detector=fresh_detector(),
-                        page_clean=page_clean,
-                        verify=None,
-                    )
-                    row["preset"] = preset
-                    row.pop("_canvas")
-                    rows.append(row)
-            report["clips"] = rows
-            _print_clips(rows)
-        except (
-            ClipError,
-            ValueError,
-            RuntimeError,
-            OSError,
-            KeyError,
-            cv2.error,
-        ) as error:
-            parser.exit(2, f"erro: {error}\n")
+            detector.load()
+            return detector
+
+        page_clean = PageCleanInk(
+            str(models / "page_clean_unet.onnx"), verify=verify_model
+        )
+        page_clean.load()
+        rows = []
+        for clip in sorted(Path(args.clips).iterdir()):
+            if not (clip / "clip.json").exists() or (
+                args.only and clip.name != args.only
+            ):
+                continue
+            for preset in args.presets.split(","):
+                row = run_clip(
+                    clip,
+                    preset_flags(preset),
+                    detector=fresh_detector(),
+                    page_clean=page_clean,
+                    verify=None,
+                )
+                row["preset"] = preset
+                row.pop("_canvas")
+                rows.append(row)
+        report["clips"] = rows
+        _print_clips(rows)
     if args.json:
         Path(args.json).write_text(
             json.dumps(_json_safe(report), indent=1, allow_nan=False)
