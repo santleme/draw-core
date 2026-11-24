@@ -582,12 +582,18 @@ def _setup_pip_fallback(tmp_path, launcher, *names):
 
 
 @pytest.mark.parametrize("stub", ["python", "py"])
-def test_falls_back_when_no_python3(tmp_path, launcher, stub):
-    """Sem python3 no PATH (Git Bash/MSYS sem MSYS2, ou Windows so com
-    o launcher `py`): o candidato seguinte passa na sonda `-c`, cria o
-    venv e o lancamento segue normal — o word-split de "py -3" e
-    intencional."""
+@pytest.mark.parametrize("python3", ["absent", "failing"])
+def test_falls_back_when_no_usable_python3(tmp_path, launcher, stub, python3):
+    """Sem python3 utilizavel no PATH — ausente (Git Bash/MSYS sem
+    MSYS2, ou Windows so com o launcher `py`) ou presente mas que
+    aborta ao executar (stub da MS Store responde != 0 a qualquer
+    `-c`): o candidato seguinte passa na sonda, cria o venv e o
+    lancamento segue normal — o word-split de "py -3" e intencional."""
     _setup_pip_fallback(tmp_path, launcher, stub)
+    if python3 == "failing":
+        broken = launcher / "python3"
+        broken.write_text("#!/bin/sh\nexit 1\n")
+        broken.chmod(0o755)
 
     subprocess.run(
         [BASH, "run.sh", "--check"],
