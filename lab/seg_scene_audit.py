@@ -53,10 +53,14 @@ import cv2
 import numpy as np
 
 if __package__ in (None, ""):
-    _repo_root = Path(__file__).resolve().parent.parent
-    sys.path.insert(0, str(_repo_root / "packages" / "draw-dral" / "src"))
-    sys.path.insert(0, str(_repo_root / "src"))
-    sys.path.insert(0, str(_repo_root))
+    _repo_root = Path(__file__).resolve().parents[1]
+    for _p in (
+        str(_repo_root / "packages" / "draw-dral" / "src"),
+        str(_repo_root / "src"),
+        str(_repo_root),
+    ):
+        if _p not in sys.path:
+            sys.path.insert(0, _p)
 
 from lab.corpus.clip import IMG_EXTS, frame_sort_key  # noqa: E402
 

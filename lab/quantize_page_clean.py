@@ -40,7 +40,11 @@ from pathlib import Path
 import numpy as np
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-for _p in (str(_REPO_ROOT / "src"), str(_REPO_ROOT)):
+for _p in (
+    str(_REPO_ROOT / "packages" / "draw-dral" / "src"),
+    str(_REPO_ROOT / "src"),
+    str(_REPO_ROOT),
+):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 

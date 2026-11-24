@@ -38,7 +38,14 @@ import sys
 from pathlib import Path
 
 if __package__ in (None, ""):
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+    _repo_root = Path(__file__).resolve().parents[1]
+    for _p in (
+        str(_repo_root / "packages" / "draw-dral" / "src"),
+        str(_repo_root / "src"),
+        str(_repo_root),
+    ):
+        if _p not in sys.path:
+            sys.path.insert(0, _p)
 
 # Fontes que o veto de presença alcança: a detecção neural devolve
 # cantos ANTES do check do logit (app.py) e é imune a ele — numa

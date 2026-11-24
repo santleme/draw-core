@@ -24,7 +24,14 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+for _p in (
+    str(_REPO_ROOT / "packages" / "draw-dral" / "src"),
+    str(_REPO_ROOT / "src"),
+    str(_REPO_ROOT),
+):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from draw import config  # noqa: E402
 from draw.exporters.export_vectors import (  # noqa: E402
@@ -46,7 +53,6 @@ from draw.exporters.export_vectors import (  # noqa: E402
     zhang_suen_thin,
 )
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ONNX = _REPO_ROOT / "models" / "page_clean_unet.onnx"
 
 

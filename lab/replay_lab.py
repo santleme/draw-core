@@ -31,8 +31,13 @@ import cv2
 import numpy as np
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(_REPO_ROOT))
-sys.path.insert(0, str(_REPO_ROOT / "src"))
+for _p in (
+    str(_REPO_ROOT / "packages" / "draw-dral" / "src"),
+    str(_REPO_ROOT / "src"),
+    str(_REPO_ROOT),
+):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from lab.corpus.clip import IMG_EXTS, frame_sort_key  # noqa: E402
 from lab.sync_workers import build_sync_pipeline  # noqa: E402
