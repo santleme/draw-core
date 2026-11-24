@@ -34,23 +34,26 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT))
 sys.path.insert(0, str(_REPO_ROOT / "src"))
 
+from lab.corpus.clip import IMG_EXTS, frame_sort_key  # noqa: E402
 from lab.sync_workers import build_sync_pipeline  # noqa: E402
-
-IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp"}
 
 
 # ------------------------------------------------------------------
 # Corpus
 # ------------------------------------------------------------------
 def list_corpus_frames(corpus):
-    """Frames do corpus em ordem: raw/ de sessão ou o próprio dir."""
+    """Frames do corpus em ordem numerica de sufixo (f2 antes de
+    f10): raw/ de sessão ou o próprio dir."""
     corpus = Path(corpus)
     src = corpus
     for sub in ("raw", "frames"):
         if (corpus / sub).is_dir():
             src = corpus / sub
             break
-    files = sorted(p for p in src.iterdir() if p.suffix.lower() in IMG_EXTS)
+    files = sorted(
+        (p for p in src.iterdir() if p.suffix.lower() in IMG_EXTS),
+        key=frame_sort_key,
+    )
     if not files:
         raise FileNotFoundError(f"nenhum frame em {src}")
     return files

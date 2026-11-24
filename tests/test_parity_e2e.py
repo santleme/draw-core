@@ -257,6 +257,41 @@ def test_driver_fecha_maskers_no_finally():
     drv._close_hand_masker(None)
 
 
+def test_driver_frame_sort_key_espelha_a_do_clip():
+    """O driver roda sob o PYTHONPATH legado e duplica a chave de
+    ordenação de diretório — este pino garante que os dois lados da
+    paridade leem o mesmo quadro no mesmo índice (sem ela, f10000.png
+    do f%04d da captura pareava com f1001.png do lado novo)."""
+    import importlib
+    from pathlib import Path
+
+    from lab.corpus.clip import frame_sort_key as clip_key
+
+    saved = dict(os.environ)
+    try:
+        drv = importlib.import_module("lab.parity_legacy_driver")
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+
+    nomes = [
+        Path(n)
+        for n in (
+            "f2.png",
+            "f10.png",
+            "f10000.png",
+            "f9999.png",
+            "f0001.png",
+            "frame_3.png",
+            "seq_9.bmp",
+            "capa.png",
+        )
+    ]
+    assert [p.name for p in sorted(nomes, key=drv.frame_sort_key)] == [
+        p.name for p in sorted(nomes, key=clip_key)
+    ]
+
+
 def test_run_new_pins_legacy_tier_a_config(monkeypatch, tmp_path):
     """A régua de paridade contra o SheetInkLoop legado precisa fixar a base
     legada (sem ganho, sem Detect-Wake e com InkConfig()) tanto no Pipeline

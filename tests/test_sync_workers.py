@@ -4,22 +4,19 @@ O builder é exercido com as peças ``draw.*`` grampeadas por
 monkeypatch — os imports dentro do corpo da função existem para que
 a interceptação por atributo de módulo funcione (a mesma convenção
 do SyncDetector.submit). O spy do bench_ink e os pinos da paridade
-dependem disso.
+dependem disso. Cobre tambem a ordenacao numerica de
+``iter_frames`` (Parte 7).
 """
 
-import sys
-from pathlib import Path
-
+import cv2
+import numpy as np
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from lab.sync_workers import (  # noqa: E402
+from lab.sync_workers import (
     SyncBundle,
     SyncDetector,
     SyncPresence,
     build_sync_pipeline,
+    iter_frames,
     step_sync_frame,
 )
 
@@ -348,3 +345,17 @@ def test_step_sync_frame_raises_the_worker_error():
     with pytest.raises(RuntimeError, match="trabalhadora de tinta") as exc:
         step_sync_frame(_Pipe(), _Worker(True, error=error), object())
     assert exc.value.__cause__ is error
+
+
+def test_iter_frames_ordena_diretorio_por_sufixo_numerico(tmp_path):
+    """f2.png (zeros) chega antes de f10.png (255): a ordem de nome
+    os invertia e o replay/simulador consumia o quadro 10 no lugar
+    do 2."""
+    cv2.imwrite(str(tmp_path / "f2.png"), np.zeros((4, 4, 3), np.uint8))
+    cv2.imwrite(str(tmp_path / "f10.png"), np.full((4, 4, 3), 255, np.uint8))
+
+    frames = list(iter_frames(tmp_path, limit=10))
+
+    assert [i for i, _frame in frames] == [0, 1]
+    assert frames[0][1].max() == 0  # f2.png primeiro
+    assert frames[1][1].min() == 255  # f10.png depois
