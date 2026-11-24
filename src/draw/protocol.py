@@ -74,6 +74,14 @@ MAX_FRAME_PIXELS = 40_000_000
 # declarado morto depois de ~4 janelas de silêncio.
 _STALL_WINDOWS = 3
 
+# Pacing do replay .drawcap. Um capture_ts_us corrompido podia prender a
+# thread num sleep() de horas: acima do teto o replay entrega na hora. A
+# espera vai em fatias para release() interrompe-la em ate uma fatia —
+# e continua passando por time.sleep/monotonic do modulo, que os testes
+# monkeypatcham com um relogio falso.
+_MAX_PACE_DELAY_S = 5.0
+_PACE_SLICE_S = 0.05
+
 
 def _connect(host, port, token, timeout):
     token = resolve_token(token)
@@ -357,7 +365,14 @@ class HelperCapture:
         path = Path(self.source)
         if not path.is_file():
             return
-        self._handle = open(path, "rb")
+        try:
+            self._handle = open(path, "rb")
+        except OSError as error:
+            # Existe mas nao abre (permissao, bloqueio): mesmo desfecho de
+            # "nao abriu" — isOpened() False — em vez de um traceback cru
+            # para o open_capture; o motivo fica em last_error.
+            self.last_error = error
+            return
         self._iter = _iter_records(self._handle.read)
         self._opened = True
         self._pace_stream = True
@@ -386,9 +401,16 @@ class HelperCapture:
                 deadline = (
                     self._pace_clock_s + (capture_ts_us - self._pace_origin_us) / 1e6
                 )
-                delay = deadline - time.monotonic()
-                if delay > 0:
-                    time.sleep(delay)
+                # Teto + fatias: um salto de timestamp nao pode dormir
+                # para sempre e release() interrompe em ate uma fatia.
+                wait_until = min(deadline, time.monotonic() + _MAX_PACE_DELAY_S)
+                while self._opened:
+                    remaining = wait_until - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    time.sleep(min(remaining, _PACE_SLICE_S))
+                if not self._opened:
+                    return False, None
         frame = decode_jpeg(payload)
         if frame is None:
             self.last_error = ProtocolError(

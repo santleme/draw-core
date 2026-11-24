@@ -598,8 +598,8 @@ def _count_dispatches(pub):
     calls = []
     real = pub._dispatch
 
-    def counted(*args):
-        real(*args)
+    def counted(*args, **kwargs):
+        real(*args, **kwargs)
         calls.append(1)
 
     pub._dispatch = counted
@@ -648,11 +648,11 @@ def test_latest_wins_keeps_the_full_request_of_a_replaced_publication():
         pub = stream.InkStreamPublisher(port=None, record_path=path)
         real = pub._dispatch
 
-        def slow(*args):
+        def slow(*args, **kwargs):
             seen.append(args)
             if len(seen) == 1:
                 gate.wait(2.0)
-            return real(*args)
+            return real(*args, **kwargs)
 
         pub._dispatch = slow
         mask = _mask()
@@ -910,3 +910,63 @@ def test_corrupt_stream_raises_and_keeps_mask():
             for rec in stream.iter_records(io.BytesIO(bad).read):
                 canvas.apply(rec)
         assert np.array_equal(canvas.mask, before)
+
+
+def test_adopt_after_close_rejects_and_closes_socket(monkeypatch):
+    """close() durante o handshake: _adopt ve _closed sob o _sinks_lock,
+    nao adiciona o consumidor tardio a _sinks e fecha o socket em vez de
+    vaza-lo (o send_loop morreu e ninguem mais fecharia a conexao)."""
+    entered = threading.Event()
+    proceed = threading.Event()
+    real_handshake = stream.server_handshake
+
+    def parked(conn, token):
+        entered.set()
+        proceed.wait(timeout=5)
+        return real_handshake(conn, token)
+
+    monkeypatch.setattr(stream, "server_handshake", parked)
+    pub = stream.InkStreamPublisher(port=0, token=TOKEN, log=lambda *_: None)
+    sock = socket.create_connection(("127.0.0.1", pub.port), timeout=3)
+    try:
+        assert entered.wait(timeout=3)  # handshake retido dentro de _adopt
+        pub.close()
+        proceed.set()
+        client_handshake(sock, TOKEN)
+        sock.settimeout(3)
+        assert sock.recv(1) == b""  # adopt rejeitou: socket fechado
+        assert all(not s.is_socket for s in pub._sinks)
+    finally:
+        proceed.set()
+        sock.close()
+        pub.close()
+
+
+@needs_private_files
+def test_dispatch_receives_paper_mm_as_kwarg(tmp_path):
+    """paper_mm via parametro explicito (o atributo _dispatch_paper_mm
+    morreu): o send_loop passa o mm do item; a chamada de 7 args cai
+    no self._paper_mm corrente."""
+    path = tmp_path / "rec.dral"
+    pub = stream.InkStreamPublisher(
+        port=None,
+        record_path=str(path),
+        paper_mm=(210.0, 297.0),
+        log=lambda *_: None,
+    )
+    try:
+        mask = _mask()
+        mask[1:3, 1:3] = 255
+        pub._dispatch(1, 1, 0, mask, None, None, False, paper_mm=(100.0, 50.0))
+        pub._dispatch(2, 2, 0, mask, None, None, True)
+    finally:
+        pub.close()
+    canvas = stream.InkCanvas()
+    papers = []
+    for rec in stream.records_from_file(path):
+        canvas.apply(rec)
+        papers.append(canvas.paper_mm)
+    assert papers == [
+        pytest.approx((100.0, 50.0)),
+        pytest.approx((210.0, 297.0)),
+    ]

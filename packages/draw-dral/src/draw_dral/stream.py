@@ -575,13 +575,21 @@ class InkStreamPublisher:
         self._prune_dead()
         evicted = []
         with self._sinks_lock:
-            self._sinks.append(sink)
-            # Teto de consumidores: o mais antigo (nunca o arquivo) sai.
-            consumers = [s for s in self._sinks if s.is_socket]
-            while len(consumers) > MAX_CONSUMERS:
-                oldest = consumers.pop(0)
-                self._sinks.remove(oldest)
-                evicted.append(oldest)
+            # Adocao tardia: close() drena _sinks sob este mesmo lock — se
+            # ja correu, um sink que entrasse aqui nunca seria servido nem
+            # fechado (o send_loop morreu e ninguem mais o poda).
+            adopted = not self._closed
+            if adopted:
+                self._sinks.append(sink)
+                # Teto de consumidores: o mais antigo (nunca o arquivo) sai.
+                consumers = [s for s in self._sinks if s.is_socket]
+                while len(consumers) > MAX_CONSUMERS:
+                    oldest = consumers.pop(0)
+                    self._sinks.remove(oldest)
+                    evicted.append(oldest)
+        if not adopted:
+            _safe_close(sink)
+            return
         for old in evicted:
             _safe_close(old)
         # Consumidor novo recebe FULL da última publicação mesmo parada.
@@ -617,9 +625,8 @@ class InkStreamPublisher:
                     last[7],
                 )  # quem chegou recebe FULL de qualquer jeito
             last = item
-            self._dispatch_paper_mm = item[7]
             try:
-                self._dispatch(*item[:7])
+                self._dispatch(*item[:7], paper_mm=item[7])
             except Exception as error:  # noqa: BLE001 - o envio nunca morre
                 self._log(f"Stream de tinta: falha ao despachar ({error!r}).")
             if closed:
@@ -640,8 +647,12 @@ class InkStreamPublisher:
         captured_at_us,
         anchor,
         force_full,
+        paper_mm=None,
     ):
-        paper_mm = getattr(self, "_dispatch_paper_mm", self._paper_mm)
+        # paper_mm=None preserva quem chama com 7 argumentos: cai nas
+        # dimensoes correntes — o send_loop sempre passa o mm do item.
+        if paper_mm is None:
+            paper_mm = self._paper_mm
         with self._sinks_lock:
             sinks = list(self._sinks)
         dead = []
