@@ -319,16 +319,19 @@ def build_sync_pipeline(
 def step_sync_frame(pipeline, ink_worker, packet):
     """Um quadro do laço dirigido: step + pump + colheita, com erro explícito.
 
-    ``step`` já devolve uma colheita (None ou INK_WORKER_FAILED);
-    ``pump`` devolve True quando uma passada rodou — só então a
-    colheita extra publica a passada nova no mesmo quadro (sem
-    passada, collect_ink é um poll_display vazio). Um worker.error ou
-    um outcome não-None encerram o laço como RuntimeError. Devolve
-    ``pumped`` para o driver medir a passada deste quadro.
+    ``step`` já devolve uma colheita (None ou INK_WORKER_FAILED) e a
+    colheita roda todo quadro: ``pump`` devolve False tanto no ócio
+    quanto na ENTRADA do descanso — e essa entrada publica a limpeza
+    do provisório (_announce_rest_locked), que só poll_display
+    enxerga. É o comportamento que o parity_e2e tinha antes do #210;
+    sem versão nova de display o poll é um no-op barato. Um
+    worker.error ou um outcome não-None encerram o laço como
+    RuntimeError. Devolve ``pumped`` para o driver medir a passada
+    deste quadro.
     """
     outcome = pipeline.step(packet)
     pumped = ink_worker.pump()
-    if pumped and outcome is None:
+    if outcome is None:
         outcome = pipeline.collect_ink()
     if ink_worker.error is not None:
         raise RuntimeError("trabalhadora de tinta falhou") from ink_worker.error
