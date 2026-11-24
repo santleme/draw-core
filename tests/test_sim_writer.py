@@ -88,3 +88,28 @@ def test_sim_writer_rejects_none_for_non_nullable_flags():
 
     with pytest.raises(ValueError, match="booleano|invalido"):
         sim_writer._parse_flags(["coverage=none"])
+
+
+def test_audit_timeout_imprime_rabos_e_sai(monkeypatch, tmp_path, capsys):
+    """Cenário travado: o audit mostra os rabos da saída parcial do
+    audit-one e sai nomeando o cenário, em vez de pendurar a bateria
+    inteira atrás dele."""
+    import subprocess
+
+    from lab import sim_writer
+
+    captured = {}
+
+    def fake_run(cmd, **kw):
+        captured.update(kw)
+        raise subprocess.TimeoutExpired(
+            cmd, kw["timeout"], output="stdout parcial", stderr="stderr parcial"
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(SystemExit, match="tempo limite.*cursive"):
+        sim_writer.audit("corpus", tmp_path, [], ["cursive"])
+    assert captured["timeout"] == 900
+    streams = capsys.readouterr()
+    assert "stdout parcial" in streams.out
+    assert "stderr parcial" in streams.err

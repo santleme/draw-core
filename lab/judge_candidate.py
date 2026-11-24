@@ -53,6 +53,10 @@ DEFAULT_PY = HOME / "workspace/draw-lab/mlvenv/bin/python"
 SHEET_APTO = "APTO_A_TESTE_AO_VIVO"
 ABSENCE_PASS = "PASSA_AUSENCIA"
 
+# Teto por juiz: cada um roda ONNX sobre dezenas de clipes ("dezenas
+# de minutos"). É limite de travamento, não de desempenho.
+JUDGE_TIMEOUT_S = 3600
+
 JUDGES = (
     ("sheet", "judge_sheet.py"),
     ("absence", "judge_absence.py"),
@@ -68,25 +72,57 @@ def sha256_of(path):
     return h.hexdigest()
 
 
-def newest_report(results_dir, prefix, since):
-    files = [
-        p for p in results_dir.glob(f"{prefix}_*.json") if p.stat().st_mtime >= since
-    ]
-    return max(files, key=lambda p: p.stat().st_mtime) if files else None
+def newest_report(results_dir, prefix, before):
+    """Relatório que ESTA rodada produziu, ou None.
+
+    `before` é o snapshot `{path: mtime}` dos `prefix_*.json` de antes
+    do juiz rodar. Conta como produzido nesta rodada tanto o arquivo
+    novo (fora de `before`) quanto o sobrescrito — detectado por
+    `mtime != before[p]` em qualquer direção, o que cobre também o
+    mtime para trás de relógio grosso do kernel ou filesystem com
+    timestamp próprio. Entre os candidatos vence o de maior mtime."""
+    fresh = {}
+    for p in results_dir.glob(f"{prefix}_*.json"):
+        try:
+            mtime = p.stat().st_mtime
+        except OSError:
+            continue
+        if p not in before or mtime != before[p]:
+            fresh[p] = mtime
+    return max(fresh, key=fresh.get) if fresh else None
 
 
-def run_judge(python, scripts_dir, results_dir, script, prefix, candidate):
+def run_judge(
+    python,
+    scripts_dir,
+    results_dir,
+    script,
+    prefix,
+    candidate,
+    *,
+    timeout=JUDGE_TIMEOUT_S,
+):
     """Roda um juiz da bancada e devolve (relatório, segundos)."""
     t0 = time.time()
     print(f"=== {script} ===", flush=True)
-    r = subprocess.run(
-        [str(python), str(scripts_dir / script), "--candidate", str(candidate)],
-        cwd=str(scripts_dir),
-    )
+    before = {}
+    for p in results_dir.glob(f"{prefix}_*.json"):
+        try:
+            before[p] = p.stat().st_mtime
+        except OSError:
+            pass
+    try:
+        r = subprocess.run(
+            [str(python), str(scripts_dir / script), "--candidate", str(candidate)],
+            cwd=str(scripts_dir),
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"{script} excedeu o tempo limite de {timeout} s") from None
     dt = time.time() - t0
     if r.returncode != 0:
         raise RuntimeError(f"{script} falhou (rc={r.returncode})")
-    report = newest_report(results_dir, prefix, t0)
+    report = newest_report(results_dir, prefix, before)
     if report is None:
         raise RuntimeError(f"{script} não gerou relatório novo")
     return report, dt

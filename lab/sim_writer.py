@@ -34,7 +34,6 @@ import dataclasses
 import hashlib
 import json
 import math
-import subprocess
 import sys
 from pathlib import Path
 
@@ -45,6 +44,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT))
 sys.path.insert(0, str(_REPO_ROOT / "src"))
 
+from lab.parity_e2e import run_captured  # noqa: E402
 from lab.sync_workers import build_sync_pipeline  # noqa: E402
 
 # ------------------------------------------------------------------
@@ -974,9 +974,12 @@ def audit_one(scen_dir, out_dir, flags, detector_kind="real"):
     return res
 
 
-def audit(corpus, out, flags, scenarios, detector_kind="real"):
+def audit(corpus, out, flags, scenarios, detector_kind="real", *, timeout=900):
     """Roda cada cenário num subprocesso (flags isoladas, ONNX
-    sequencial) e consolida."""
+    sequencial) e consolida.
+
+    `timeout` é por cenário (~30 quadros ≈ 1-3 min): teto de
+    travamento, não de desempenho."""
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     results = []
@@ -995,7 +998,7 @@ def audit(corpus, out, flags, scenarios, detector_kind="real"):
         ]
         if flags:
             cmd += ["--flags", ",".join(flags)]
-        r = subprocess.run(cmd, capture_output=True, text=True)
+        r = run_captured(cmd, "audit-one", timeout, detail=name)
         if r.returncode != 0:
             print(r.stdout[-3000:])
             print(r.stderr[-3000:], file=sys.stderr)

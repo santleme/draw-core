@@ -362,6 +362,116 @@ def test_run_new_pins_legacy_tier_a_config(monkeypatch, tmp_path):
     )
     assert seen["pipeline_config"] == expected
     assert seen["worker_config"] == expected.ink
+    telemetry = json.loads((tmp_path / "telemetry.json").read_text())
+    assert "partial" not in telemetry
+
+
+def test_run_new_despeja_telemetria_parcial_no_crash(monkeypatch, tmp_path):
+    """Um crash no meio do laço não pode levar a telemetria junto: o
+    dump sai pelo finally com "partial": true e os frames processados."""
+    import pytest
+    from lab import parity_e2e
+
+    from draw import hand as hand_module
+    from draw import page_clean as page_clean_module
+    from draw import perception as perception_module
+    from draw import pipeline as pipeline_module
+    from draw.ink import worker as worker_module
+
+    class _NoModel:
+        def __init__(self, *_a, **_kw):
+            pass
+
+        def load(self):
+            pass
+
+    class _FakeWorker:
+        error = None
+
+        def __init__(self, _pc, _hm, *, clock=None, config=None, ink_divnorm=False):
+            pass
+
+        def pump(self):
+            return False
+
+    class _FakePipeline:
+        class tracker:
+            corners = None
+
+        clean_mask = None
+
+        def __init__(self, **_kw):
+            pass
+
+        def step(self, _pkt):
+            return None
+
+        def collect_ink(self):
+            return None
+
+    def frames_then_crash(_corpus, _frames):
+        yield 0, np.zeros((4, 4, 3), np.uint8)
+        raise RuntimeError("fonte quebrou no meio")
+
+    monkeypatch.setattr(perception_module, "NeuralSheetDetector", _NoModel)
+    monkeypatch.setattr(page_clean_module, "PageCleanInk", _NoModel)
+    monkeypatch.setattr(hand_module, "hand_model_available", lambda _m: False)
+    monkeypatch.setattr(worker_module, "PageCleanWorker", _FakeWorker)
+    monkeypatch.setattr(pipeline_module, "Pipeline", _FakePipeline)
+    monkeypatch.setattr(parity_e2e, "iter_frames", frames_then_crash)
+
+    with pytest.raises(RuntimeError, match="fonte quebrou"):
+        parity_e2e.run_new(
+            "corpus",
+            tmp_path,
+            frames=10,
+            fps=30,
+            sheet_model="s.onnx",
+            ink_model="i.onnx",
+            hand_model=None,
+            verify=None,
+        )
+
+    telemetry = json.loads((tmp_path / "telemetry.json").read_text())
+    assert telemetry["partial"] is True
+    assert len(telemetry["frames"]) == 1
+    assert (tmp_path / "canvas.npz").exists()
+    with np.load(tmp_path / "canvas.npz") as archive:
+        assert len(archive.files) == 1
+
+
+def test_run_legacy_timeout_imprime_rabos_e_sai(monkeypatch, tmp_path, capsys):
+    """Driver legado travado: mostra os rabos da saída parcial e sai
+    com explicação, em vez de pendurar a régua para sempre."""
+    import subprocess
+
+    import pytest
+    from lab import parity_e2e
+
+    captured = {}
+
+    def fake_run(cmd, env=None, **kw):
+        captured.update(kw)
+        raise subprocess.TimeoutExpired(
+            cmd, kw["timeout"], output="stdout parcial", stderr="stderr parcial"
+        )
+
+    monkeypatch.setattr(parity_e2e.subprocess, "run", fake_run)
+    with pytest.raises(SystemExit, match="tempo limite"):
+        parity_e2e.run_legacy(
+            tmp_path,
+            tmp_path,
+            tmp_path,
+            frames=1,
+            fps=1.0,
+            sheet_model="s.onnx",
+            ink_model="i.onnx",
+            hand_model="h.task",
+        )
+    assert captured["timeout"] == 1800
+    streams = capsys.readouterr()
+    assert "stdout parcial" in streams.out
+    assert "stderr parcial" in streams.err
 
 
 def test_parity_frame_time_matches_legacy_reciprocal_rounding():
