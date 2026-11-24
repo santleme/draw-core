@@ -1,8 +1,16 @@
 # Validação do escore de arbitragem da âncora (#180) — síntese de pesquisa
 
-Data: 2026-11-23. Branch: `work/180-on-main`. Condensa dois relatórios de pesquisa
-(duas rodadas: fontes secundárias e depois fontes primárias com Firecrawl e experimentos
-numéricos fora do repositório). Este documento é só pesquisa e recomendações; não altera código.
+Pesquisa inicial: 2026-11-23. Implementação e validação local: 2026-11-24. Branch:
+`work/180-on-main`. As seções 0–8 preservam a pesquisa feita em duas rodadas (fontes
+secundárias e depois fontes primárias com Firecrawl e experimentos numéricos fora do
+repositório); a seção 9 registra as alterações e medições posteriores.
+
+**Atualização:** as seções 0–8 registram o estado e as conclusões em 23/11/2026. A seção 9
+preserva snapshots de implementação intermediários de 24/11/2026; algumas de suas medições e a
+primeira regra de aposentadoria do resíduo foram superadas por correções posteriores. A seção 10
+é o fechamento da versão final local: inclui A/B repetido contra `0bf0177`, o teste de worker
+para `unregistered` e o gate completo. Nenhum resultado sem rótulos independentes é tratado como
+prova de precisão funcional.
 
 ## 0. Estado do código que esta síntese analisa
 
@@ -197,3 +205,409 @@ publicados no PR remoto.
   massa cortada e que a regressão de remoção após movimento físico foi corrigida.
 - Testes de propriedade com Hypothesis, A/B de custo do estimador no fluxo completo e o corpus
   real de 30–60 clipes seguem como trabalho futuro. Hypothesis não é dependência do projeto.
+
+## 9. Implementação e evidência — 2026-11-24
+
+### Base e escopo local
+
+- A branch `work/180-on-main` está baseada em `origin/main` no commit
+  `5e53087984705423ab6061c16dc39057bf0cd6d6`; o HEAD base desta atualização é `0bf0177`
+  (`fix(ink): track identity residual freshness`). O rebase não teve conflitos. As alterações
+  abaixo continuam locais, sem commit ou push; o PR remoto e seu CI não foram atualizados.
+- O escopo desta atualização inclui os escores da hipótese de página e da câmera, a validação
+  do suporte projetado, a abstenção quando falta evidência observável, a resolução de resíduos
+  pendentes e seus contratos. A revisão também encontrou e corrigiu um caminho sem cobertura
+  que levantava `UnboundLocalError`. Não foram alterados `contracts.py`, dependências ou modelos.
+
+### Escores e suporte projetado: não premiar massa cortada
+
+O denominador da hipótese de página é a massa após eventual permutação/redimensionamento, mas
+antes da translação inteira. Assim `rot90` continua comparado no domínio que produziu o
+numerador, enquanto a massa que sai da grade conta como evidência perdida. A mesma regra é
+usada nas hipóteses cíclicas. Os escores da página e da câmera são calculados de forma
+independente: câmera sem massa registrada não apaga uma pontuação válida da hipótese da página.
+
+O teste adversarial reproduz a falha de normalizar pela massa sobrevivente: de 10.000 unidades,
+uma translação extrema deixa 100 unidades, todas sobre tinta confirmada. A fórmula antiga dá
+`100/100 = 1,0`, superando um candidato rival que casa 90% (`0,9`). A nova dá `100/10.000 =
+0,01`. O contrato de arbitragem testa também um caso menos extremo: 300 unidades de entrada,
+90% recortadas, resultam em `score_page = 0,1`; a hipótese registrada concorrente marca
+`score_camera = 0,9`, e o veredito é `spurious`.
+
+O escore da câmera também tem denominador antes do recorte: ele re-warpa `p.prob` com a
+visibilidade de origem, mede o suporte projetado completo e aplica a cobertura na geometria da
+câmera. A exceção `anchor_ink` só é unida quando há máscara de cobertura; sem essa máscara, tinta
+confirmada não corta o denominador. O numerador continua sendo a probabilidade registrada e
+válida na grade da âncora. Se a homografia for inválida, cruzar o horizonte projetivo ou exceder
+o limite de 32 vezes a área de origem, o escore da câmera fica indisponível; não há fallback para
+a massa recortada. A arbitragem registra `indeterminate` e abstém. Se houver canvas confirmado,
+mas massa observável abaixo do mínimo, também abstém em vez de trocar a âncora por
+`landing_default`.
+
+`_padded_warp_geometry` normaliza a escala e o sinal da homografia, projeta o suporte bilinear
+`[-1, W] × [-1, H]` e o une à grade normal de destino. Isso retém o halo de interpolação nas
+bordas e permite inserir a máscara do canvas no mesmo sistema de coordenadas. Contratos cobrem
+matrizes projetivas finitas, homografias escalares equivalentes, impulsos nas bordas em escalas
+3,1/3,9, máscaras de origem/destino e comparação com a grade de destino normal.
+
+### Limite de memória: acumular em tiles
+
+A primeira versão materializava todo o warp acolchoado. Na grade A4 de 850×1200, o limite de
+32× permitiria 32,6 milhões de amostras; só o `float32` ocuparia cerca de 124,5 MiB. Coberturas,
+máscara de tinta confirmada e a cópia temporária de `np.where` poderiam elevar o pico acima de
+300 MiB. Isso era um risco de memória real para geometria extrema, embora não fosse o tamanho
+observado nos clipes.
+
+O cálculo de produção agora percorre a saída em tiles de no máximo 1024×1024 e soma com `where`,
+sem criar o canvas projetado completo nem a cópia `np.where`. Um tile de probabilidade `float32`
+tem no máximo 4 MiB; as máscaras temporárias são de um byte/bool por pixel. Pela contagem dos
+arrays explícitos, os buffers transitórios do helper ficam na ordem de 10 MiB na grade A4, mais
+temporários internos do OpenCV. Isso é um limite de alocação calculado pelo código, não uma
+medição de RSS do processo. O limite total de 32× ainda limita o trabalho computacional e, se
+excedido, produz abstenção.
+
+O teste compara a soma em tiles com a referência materializada para warp projetivo, cobertura e
+máscara de tinta; outro intercepta `warpPerspective` e exige que cada `dsize` respeite o tamanho
+do tile. Contratos garantem invariância quando só a matriz da cobertura recebe um fator escalar
+e quando a homografia da probabilidade e a homografia composta da cobertura recebem o mesmo
+fator, de `±1e-300` a `±1e300`.
+
+### Resíduo de identidade: snapshot intermediário, supersedido abaixo
+
+O contrato novo percorre a sequência: desenho confirmado → retorno da mesma folha → estimativa
+de resíduo `(0, -6)` → novo deslize físico com o tracker acompanhando → veredito `landing` →
+novo traço. Quando a pontuação da página sem o resíduo é pelo menos tão alta quanto a pontuação
+com o resíduo, o pouso aposenta o deslocamento antigo antes de re-registrar a passada. A
+telemetria registra o deslocamento aposentado e o motivo; o teste exige que a tinta existente
+não ganhe cópia deslocada e que o novo traço apareça na posição esperada. O contrato roda nos
+regimes `production` e `page_model_guarded`.
+
+Uma primeira implementação zerava o resíduo em todo `landing`. Ela falhou em 10 contratos de
+regressão: oito combinações de residual `2/6 px` × eixo do deslize × regime, e dois casos de
+banda escura com residual `6 px`. Esses casos mostram que o resíduo às vezes continua necessário
+para compensar um viés real do warp. A regra final compara as duas pontuações e conserva o
+resíduo quando ele melhora a hipótese de página. Os contratos cobrem pouso reto e rotacionado,
+preservação/aposentadoria do resíduo e o novo traço após a troca de âncora; a rodada focada final
+está contabilizada abaixo.
+
+Esse snapshot usava uma regra local, sem calibração independente. Ele aposentava o resíduo em
+empates; essa decisão foi posteriormente reproduzida como defeito: o estado não continha
+informação para escolher entre as duas geometrias. A versão final abstém quando a diferença entre
+as pontuações é `<= _ARB_DELTA` (0,05), conserva o resíduo, segura âncora e novos votos, e só
+retoma quando outra observação separa as hipóteses. A regra final e seus limites estão descritos
+nas subseções posteriores e no fechamento da seção 10.
+
+### Evidência local e replay A/B do snapshot intermediário
+
+> **Histórico, não resultado final:** o gate de 2547 testes, a tabela A/B e o custo de CPU abaixo
+> pertencem ao snapshot anterior às correções finais de domínio da exposição, geometria
+> `unregistered` e empate do resíduo. A comparação final foi repetida e está na seção 10. Estes
+> números são mantidos para rastrear a evolução; não descrevem o head local atual.
+
+- Cobertura focada depois das últimas mudanças de código: `tests/test_anchor_arbitration.py`,
+  `tests/test_anchor_follow.py`, `tests/test_ink_registration.py`, `tests/test_ink_contracts.py`,
+  `tests/test_motion_veto.py`, `tests/test_permute_prob.py` e
+  `tests/test_ink_removal_registration.py`: **271 passaram**. Gate final: `ruff check .` passou,
+  `ruff format --check .` passou (**221 arquivos**) e `pytest -q` terminou com **2547 passed,
+  2 skipped** em 163,50 s na execução final desta worktree.
+- Replay A/B no preset `producao`, mesmo corpus e mesmos pesos, comparando o worktree limpo de
+  `0bf0177` com esta worktree. Os SHA-256 conferidos contra `assets/manifest.json` foram
+  `draw_seg_v3_dyn.onnx` `5e2c611f…` e `page_clean_unet.onnx` `8359ff03…`.
+
+  | Clipe | Quadros | Canvas confirmado base → atual | Provisório final base → atual | Retratado acumulado base → atual | CPU s/s base → atual* |
+  |---|---:|---:|---:|---:|---:|
+  | `agora-escuro-estatico` | 42 | 20.259 → 20.259 | 2.043 → 2.043 | 3.638 → 3.638 | 4,1646 → 4,6407 |
+  | `e5-escuro-estatico` | 40 | 21.219 → 21.219 | 947 → 947 | 3.774 → 3.774 | 4,3426 → 4,8593 |
+  | `escrita-folha-movida` | 316 | 36.851 → 36.851 | 63.768 → 63.768 | 215.229 → 215.229 | 3,5896 → 3,8079 |
+  | `escrita-mao-sombra` | 232 | 48.689 → 48.556 (−133) | 48.220 → 55.352 (+7.132) | 114.900 → 124.135 (+9.235) | 2,9636 → 3,0808 |
+
+  *A coluna de CPU nesta tabela é uma execução por versão e inclui o pipeline inteiro; não é
+  benchmark isolado do helper. No clipe `escrita-folha-movida`, três execuções por versão deram
+  mediana de 3,5667 CPU s/s na base (3,5536–3,5710) e 3,7915 na worktree atual (3,7720–3,8106),
+  cerca de **6,3% a mais**. As três execuções preservaram os mesmos totais do canvas, passadas e
+  retrações. Isso é um custo observado neste equipamento/corpus; não é uma estimativa
+  universal nem um critério de aceitação de produto.
+- Os replays orientados corretamente divergem no canvas final do clipe `escrita-mao-sombra`:
+  **133 pixels existem só na máscara-base e zero só na atual** (IoU 0,99727), em componentes
+  esparsos; a caixa na grade da página é `[38,450) × [53,651)`. O canvas final diminui de 48.689
+  para 48.556 pixels. O replay não contém rótulo que diga se esses pixels eram tinta legítima ou
+  tinta espúria.
+- A comparação instrumentada no mesmo quadro de origem confirma a troca de decisão:
+  `captured_at=28,5 s`, índice zero-based `228` do clipe (8 fps) e `pass_index=57`. A base marca
+  `spurious` com `score_camera=0,164710`, `score_page=0,114558` e margem `0,050152`; o head atual
+  marca `indeterminate` com `score_camera=0,091636`, `score_page=0,085170` e margem `0,006465`.
+  A sequência atual reancora geometricamente nessa passada, com deslocamento de `8,963 px` e
+  delta máximo da âncora de `15,082 px`; o veredito `spurious` da base segura esse `follow`. A
+  instrumentação pareia por tempo de captura e índice de quadro, não só pelo contador de passadas.
+  Isso confirma a mudança de decisão no mesmo instante observado, mas não prova qual decisão
+  preserva melhor a tinta.
+- Projetei a caixa dos pixels divergentes sobre os quadros-fonte. Em `f0150`, vários componentes
+  maiores caem na área de traços visíveis da página esquerda, enquanto a mão escreve na direita;
+  em `f0231`, a caixa projetada (aproximadamente x=134–685, y=339–918) sobrepõe a mão/caneta. A
+  projeção tem incerteza geométrica: o quad atual difere até 5,12 px da âncora. Essa inspeção
+  visual é evidência de localização, não rótulo de tinta. Os hashes dos quadros examinados são
+  `f0230` `ae1e0dbb40c3e397a78e96d121cff9ab5fa2b89b193ffeae95f1e9452c8150be` e `f0231`
+  `c9d6b69984f000e21fc22d918b407becc6cf5ea4da82b19ff1dacb6def177571`.
+- Não há máscara independente para decidir se a redução é tinta removida corretamente ou tinta
+  legítima perdida. O `clip.json` só descreve “mão e sombra se movendo sobre a página esquerda”; o
+  vídeo termina com a mão sobre a região e não tem quadro posterior que a revele.
+- `escrita-folha-movida` é um clipe real de 316 quadros a 8 fps, com folha em movimento e rodapé
+  cortado, mas sem `conditions`, `expected`, regiões de tinta nem anotação de perda/retorno do
+  tracker. `escrita-mao-sombra` também não tem rótulos ou regiões. Os dois clipes escuros têm
+  `expected: no_ink`, e **ambas as versões falham** nesses veredictos: deixam 20.259 e 21.219 px
+  no canvas, respectivamente. São falhas preexistentes neste A/B, iguais nas duas versões. Os
+  demais totais não podem ser convertidos em recall, precisão, falsos positivos ou prova de
+  ausência de duplicação.
+- Os contratos sintéticos dão verdade exata para as sequências construídas e distinguem mutações
+  do escore, do recorte e da aposentadoria do resíduo. Eles não medem taxa de falha na câmera,
+  generalização a outras mãos/mesas, preservação de todo traço fino ou qualidade de produção.
+  A regra de `docs/CORPUS.md` continua exigindo clipe rotulado para declarar correção de robustez.
+- O contrato ponta a ponta de recuperação de resíduo agora exige mais que limpar as flags de hold:
+  a tinta existente precisa permanecer alinhada, a telemetria precisa registrar a decisão de reter
+  o resíduo e um traço novo precisa confirmar na posição certa sem cópia deslocada. Os dois casos
+  focados (`production` e `page_model_guarded`) passaram. Continua sendo uma sequência sintética
+  com verdade conhecida, não uma taxa de sucesso em câmera.
+
+### Checagem geométrica complementar: SmartDoc-2015
+
+- Rodei `datasheet001`, sample oficial com 214 quadros 1920×1080 e quadriláteros rotulados no XML.
+  O laço registra a detecção consumida com um quadro de atraso; por isso comparei `det_quad` com o
+  índice `det_frame` e o `quad` confirmado com o índice do registro. Em 109 detecções consumidas
+  com quadrilátero, o erro médio por canto da detecção foi `4,49 px` (mediana `4,52`, p95 `8,18`,
+  máximo `11,50`). O `quad` confirmado teve erro médio `74,01 px` (mediana `57,84`, p95 `181,72`,
+  máximo `195,51`).
+- Nos registros 56–115, o `quad` confirmado permaneceu idêntico por 60 quadros; o maior
+  deslocamento de canto no XML entre os extremos foi `132,77 px`. No registro 70, a detecção
+  consumida do quadro 69 acompanha o XML, enquanto o `quad` confirmado ainda mostra a posição
+  anterior. A base e o head atual deram registros exatamente iguais nos 214 quadros; canvas
+  `16.816 px`, retrações `377.457 px` e 51 passadas também são iguais. Assim, o sample não mede
+  melhora do #180; ele identifica uma investigação separada sobre a confirmação de movimentos
+  grandes no `SheetTracker`.
+- A pausa longa em saltos grandes é deliberada no `SheetTracker`. O replay avança o tempo de cena
+  virtualmente e executa o pipeline assíncrono em laboratório; os 60 quadros não equivalem a uma
+  medição de latência numa captura ao vivo. A confirmar com reprodução em tempo real e, depois,
+  câmera real antes de classificar como defeito ou mudar essa política.
+- SmartDoc rotula a pose da página, não tinta manuscrita, saída da mão, perda/retorno do tracker,
+  apagamento ou duplicação. Os três vídeos da amostra (214, 176 e 198 quadros) são documentos
+  impressos. O adaptador temporário marcou `no_ink` para permitir a execução, mas esse rótulo não
+  foi fornecido pelos mantenedores e não é ground truth de tinta. Os agregados de base/head são
+  iguais nos três vídeos e não valem como precisão, recall ou taxa de falso positivo.
+- A busca ampla via Firecrawl e Alexandria não encontrou um dataset público de escrita em vídeo
+  que reúna máscaras independentes de tinta, visibilidade/saída da mão e perda/retorno do tracker.
+  Um artigo de 2026 relata 13.507 quadros anotados, mas informa que os vídeos não podem ser
+  publicados por privacidade e permissões; não é possível usá-los como holdout reproduzível
+  ([artigo e disponibilidade dos dados](https://arxiv.org/html/2606.02342v1)).
+
+### Pesquisa externa aplicada ao protocolo
+
+- A documentação oficial do OpenCV especifica que `warpPerspective` recebe uma grade de saída
+  com tamanho `dsize`, usa amostragem inversa salvo `WARP_INVERSE_MAP` e preenche fora da imagem
+  segundo o `borderMode`. Isso sustenta o mecanismo do recorte por `dsize` e a necessidade de
+  acolchoar a grade para medir massa projetada; não sustenta a função de escore, a regra de
+  aposentadoria ou os limiares deste projeto ([transformações geométricas, OpenCV 4.x](https://docs.opencv.org/4.x/da/d54/group__imgproc__transform.html)).
+- Karthik, Moudgil e Gandhi descrevem avaliação de rastreamento longo por redetecção,
+  recuperação e continuidade/reliabilidade, em sequências com falhas e reaquisição; isso
+  sustenta medir episódios de queda e retorno, não apenas sobreposição em quadros isolados.
+  É uma orientação geral de avaliação de tracking, não valida o estimador deste projeto
+  ([artigo](https://arxiv.org/abs/1910.12273)).
+- ITTO discute avaliação de rastreamento de pontos em vídeo longo e evidencia por que frequência
+  e deslocamento de reaparição importam. É análogo metodológico e não mede tinta, papel ou o
+  comportamento de `PageCleanWorker` ([artigo](https://arxiv.org/abs/2510.19819)).
+- MIDV-500 fornece vídeo de documentos e quadriláteros por quadro, útil para testar detecção e
+  pose; não rotula persistência de tinta, duplicação ou apagamento. TAP-Vid fornece trajetórias
+  e visibilidade de pontos, útil para instrumentar perda/retorno, mas também não substitui o
+  corpus funcional do desenho ([MIDV-500](https://arxiv.org/abs/1807.05786),
+  [TAP-Vid](https://arxiv.org/abs/2211.03726)).
+- Com zero eventos em `n` ensaios Bernoulli independentes, o limite superior unilateral de 95%
+  é aproximadamente `3/n`. Frames do mesmo clipe não são ensaios independentes; a unidade deve
+  ser episódio/clipe, com sessões separadas e condições previamente definidas. A regra dos três
+  não prova independência e não transforma um corpus pequeno em garantia de segurança
+  ([Hanley & Lippman-Hand, 1983](https://pubmed.ncbi.nlm.nih.gov/6827763/)).
+
+### Próxima validação que fecha a lacuna
+
+1. Estender `escrita-mao-sombra` com quadros após a saída da mão e rotular a tinta visível numa
+   máscara independente, incluindo os 133 pixels divergentes; acrescentar um clipe controlado
+   com perda/retorno do tracker, resíduo mensurável, deslize posterior, escrita e apagamento.
+   Rotular pose e visibilidade por quadro; episódios, não frames, são a unidade independente.
+   Não havia dispositivo `/dev/video*` nesta sessão para gravar a extensão do clipe.
+2. No holdout, medir se a classificação `spurious`/`indeterminate` perto de `_ARB_DELTA` e o
+   `follow` subsequente preservam tinta e permitem apagar. Neste evento, a margem da base foi
+   0,050152 e a atual 0,006465. Sem rótulos independentes, não há base para
+   recalibrar o delta nem para alterar a regra geométrica.
+3. O A/B final sem rótulos está registrado na seção 10 e atualiza o snapshot histórico acima.
+   Depois de rotular os clipes, medir deslocamento falso/duplicação, recall de tinta, retenção de
+   apagamento, abstenção e atraso até confirmação. Os replays medem diferenças entre versões,
+   mas não provam melhoria funcional. Julgar o custo observado contra um orçamento de CPU
+   definido pelo produto, não contra um limite inferido destes clipes.
+4. Executar o CI remoto no head publicado. A implementação continua local, sem commit/push; por
+   isso ainda não existe evidência de CI remoto.
+5. Investigar o trecho congelado do `SheetTracker` separadamente: primeiro medir em replay com
+   relógio de captura e processamento em tempo real; depois comparar com câmera. Só então decidir
+   se o custo deliberado para saltos acima de 100 px precisa de ajuste.
+
+### Fontes do dataset geométrico
+
+- A página dos mantenedores descreve 120 vídeos, cerca de 24 mil quadros, documentos A4 em quatro
+  fundos e quadriláteros por quadro. O registro Zenodo disponibiliza o sample sob CC BY 4.0. Isso
+  justifica seu uso para pose da página, não para rótulos de tinta
+  ([SmartDoc-2015, mantenedores](https://smartdoc.univ-lr.fr/smartdoc-2015-challenge-1/smartdoc-2015-challenge-1-dataset/),
+  [registro Zenodo](https://zenodo.org/records/1230218)).
+
+### Revisão remota atualizada — 2026-11-24
+
+- O PR #180 continua aberto e mergeável no GitHub, mas o head remoto ainda é `93f1c28`; o status
+  de Devin Review está pendente. A consulta atual da API lista 9 threads: 5 resolvidas e 4 ainda
+  abertas. As abertas são a duplicação após deslize, a remoção bloqueada após retorno, a seleção
+  de candidatos do resíduo e a massa dos escores cíclicos. Portanto, a resposta anterior aos dois
+  primeiros comentários não equivale a resolução do review.
+- O worktree atual já filtra candidatos antes da ordenação. Fortaleci
+  `test_identity_residual_ranks_only_candidates_that_pass_acceptance`: o caso força um candidato
+  reprovado com escore bruto maior e um candidato aprovado com escore menor; a estimativa precisa
+  escolher exatamente `(0, -5)`. Isso prova a regra de seleção local, não sua calibração em vídeo.
+- Para a rotação, cada escore cíclico agora usa como denominador a massa **depois de
+  `_permute_prob` e antes da translação**, o mesmo domínio da hipótese medida. O contrato novo
+  percorre arbitragem: a massa aumenta de `240` para `266,67`, a translação corta `0,83`, a fórmula
+  de domínio misto daria `>1`, e o escore correto é `265,83 / 266,67 = 0,996875`.
+- Os dois contratos direcionados passaram, assim como os arquivos completos
+  `tests/test_page_model.py` e `tests/test_anchor_arbitration.py` (**215 passed, 1 skipped**).
+  O contrato `test_residual_is_retired_after_a_confirmed_raw_page_landing` reproduz o exemplo do
+  comentário de duplicação: retorno com residual `(0, -6)`, depois deslize físico adicional de
+  12 px com warp bruto inalterado, seguido de pouso, retirada do residual, preservação do canvas e
+  traço novo sem cópia deslocada. Em execução direcionada, esse contrato, os três casos de
+  remoção após retorno, os três casos de deslize, a seleção de candidato e o escore cíclico deram
+  **16 passed**. Essa é evidência sintética do caminho reproduzido; não confirma ocorrência ou
+  frequência em câmera.
+- Uma reprodução diferencial encontrou e corrigiu mais um defeito real na worktree: com 400 px
+  de canvas, página bruta perfeitamente alinhada e mapa da câmera vazio, mas mensurável com
+  denominador `400`, o `HEAD` limpo `0bf0177` zerava `score_page` por causa de `registered_total`
+  e terminava em `indeterminate`. Com a mudança local, a página pontua `1,0`, a câmera pontua
+  `0,0` e a arbitragem escolhe `landing`; `test_empty_registered_map_does_not_erase_valid_page_score`
+  fixa esse resultado. No controle com denominador de câmera zero, a página ainda pontua `1,0`,
+  mas o evento permanece `indeterminate`, pois a hipótese da câmera não é mensurável. O teste
+  pareado passa no head corrigido e a reprodução isolada no `HEAD` limpo devolve `score_page=0`,
+  `score_camera=0`, `indeterminate`.
+- A busca local não encontrou arquivos `.mp4`, `.mov`, `.avi`, `.mkv` ou `.webm` em `draw-data`;
+  os clipes de replay estão como sequências PNG. Elas permitem replay determinístico, mas não
+  acrescentam captura após a saída da mão nem rótulos independentes de tinta. Também não havia
+  dispositivo `/dev/video*` nesta sessão.
+- As mudanças locais continuam sem commit/push. Assim, embora o gate completo local esteja verde
+  (**2547 passed, 2 skipped**), o CI remoto segue no head antigo e as quatro threads abertas ainda
+  não foram atualizadas nem resolvidas no GitHub.
+
+### Correção do domínio da máscara fotométrica — 2026-11-24
+
+- Uma reprodução independente encontrou outra incompatibilidade entre o escore de câmera e seu
+  denominador. `camera_prob` é primeiro warpado com `INTER_LINEAR` e depois filtrado pela máscara
+  `ExposureAssessment.visible` warpada com `INTER_NEAREST`; `_camera_probability_denominator`
+  aplicava a mesma máscara à probabilidade antes do warp. Na fronteira subpixel, essas operações
+  não conservam a mesma massa.
+- O contrato `test_camera_denominator_applies_exposure_visibility_after_the_warp` fixa um caso
+  mínimo: translação de 0,5 px, probabilidade em duas colunas contíguas e visibilidade fotométrica
+  terminando entre elas. Antes da correção, o numerador de referência era **30** e o denominador
+  **20**; o novo caminho mantém **30** nos dois. A reprodução foi executada primeiro contra o
+  código anterior e falhou com `20 != 30`.
+- `registration._sum_probability_warp_padded` agora aceita máscaras adicionais no domínio de
+  saída. O denominador mantém `p.visible` como máscara de origem, transforma a máscara
+  fotométrica pela mesma matriz do warp e a intersecta depois do warp. A exceção de tinta
+  ancorada continua abrindo apenas o gate de cobertura; ela não reabre pixels negados pela
+  exposição. A máscara fotométrica ausente (`None`) não altera o cálculo.
+- Os contratos direcionados de warp e denominador passam após a mudança: **24 passed, 41
+  deselected** em `tests/test_anchor_arbitration.py`. Esse resultado comprova a igualdade no caso
+  reproduzido e preserva os casos existentes de massa cortada, cobertura, escala, limite de
+  memória e exceção de âncora. O gate completo desta versão ainda precisa ser executado; não há
+  CI remoto porque não houve push.
+
+### Geometria da máscara no ramo `unregistered` e empate do resíduo — 2026-11-24
+
+- No ramo de movimento `unregistered`, `camera_prob` conserva `camera_corners`, mas o mapa que
+  vota passa a usar `registration_corners = anchor`. O numerador estava transformando
+  `ExposureAssessment.visible` com `registration_corners`; o denominador usa a matriz de câmera
+  original. Assim, a máscara do numerador e o mapa medido pelo denominador podiam ficar em grades
+  diferentes. O worker agora transforma a exposição usando `camera_corners`, que é a geometria
+  que produziu `camera_prob`; a máscara do voto continua usando `registration_corners`.
+- `test_camera_exposure_mask_keeps_the_camera_hypothesis_geometry` fixa o estado que resulta da
+  escolha `unregistered`: grade 100×100, quad de câmera deslocado 10 px, probabilidade em
+  `[5:45, 40:50]` e exposição em `x < 50`. A máscara com a geometria errada zera o numerador;
+  com a geometria da câmera, numerador e denominador são ambos **400**. É um contrato de estado
+  sintético, não uma captura com o gate de movimento ativo.
+- Outra reprodução state-level encontrou empate entre a hipótese de pouso com resíduo e sem
+  resíduo. Barras horizontais a cada 6 px, resíduo `(0, -6)` e pose a 14 px davam
+  `score_page=1`, `score_page_without_residual=1` e `score_camera=1/3`. O código anterior aceitava
+  `landing`, aposentava o resíduo no `>=` e colocava um novo traço seis pixels fora da posição
+  esperada. Não era ambiguidade entre pouso e câmera: era ambiguidade sobre qual correção de
+  coordenadas preservava a página.
+- A arbitragem agora abstém quando o candidato vencedor depende de duas leituras do resíduo cuja
+  diferença absoluta é `<= _ARB_DELTA` (0,05). O mesmo critério cobre o candidato cíclico. O hold
+  impede a troca de âncora e o voto de traços novos até que conteúdo observável separe as leituras;
+  o resíduo só é aposentado quando a hipótese sem resíduo vence por mais que 0,05. Contratos
+  pareados cobrem empate normal e cíclico, abstinência de traço novo e resolução posterior: ao
+  aparecer a marca antiga distintiva, a arbitragem aceita o `landing`, mantém o resíduo e projeta
+  um novo traço de `y=176:182` para `y=170:176`. É uma sequência state-level com estado de resíduo
+  semeado, não uma captura integral. Esse limite 0,05 é a margem já existente da arbitragem,
+  não um valor calibrado em corpus rotulado.
+- Os quatro contratos novos direcionados passam (**4 passed, 64 deselected**). A suíte dos
+  arquivos de arbitragem, contratos de tinta, PageModel e gate de movimento passa (**331 passed,
+  1 skipped**). O gate completo final está registrado na seção 10. A revisão é sintética e
+  state-level; não existe ainda
+  uma captura pública reproduzível que percorra detecção do resíduo, observabilidade periódica,
+  empate e pouso numa única sequência de câmera.
+
+## 10. Fechamento local e evidência disponível — 2026-11-24
+
+- O corpus externo passou por `python -m lab.corpus verify`. Rodei o preset `producao` de
+  `lab/bench_ink.py` sequencialmente na base limpa `0bf0177` e na worktree final, com os mesmos
+  clipes e pesos validados por `verify_model`. Nenhum dos oito resultados relatou erro.
+
+  | Clipe | Quadros | Canvas base → final | Provisório mediano base → final | Retraído base → final | CPU s/s base → final* |
+  |---|---:|---:|---:|---:|---:|
+  | `agora-escuro-estatico` | 42 | 20.259 → 20.259 | 2.036 → 2.036 | 3.638 → 3.638 | 4,22 → 4,30 |
+  | `e5-escuro-estatico` | 40 | 21.219 → 21.219 | 1.002 → 1.002 | 3.774 → 3.774 | 4,38 → 4,53 |
+  | `escrita-folha-movida` | 316 | 36.851 → 36.851 | 61.793 → 61.793 | 215.229 → 215.229 | 3,66 → 3,91 |
+  | `escrita-mao-sombra` | 232 | 48.689 → 48.556 (−133) | 42.868 → 42.868 | 114.900 → 124.135 (+9.235) | 3,00 → 3,18 |
+
+  *Uma execução por versão, CPU-segundos por segundo de cena do pipeline completo. No clipe
+  `escrita-folha-movida`, três execuções por versão deram medianas de **3,74 s/s** na base
+  (3,68–3,80) e **3,90 s/s** na worktree final (3,80–3,93), diferença observada de **+4,3%**;
+  as faixas se sobrepõem e o n é pequeno. Canvas, provisório e retrações foram iguais nas três
+  execuções. Em `escrita-mao-sombra`, a diferença de 133 px e as 9.235 px adicionais retraídas
+  não podem ser classificadas como acerto/erro sem rótulos independentes. Os dois clipes
+  `escuro-estatico` continuam violando `no_ink` com os mesmos canvases grandes em ambas as
+  versões. Esses dados confirmam diferença de comportamento e custo neste corpus, não melhora
+  funcional geral.
+- Teste do caminho real `unregistered`: o novo contrato chama
+  `_pass_register_motion_coverage`, força a hipótese pelo `MotionGate` e verifica que o worker
+  troca a geometria de voto para a âncora enquanto conserva `camera_corners` para pontuar a
+  câmera; numerador e denominador ficam em 400 px. A mutação que usa `registration_corners` na
+  máscara fotométrica fez o teste falhar com numerador **0**. Isso prova que o contrato discrimina
+  o defeito de geometria no estágio do worker; o replay de câmera ainda não selecionou
+  `unregistered`.
+- Gate final nesta worktree após adicionar esse contrato: `ruff check .` passou,
+  `ruff format --check .` confirmou **221 arquivos já formatados**, e `pytest -q` terminou com
+  **2552 passed, 2 skipped em 160,52 s**. `git diff --check` também passou.
+- Os testes mostram que os casos sintéticos reproduzidos deixam de inverter o denominador ou
+  aposentar um resíduo ainda ambíguo. Não provam a taxa de ocorrência nem melhoria funcional em
+  câmera. Não há rótulo independente por pixel, e o empate foi construído com o resíduo já
+  semeado; não se percorreu nesse caso a sequência inteira de captura, estimação, ocultação
+  periódica e retorno.
+- Replay adicional da captura real `s4_escrita_1117_1800.drawcap`, com os modelos ONNX conferidos
+  por `verify_model` e `PipelineConfig()` de produção: **900/900** frames decodificados, **215**
+  passadas em 42,08 s offline. A guarda fotométrica forneceu máscara em 206 passadas. O gate de
+  movimento registrou 75 `accept`, 100 `correct`, 40 `veto` e **0 `unregistered`**; não estimou
+  resíduos. As 60 decisões de âncora foram 13 `spurious` e 47 `indeterminate`, sem `landing`.
+  Isso prova que o replay completo roda com o código e que há uso real da máscara fotométrica;
+  não exercita a correção `unregistered`, o empate sintético nem mede acerto de tinta. `pass_ms`
+  foi 0,0 porque o replay injeta um relógio de cena síncrono; esse campo não mede tempo de CPU.
+- A revisão das fontes técnicas foi feita com Firecrawl sobre a documentação oficial do OpenCV
+  4.13: `warpPerspective` define a matriz, o tamanho da saída `dsize`, a interpolação e o modo/
+  valor de borda; isso sustenta o mecanismo de recorte e o acolchoamento da grade, não a
+  calibração do escore. A busca na biblioteca Alexandria não encontrou um provedor técnico
+  específico para OpenCV/homografia; usei a documentação primária diretamente. Fonte:
+  [OpenCV, Geometric Image Transformations](https://docs.opencv.org/4.13.0/da/d54/group__imgproc__transform.html).
+- GitHub foi consultado em leitura: PR #180 segue aberto, head remoto `93f1c28`, mergeável,
+  com 4 threads de revisão ainda não resolvidas. A implementação e este relatório foram
+  consolidados em commit local, ainda não enviado; portanto o CI remoto não cobre este código.
+- Conferência do commit do relatório informado: `4d6f924` existe, mas a consulta local de
+  `git branch --contains 4d6f924` retorna apenas `backup/work-180-d7ded1e`; a branch ativa
+  `work/180-on-main`, baseada em `0bf0177`, não contém esse commit. Não movi refs nem reescrevi o
+  histórico. O arquivo desta worktree inclui o conteúdo de pesquisa e as atualizações locais.

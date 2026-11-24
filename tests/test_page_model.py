@@ -3549,21 +3549,34 @@ def test_return_with_residual_keeps_the_canvas_without_ghosting(dy, monkeypatch)
 
 
 def test_identity_residual_ranks_only_candidates_that_pass_acceptance(monkeypatch):
-    """Review do #180: o estimador ordenava todos os deslocamentos e so
-    conferia o recall do vencedor; reprovado o de maior escore, a pagina
-    ficava sem correcao mesmo com outro candidato aprovado."""
+    """Review do #180: um candidato de maior escore, mas rejeitado pelo
+    recall, nao pode bloquear o candidato aprovado de menor escore."""
     ref, candidate = _shifted_evidence(6)
-    real = worker_mod._exact_recall
+    prior_px = int(np.count_nonzero(ref))
+    broad_support = int(0.9 * prior_px)
+    narrow_support = int(0.35 * prior_px)
+    rejected_hit = int(0.49 * broad_support)
+    accepted_hit = int(0.8 * narrow_support)
+    rejected_score = rejected_hit - 0.1 * (broad_support - rejected_hit)
+    accepted_score = accepted_hit - 0.1 * (narrow_support - accepted_hit)
+    assert rejected_score > accepted_score
 
     def scripted(prior, seen, dx, dy, prior_px, coverage=None):
-        recall, hit, observable = real(prior, seen, dx, dy, prior_px, coverage)
-        if (dx, dy) == (0, -6):  # o melhor escore, mas reprovado no recall
-            return 0.3, hit, observable
-        return recall, hit, observable
+        if (dx, dy) == (0, 0):
+            return 0.4, int(0.4 * prior_px), prior_px
+        if (dx, dy) == (0, -6):
+            # Maior escore bruto, mas fica abaixo de base_recall + 0.10.
+            hit = rejected_hit
+            return hit / broad_support, hit, broad_support
+        if (dx, dy) == (0, -5):
+            # Menor escore bruto, mas passa nos dois critérios de aceite.
+            hit = accepted_hit
+            return hit / narrow_support, hit, narrow_support
+        return 0.4, int(0.4 * prior_px), prior_px
 
     monkeypatch.setattr(worker_mod, "_exact_recall", scripted)
-    dx, dy = worker_mod._estimate_identity_residual(
+    result = worker_mod._estimate_identity_residual_evidence(
         ref, None, candidate, None, None, 0.5
     )
-    assert (dx, dy) != (0, 0)  # outro candidato aprovado e aplicado
-    assert (dx, dy) != (0, -6)  # o reprovado nunca e aplicado
+    assert result.shift == (0, -5)
+    assert result.recall == pytest.approx(0.8, abs=1e-3)

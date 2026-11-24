@@ -86,19 +86,60 @@ def _matrix_grid_displacement(matrix, shape):
     return float(np.mean(np.linalg.norm(moved - grid, axis=-1)))
 
 
-def _overlap_fraction(prob, snapshot):
+def _overlap_fraction(prob, snapshot, *, denominator_mass=None):
     """Fracao da massa de `prob` que cai no canvas confirmado.
 
-    Numerador e denominador usam a mesma imagem ja permutada e transladada.
-    Isso importa nas rotacoes de quarto de volta: `_permute_prob` redimensiona
-    a grade e pode mudar a soma da probabilidade, entao normalizar pela massa
-    anterior ao resize mistura dominios e pode produzir escore acima de 1.
+    `denominator_mass` pode preservar a massa do mapa apos a permutacao e
+    antes de uma translacao com corte. A massa anterior a permutacao nao serve
+    para rotacoes de quarto de volta: `_permute_prob` redimensiona a grade e
+    pode mudar sua soma. Sem um denominador explicito, o mapa ja registrado e
+    normalizado pela massa que permaneceu na grade.
     """
-    total = float(np.sum(prob, dtype=np.float64))
+    total = (
+        float(np.sum(prob, dtype=np.float64))
+        if denominator_mass is None
+        else float(denominator_mass)
+    )
     if total <= 0.0:
         return 0.0
     matched = float(np.sum(prob[snapshot], dtype=np.float64))
     return min(matched / total, 1.0)
+
+
+def _residual_alignment_scores(raw_prob, snapshot, visible, grid_shift, anchor_roll):
+    """Compare a pending residual with the same observable page evidence."""
+    raw_prob = np.asarray(raw_prob, dtype=np.float32)
+    snapshot = np.asarray(snapshot, dtype=bool)
+    if raw_prob.ndim != 2 or snapshot.shape != raw_prob.shape:
+        return None
+    if not np.isfinite(raw_prob).all():
+        return None
+    if visible is not None:
+        visible = np.asarray(visible, dtype=bool)
+        if visible.shape != raw_prob.shape:
+            return None
+        raw_prob = np.where(visible, raw_prob, 0.0).astype(np.float32, copy=False)
+    page_prob = (
+        raw_prob
+        if anchor_roll == 0
+        else registration._permute_prob(raw_prob, -anchor_roll)
+    )
+    denominator_mass = float(np.sum(page_prob, dtype=np.float64))
+    support_px = int(np.count_nonzero(page_prob > 0.5))
+    if denominator_mass <= 0.0:
+        return None
+    score_without = _overlap_fraction(
+        page_prob, snapshot, denominator_mass=denominator_mass
+    )
+    translated = registration._translate_grid(page_prob, *grid_shift)
+    score_with = _overlap_fraction(
+        translated, snapshot, denominator_mass=denominator_mass
+    )
+    return {
+        "score_without_residual": score_without,
+        "score_with_residual": score_with,
+        "support_px": support_px,
+    }
 
 
 class _AnchorSteps:
@@ -181,6 +222,8 @@ class _AnchorSteps:
         grid_shift=(0, 0),
         residual_fresh=True,
         reg_info=None,
+        camera_denominator_mass=None,
+        camera_score_available=True,
     ):
         """Avanca o evento de arbitragem; arbitra no fecho do streak.
 
@@ -198,6 +241,19 @@ class _AnchorSteps:
         if identity_owned or corners is None or old_anchor is None:
             self._arb_close_event()
             return "closed", None
+        raw_prob = np.asarray(raw_prob, dtype=np.float32)
+        page_prob = raw_prob
+        page_mask_valid = True
+        if visible is not None:
+            visible = np.asarray(visible, dtype=bool)
+            if visible.shape != raw_prob.shape:
+                page_prob = np.zeros_like(raw_prob)
+                page_mask_valid = False
+            else:
+                page_prob = np.where(visible, raw_prob, 0.0).astype(
+                    np.float32, copy=False
+                )
+        observed_prob = page_prob
         # O gatilho compara em termos POSICIONAIS: uma ancora que ja
         # carrega rotulos rolados (pouso rodado anterior) nao pode
         # fazer toda passada seguinte parecer deslocada pela
@@ -226,12 +282,20 @@ class _AnchorSteps:
             self._arb_restart_streak()
         self._arb_streak_quads.append(corners.copy())
         snapshot = self._arb_snapshot
-        raw_total = float(np.sum(raw_prob))
+        raw_total = float(np.sum(observed_prob, dtype=np.float64))
         registered_total = float(np.sum(registered_prob))
-        if snapshot is None or raw_total <= 0.0 or registered_total <= 0.0:
+        camera_score_available = bool(camera_score_available)
+        if camera_score_available:
+            if camera_denominator_mass is None:
+                camera_denominator_mass = registered_total
+            camera_score_available = bool(
+                np.isfinite(camera_denominator_mass) and camera_denominator_mass > 0.0
+            )
+        if snapshot is None or raw_total <= 0.0:
             score_page = 0.0
-            score_camera = 0.0
+            score_page_without_residual = 0.0
             cyclic = (0.0, 0.0, 0.0)
+            cyclic_without_residual = (0.0, 0.0, 0.0)
         else:
             # Com roll parado (frente 27): a evidencia da pagina e o
             # S_roll da familia ciclica, reclassificado — o warp
@@ -241,21 +305,32 @@ class _AnchorSteps:
             # pelo roll corrente. Medido na era 3 capturada: 0,193
             # contra 0,002 do Sc. Os ciclicos de rotacao NOVA
             # seguem zerados (segunda rotacao = abstencao).
-            page_prob = (
-                raw_prob
+            page_before_translation = (
+                observed_prob
                 if self._anchor_roll == 0
-                else registration._permute_prob(raw_prob, -self._anchor_roll)
+                else registration._permute_prob(observed_prob, -self._anchor_roll)
             )
             # O residuo de registro (grade da ancora) vem DEPOIS da permutacao:
             # T . Pi_k(P). A camera ja o recebe pela ancora efetiva (T . M . P).
             dx, dy = grid_shift
-            translated = registration._translate_grid(page_prob, dx, dy)
-            # Pontua a probabilidade ja permutada e transladada contra a
-            # referencia no mesmo dominio. A translacao corta a massa que
-            # saiu da grade; `_overlap_fraction` usa apenas o que restou.
-            page_prob = translated
-            score_page = _overlap_fraction(page_prob, snapshot)
-            score_camera = _overlap_fraction(registered_prob, snapshot)
+            page_mass_before_translation = float(
+                np.sum(page_before_translation, dtype=np.float64)
+            )
+            score_page_without_residual = _overlap_fraction(
+                page_before_translation,
+                snapshot,
+                denominator_mass=page_mass_before_translation,
+            )
+            page_prob = registration._translate_grid(page_before_translation, dx, dy)
+            # Normaliza no domínio depois da permutacao/resize e antes do
+            # corte da translacao. O que sai da grade conta como evidência
+            # perdida; usar a massa restante premiaria uma hipótese que só
+            # preserva um fragmento pequeno perfeitamente alinhado.
+            score_page = _overlap_fraction(
+                page_prob,
+                snapshot,
+                denominator_mass=page_mass_before_translation,
+            )
             # Colocacoes ciclicas (frentes 23/24): a hipotese "a
             # folha assentou rodada de k x 90 graus" pontuada como a
             # medicao manda — a prob ENTREGUE permutada por -k
@@ -267,16 +342,59 @@ class _AnchorSteps:
             # na mesma geracao e regime nao medido — abstem.
             if self._anchor_roll != 0:
                 cyclic = (0.0, 0.0, 0.0)
+                cyclic_without_residual = (0.0, 0.0, 0.0)
             else:
                 cyclic = []
+                cyclic_without_residual = []
                 for k in (1, 2, 3):
-                    permuted = registration._permute_prob(raw_prob, -k)
+                    permuted = registration._permute_prob(observed_prob, -k)
                     moved = registration._translate_grid(permuted, dx, dy)
-                    cyclic.append(_overlap_fraction(moved, snapshot))
+                    denominator_mass = float(np.sum(permuted, dtype=np.float64))
+                    cyclic_without_residual.append(
+                        _overlap_fraction(
+                            permuted,
+                            snapshot,
+                            denominator_mass=denominator_mass,
+                        )
+                    )
+                    cyclic.append(
+                        _overlap_fraction(
+                            moved,
+                            snapshot,
+                            denominator_mass=denominator_mass,
+                        )
+                    )
                 cyclic = tuple(cyclic)
-        pass_mass = int(np.count_nonzero(raw_prob > 0.5))
+                cyclic_without_residual = tuple(cyclic_without_residual)
+        # Score each hypothesis independently. A valid page candidate still
+        # has evidence when the registered camera map misses the canvas; its
+        # measurable camera score is then exactly zero, not a reason to erase
+        # the page score as well.
+        score_camera = (
+            _overlap_fraction(
+                registered_prob,
+                snapshot,
+                denominator_mass=camera_denominator_mass,
+            )
+            if snapshot is not None and camera_score_available
+            else 0.0
+        )
+        pass_mass = int(np.count_nonzero(observed_prob > 0.5))
+        page_score_available = page_mask_valid and raw_total > 0.0
         self._arb_scores.append(
-            (score_page, score_camera, cyclic[0], cyclic[1], cyclic[2], pass_mass)
+            (
+                score_page,
+                score_camera,
+                cyclic[0],
+                cyclic[1],
+                cyclic[2],
+                pass_mass,
+                score_page_without_residual,
+                (float(camera_denominator_mass) if camera_score_available else None),
+                camera_score_available,
+                *cyclic_without_residual,
+                page_score_available,
+            )
         )
         if len(self._arb_streak_quads) < _ANCHOR_MIGRATION_PASSES:
             return "open", None
@@ -286,17 +404,49 @@ class _AnchorSteps:
             float(np.mean([s[2 + k] for s in self._arb_scores])) for k in range(3)
         ]
         mean_mass = float(np.mean([s[5] for s in self._arb_scores]))
+        mean_page_without_residual = float(np.mean([s[6] for s in self._arb_scores]))
+        valid_camera_masses = [s[7] for s in self._arb_scores if s[8]]
+        mean_camera_denominator_mass = (
+            float(np.mean(valid_camera_masses)) if valid_camera_masses else None
+        )
+        all_camera_scores_available = all(s[8] for s in self._arb_scores)
+        mean_cyclic_without_residual = [
+            float(np.mean([s[9 + k] for s in self._arb_scores])) for k in range(3)
+        ]
+        all_page_scores_available = all(s[12] for s in self._arb_scores)
         canvas_px = (
             0
             if self._arb_snapshot is None
             else int(np.count_nonzero(self._arb_snapshot))
         )
         rotation_k = 0
-        if canvas_px < _ARB_MIN_CANVAS_PX or mean_mass < _ARB_MIN_PASS_PX:
-            # Sem massa para julgar nao ha copia a fabricar nem a
-            # proteger: trocar a ancora e custo zero nas duas
-            # hipoteses.
+        insufficient_evidence = (
+            canvas_px < _ARB_MIN_CANVAS_PX or mean_mass < _ARB_MIN_PASS_PX
+        )
+        residual_pending = bool(grid_shift[0] or grid_shift[1]) and (
+            canvas_px > 0 and insufficient_evidence
+        )
+        residual_pending_reason = (
+            "insufficient_observable_ink" if residual_pending else None
+        )
+        if residual_pending:
+            # Sem pixels observaveis que discriminem o warp antigo do cru,
+            # preservar ou limpar o residuo falha em continuacoes igualmente
+            # validas. Mantem a ancora e abstem ate uma leitura comparavel.
+            verdict = "indeterminate"
+        elif insufficient_evidence and canvas_px == 0:
+            # Sem estado confirmado nao ha deslocamento anterior a preservar.
             verdict = "landing_default"
+        elif not all_page_scores_available or not all_camera_scores_available:
+            # A cropped camera map cannot be compared to the page candidate
+            # when its full transformed support or visible page support was
+            # not measurable.
+            verdict = "indeterminate"
+        elif insufficient_evidence:
+            # Default landing is safe only for an empty canvas. Existing
+            # content must not be re-anchored when this pass cannot expose
+            # enough ink to compare it.
+            verdict = "indeterminate"
         else:
             family = [
                 ("landing", mean_page),
@@ -309,18 +459,56 @@ class _AnchorSteps:
             best, second = order[0], order[1]
             if family[best][1] - family[second][1] <= _ARB_DELTA:
                 verdict = "indeterminate"
+                if grid_shift[0] or grid_shift[1]:
+                    residual_pending = True
+                    residual_pending_reason = "anchor_hypotheses_indistinguishable"
             else:
                 verdict = family[best][0]
                 if verdict == "landing_rotated":
                     rotation_k = best - 1
+                if grid_shift[0] or grid_shift[1]:
+                    if verdict == "landing":
+                        score_with_residual = mean_page
+                        score_without_residual = mean_page_without_residual
+                    elif verdict == "landing_rotated":
+                        cyclic_index = rotation_k - 1
+                        score_with_residual = mean_cyclic[cyclic_index]
+                        score_without_residual = mean_cyclic_without_residual[
+                            cyclic_index
+                        ]
+                    else:
+                        score_with_residual = score_without_residual = None
+                    if (
+                        score_with_residual is not None
+                        and abs(score_with_residual - score_without_residual)
+                        <= _ARB_DELTA
+                    ):
+                        # A strong landing against the camera can still leave
+                        # the old registration residual undecidable. Do not
+                        # re-anchor or vote new ink under either mapping until
+                        # visible content separates the two residual states.
+                        verdict = "indeterminate"
+                        residual_pending = True
+                        residual_pending_reason = (
+                            "residual_hypotheses_indistinguishable"
+                        )
+        if verdict == "indeterminate" and (grid_shift[0] or grid_shift[1]):
+            residual_pending = True
+            if residual_pending_reason is None:
+                residual_pending_reason = "anchor_hypotheses_indistinguishable"
         event = {
             "generation": generation,
             "pass_index": self._generation_passes,
             "verdict": verdict,
             "action": verdict in ("landing", "landing_default", "landing_rotated"),
             "score_page": mean_page,
+            "score_page_without_residual": mean_page_without_residual,
             "score_camera": mean_camera,
+            "camera_denominator_mass": mean_camera_denominator_mass,
+            "camera_score_available": all_camera_scores_available,
+            "page_score_available": all_page_scores_available,
             "scores_cyclic": [mean_camera, *mean_cyclic],
+            "scores_cyclic_without_residual": mean_cyclic_without_residual,
             "rotation_k": rotation_k,
             "score_page_roll_compensated": self._anchor_roll != 0,
             "canvas_px": canvas_px,
@@ -329,6 +517,8 @@ class _AnchorSteps:
             "pose_displacement_source": displacement_source,
             "identity_residual_fresh": bool(residual_fresh),
             "streak": len(self._arb_streak_quads),
+            "identity_residual_pending": residual_pending,
+            "identity_residual_pending_reason": residual_pending_reason,
         }
         self._arb_events.append(event)
         if event["action"]:
@@ -371,6 +561,7 @@ class _AnchorSteps:
         grid_shift=(0, 0),
         residual_fresh=True,
         reg_info=None,
+        arbitration_hold_reason=None,
     ):
         """Avanca o evento de divergencia assentada; re-ancora no
         fecho do streak.
@@ -389,6 +580,13 @@ class _AnchorSteps:
         if identity_owned or corners is None or old_anchor is None:
             self._follow_close_event()
             return "closed", None
+        if arbitration_hold_reason is not None:
+            # The geometric fallback cannot resolve an ambiguous residual or
+            # replace a camera comparison whose transformed support is unknown.
+            self._follow_close_event()
+            if reg_info is not None:
+                reg_info["follow_abstain_reason"] = arbitration_hold_reason
+            return "open", None
         # Precedencia da arbitragem (veredito DESTA passada): quem
         # decidiu por conteudo nao e atravessado pela geometria.
         if arb_event is not None and arb_event["verdict"] != "indeterminate":
