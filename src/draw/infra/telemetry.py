@@ -24,6 +24,12 @@ import time
 from collections import deque
 from pathlib import Path
 
+# Teto da fila de eventos: se o escritor morrer ou travar, a memoria
+# nao cresce sem fim. Passado do limite, os eventos mais antigos caem
+# em silencio — trade-off deliberado: perder um evento vale menos que
+# derrubar o app por falta de memoria.
+_EVENT_QUEUE_LIMIT = 10_000
+
 
 class SessionTelemetry:
     """Escritor de telemetria a 1 Hz em JSONL rotativo."""
@@ -34,7 +40,7 @@ class SessionTelemetry:
         self._max_bytes = int(max_bytes)
         self._lock = threading.Lock()
         self._latest = {}
-        self._events = deque()
+        self._events = deque(maxlen=_EVENT_QUEUE_LIMIT)
         self._previous_counters = {}
         self._stopped = threading.Event()
         self._thread = threading.Thread(
@@ -89,13 +95,19 @@ class SessionTelemetry:
             pass
 
     def _run(self):
-        while not self._stopped.wait(self._interval):
-            if not self._write(self._take_events() + [self._snapshot()]):
-                return
-        # Encerramento: o último retrato sai junto com os eventos —
-        # sem ele os campos do intervalo final (ex.: as rejeições
-        # recentes do piso de cobertura) morriam na memória.
-        self._write(self._take_events() + [self._snapshot()])
+        try:
+            while not self._stopped.wait(self._interval):
+                if not self._write(self._take_events() + [self._snapshot()]):
+                    return
+            # Encerramento: o último retrato sai junto com os eventos —
+            # sem ele os campos do intervalo final (ex.: as rejeições
+            # recentes do piso de cobertura) morriam na memória.
+            self._write(self._take_events() + [self._snapshot()])
+        except Exception as error:  # noqa: BLE001 - vai para o laco
+            # A thread daemon nao pode morrer em silencio: a excecao
+            # que a parou fica visivel na propriedade error.
+            with self._lock:
+                self._error = error
 
     def _write(self, records):
         if not records:
@@ -105,8 +117,9 @@ class SessionTelemetry:
             with self._path.open("a", encoding="utf-8") as handle:
                 for record in records:
                     handle.write(json.dumps(record, sort_keys=True) + "\n")
-        except OSError as error:
-            self._error = error
+        except Exception as error:  # noqa: BLE001 - vai para o laco
+            with self._lock:
+                self._error = error
             return False
         if self._wrote is not None:
             self._wrote.set()
@@ -114,9 +127,19 @@ class SessionTelemetry:
 
     @property
     def error(self):
-        """O erro de IO que parou o escritor, ou None."""
-        return self._error
+        """A excecao que parou o escritor, ou None."""
+        with self._lock:
+            return self._error
 
     def close(self):
         self._stopped.set()
         self._thread.join(timeout=2.0)
+        # Escritor morto ou preso no timeout do join: os eventos
+        # enfileirados depois da ultima retirada ainda saem (linhas em
+        # modo append; um escritor vivo e travado no maximo intercala
+        # linhas). Sem _snapshot: _previous_counters e privado do
+        # escritor e o retrato final ja sai no epílogo de _run. Se um
+        # erro ja explica a perda, a tentativa falharia igual — o
+        # registro ruim continua na fila — entao se pula o flush.
+        if self.error is None:
+            self._write(self._take_events())
