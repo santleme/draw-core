@@ -5,8 +5,10 @@ Pesquisa inicial: 2026-11-23. Implementação e validação local: 2026-11-24. B
 snapshots cronológicos da implementação; a seção 10 é a auditoria final da evidência local e
 remota.
 
-**Estado final verificado:** o código de runtime desta worktree está na série local até `c57ed60`
-(correção principal em `59ceb39`; contratos de acompanhamento em `c57ed60`). A branch usa
+**Snapshot validado na primeira rodada:** o código de runtime desta worktree estava na série
+local até `c57ed60` (correção principal em `59ceb39`; contratos de acompanhamento em `c57ed60`).
+A seção 11 registra uma auditoria posterior, as duas correções locais adicionais e o gate que as
+cobre. A branch usa
 `5e530879` como merge-base com `origin/main`. O PR #180 remoto continua no head `93f1c28`; nesse
 head os jobs `fast` e `slow` passaram, mas Devin Review segue pendente e há quatro threads não
 resolvidas. O CI remoto não cobre o código local, que não foi enviado. A suíte local passou com
@@ -710,3 +712,67 @@ nem demonstra melhoria na câmera.
   contém esse commit como ancestral. Não movi refs nem reescrevi o histórico; a versão ativa deste
   relatório incorpora a síntese e acrescenta os resultados da implementação e do ensaio
   reproduzível.
+
+## 11. Correções pós-auditoria e gate mais recente — 2026-11-24
+
+Esta seção supersede as contagens de teste anteriores para o código local. A base desta rodada é
+`2db56285` (com `c57ed60` ancestral); as alterações abaixo estavam locais e ainda não enviadas ao
+GitHub quando o gate foi executado.
+
+### Seleção do resíduo na borda de cobertura
+
+- O denominador de recall por candidato pode diminuir quando uma translação empurra pixels sem
+  correspondência para fora da cobertura. Isso permitia que o estimador escolhesse `(+3, 0)` numa
+  folha alinhada, sem encontrar correspondência nova: 20 barras repetidas começam em `x=40`, a
+  cobertura também começa em `x=40`, e as três colunas `x=53:56` falham no limiar de tinta.
+- A seleção agora compara candidato e `(0, 0)` sobre a mesma evidência de origem, com
+  `_common_source_hits`. Primeiro o candidato precisa satisfazer o ganho e o recall mínimos já
+  existentes; depois precisa acrescentar ao menos `max(1, ceil(_RESIDUAL_MIN_GAIN × suporte))`
+  pixels casados no suporte comum. O desempate continua favorecendo o menor deslocamento.
+- `test_identity_residual_does_not_hide_unmatched_ink_at_coverage_edge` reproduz esse arranjo.
+  No código-base `2db56285`, o teste falha com `(3, 0)`; na implementação atual retorna `(0, 0)`.
+  Os controles de borda existentes seguem passando. Isso é prova diferencial do estimador em
+  entrada sintética controlada; não mede frequência nem acerto em vídeo.
+- Um teste adicional que tentava conduzir o mesmo caso pelo worker passou tanto na base quanto na
+  implementação nova. Foi removido, portanto não é contado como evidência ponta a ponta. Os
+  replays reais disponíveis continuam sem máscara de tinta independente e não geram esse
+  residual.
+
+### Máscara de tinta confirmada na guarda fotométrica
+
+- A guarda fotométrica executa antes do registro. Ela recebia a máscara confirmada no quad da
+  âncora anterior, enquanto o registro seguinte podia aplicar o resíduo persistido à âncora.
+  Com residual vertical de 6 px, a testemunha de tinta ficava deslocada em relação aos pixels
+  escuros que permaneciam fisicamente no papel.
+- `_run_pass` agora captura resíduo, metadados, âncora e máscara confirmada no mesmo snapshot
+  protegido pelo lock. Antes de chamar `PaperExposureGuard.observe`, o worker desloca a âncora
+  confirmada pelo mesmo residual e projeta a máscara para a geometria da passada.
+- `test_confirmed_ink_after_residual_stays_protected_from_photo_removal` testa residual 0 e 6 px
+  nos regimes `production` e `page_model_guarded`. Com residual 6, o código-base falha porque a
+  guarda recebe máscara sem sobreposição com a tinta presente; com a correção, a máscara
+  observada cobre ao menos 95% da posição física e o canvas mantém a tinta. O teste não amplia
+  `ExposureAssessment` nem altera o contrato congelado.
+
+### Gate e limite da conclusão
+
+- Testes focados: **6** do estimador, **4** da máscara fotométrica, **70** de arbitragem da âncora
+  e **51** contratos filtrados de retorno/resíduo passaram. Os filtros se sobrepõem com o gate
+  completo e não devem ser somados como casos únicos.
+- Reexecutei o holdout das 36 máscaras com a fórmula de seleção atual:
+  `uv run python lab/validate_identity_residual_holdout.py --holdout-root /home/lucas_coimbra/draw-data/holdout-v1`.
+  Resultado: **576/576** translações corretas; 288/288 com cobertura total e 288/288 com a faixa
+  esquerda oculta, distribuídas em 48/48 por sessão e regime. São oito translações simuladas das
+  mesmas 36 páginas anotadas, não 576 amostras independentes. Isso confirma o comportamento
+  geométrico controlado após a nova seleção; não testa ruído de câmera, perda/retorno do tracker
+  nem arbitragem temporal.
+- Gate integral após formatação: `ruff check .` passou; `ruff format --check .` confirmou **222
+  arquivos formatados**; `pytest -q` terminou com **2558 passed, 2 skipped** em 163,11 s.
+- `git diff --check` passou. Revisei o diff final: quatro arquivos modificados, sem alteração de
+  contratos públicos. Não rodei CI remoto para estas alterações porque não houve push. Também não
+  atribuo melhoria de precisão: falta vídeo com máscaras independentes e pose rotulada, e o ensaio
+  de worker que não distinguiu base de correção foi descartado.
+- A medição A/B de uma execução por versão em `bench-clips` mostrou CPU s/s base→atual de
+  `4,72→4,34`, `4,96→4,62`, `4,18→3,85` e `3,28→3,11` nos quatro clipes; os canvases e as
+  contagens de tinta/provisório ficaram iguais. Com `n=1` por versão, isso não estabelece ganho
+  nem o custo isolado destas correções. Os resultados A/B anteriores da seção 10 continuam sendo
+  snapshots históricos, não validação de acurácia para esta rodada.

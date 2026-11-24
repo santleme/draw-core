@@ -873,6 +873,66 @@ def _return_with_residual(worker, clock, residual, strokes=_F11_STROKES):
     return gen2, drawn, returned
 
 
+@pytest.mark.parametrize("residual", [0, 6])
+def test_confirmed_ink_after_residual_stays_protected_from_photo_removal(
+    ink, monkeypatch, residual
+):
+    """A residual must align the photo guard's confirmed-ink witness too.
+
+    The returned page keeps the original marks at the same position or six
+    pixels lower in the warp. After identity recovery, force the model to miss
+    those still-dark pixels. The confirmed-canvas mask must land on the same
+    physical pixels in the photometric guard, or the guard can call them paper
+    and authorize removal.
+    """
+    worker, clock = ink
+    generation, drawn, returned = _return_with_residual(worker, clock, residual)
+    assert _frac(_confirmed(worker, generation) > 0, drawn) >= 0.95
+
+    observed_confirmed_masks = []
+    observed_guard_calls = []
+    observe = worker_mod.occlusion.PaperExposureGuard.observe
+
+    def capture_confirmed_mask(guard, *args, confirmed_ink=None, **kwargs):
+        observed_guard_calls.append(confirmed_ink is not None)
+        if confirmed_ink is not None:
+            observed_confirmed_masks.append(np.asarray(confirmed_ink).copy())
+        return observe(guard, *args, confirmed_ink=confirmed_ink, **kwargs)
+
+    monkeypatch.setattr(
+        worker_mod.occlusion.PaperExposureGuard, "observe", capture_confirmed_mask
+    )
+
+    original_model = worker._page_clean
+
+    class _MissReturnedInk:
+        def ink_prob(self, warped):
+            probability = original_model.ink_prob(warped)
+            for y0, y1, x0, x1 in _F11_STROKES:
+                probability[y0 + residual : y1 + residual, x0:x1] = 0.05
+            return probability
+
+    worker._page_clean = _MissReturnedInk()
+    for _ in range(8):
+        # A reported movement keeps the injected hand signal from entering
+        # its full-rest state during this deterministic guard probe.
+        worker.set_hand_presence(True, moved=True)
+        _passes(worker, clock, generation, returned, 1, dt=_DT_ACTIVE, must=True)
+    worker.set_hand_presence(False)
+    _passes(worker, clock, generation, returned, 10, dt=_DT_IDLE)
+
+    expected_confirmed = np.zeros((H, W), dtype=bool)
+    for y0, y1, x0, x1 in _F11_STROKES:
+        expected_confirmed[y0 + residual : y1 + residual, x0:x1] = True
+    assert observed_guard_calls
+    assert observed_confirmed_masks
+    assert _frac(observed_confirmed_masks[-1], expected_confirmed) >= 0.95
+
+    got = _confirmed(worker, generation) > 0
+    assert _frac(got, drawn) >= 0.95
+    assert _beyond(got, drawn, 1) == 0
+
+
 @pytest.mark.parametrize(
     "residual",
     [6, 9, 12],  # 6 funcionava; 9 e 12 passam do limite de 8 px do portao

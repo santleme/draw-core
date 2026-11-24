@@ -613,10 +613,9 @@ _RESIDUAL_CROP_PAD = 16
 _RESIDUAL_MIN_SUPPORT = 0.3  # fracao minima da referencia observavel por candidato
 _RESIDUAL_RIVAL_GUARD = 3  # px (meia resolucao) em volta do melhor pico
 _RESIDUAL_RIVAL_PEAK = 0.9  # pico rival relevante: >= 90% do melhor
-# Escolha entre candidatos: escore = casados - peso * (observaveis nao casados);
-# a menos de `_RESIDUAL_TIE_FRACTION` da referencia do melhor vence o menor
-# deslocamento.
-_RESIDUAL_MISS_WEIGHT = 0.1
+# Escolha entre candidatos: ganho de pixels casados, comparando cada candidato
+# com zero no mesmo suporte de evidencia. A menos de `_RESIDUAL_TIE_FRACTION`
+# do ganho maximo, vence o menor deslocamento.
 _RESIDUAL_TIE_FRACTION = 0.005
 
 
@@ -629,11 +628,10 @@ def _exact_recall(prior, seen, dx, dy, prior_px, coverage=None):
     cima do que a cobertura esconde. Sem `coverage` o observavel e a
     referencia inteira.
 
-    O recall serve para ACEITAR um deslocamento. Para ESCOLHER entre
-    candidatos ele nao basta: como o denominador muda por candidato, um
-    deslocamento lateral ganhava so por esconder pixels nao casados atras da
-    borda da cobertura (236/236 contra 236/240 sem casar nada a mais — review
-    do #180). A escolha usa um escore de pixels (ver o chamador)."""
+    O recall serve para ACEITAR um deslocamento, mas seu denominador varia
+    com a cobertura. A escolha compara pixels casados no suporte observavel
+    comum entre a posicao zero e cada candidato, para que esconder pixels
+    sem correspondencia nao conte como ganho."""
     h, w = prior.shape
     y0, y1 = max(0, dy), min(h, h + dy)
     x0, x1 = max(0, dx), min(w, w + dx)
@@ -649,6 +647,25 @@ def _exact_recall(prior, seen, dx, dy, prior_px, coverage=None):
     if observable < max(_RESIDUAL_MIN_PX, _RESIDUAL_MIN_SUPPORT * prior_px):
         return 0.0, hit, observable
     return hit / observable, hit, observable
+
+
+def _common_source_hits(prior, seen, dx, dy, coverage):
+    """Compara zero e o candidato usando os mesmos pixels de evidencia."""
+    h, w = prior.shape
+    y0, y1 = max(0, -dy), min(h, h - dy)
+    x0, x1 = max(0, -dx), min(w, w - dx)
+    if y1 <= y0 or x1 <= x0:
+        return 0, 0, 0
+    source_seen = seen[y0:y1, x0:x1]
+    if coverage is not None:
+        source_seen = source_seen & coverage[y0:y1, x0:x1]
+    base_reference = prior[y0:y1, x0:x1]
+    shifted_reference = prior[y0 + dy : y1 + dy, x0 + dx : x1 + dx]
+    return (
+        int(np.count_nonzero(source_seen & base_reference)),
+        int(np.count_nonzero(source_seen & shifted_reference)),
+        int(np.count_nonzero(source_seen)),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -820,12 +837,18 @@ def _estimate_identity_residual_evidence(
                 or recall < _RESIDUAL_MIN_RECALL
             ):
                 continue
-            # Pixels casados, menos uma fracao dos observaveis NAO casados: o
-            # denominador por candidato informa (na cena da mesa escura o
-            # certo deixa ~2.900 px observaveis a menos sem casar), mas um
-            # deslocamento lateral que so esconde 4 px nao casados atras da
-            # borda da cobertura nao pode vencer por isso.
-            score = hit - _RESIDUAL_MISS_WEIGHT * (observable - hit)
+            # Exija novos matches contra o candidato zero nos mesmos pixels
+            # que ambos conseguem observar. Um candidato nao ganha so por
+            # empurrar pixels sem match para fora da borda da cobertura.
+            base_source_hit, candidate_source_hit, source_support = _common_source_hits(
+                prior_c, seen_c, dx, dy, cover_c
+            )
+            if source_support < _RESIDUAL_MIN_PX:
+                continue
+            score = candidate_source_hit - base_source_hit
+            required_gain = max(1, int(np.ceil(_RESIDUAL_MIN_GAIN * source_support)))
+            if score < required_gain:
+                continue
             scored.append((score, dx, dy, recall, hit, observable))
     if not scored:
         return _ResidualEvidence()
@@ -2949,6 +2972,12 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             if p.generation != self._generation:
                 self._telemetry_skipped_stale += 1
                 return True
+            # A guarda fotometrica roda antes de _pass_anchor_state, mas sua
+            # mascara de tinta confirmada precisa usar o mesmo residuo da
+            # geometria que sera registrada nesta passada. Capture ambos no
+            # mesmo snapshot protegido pelo lock.
+            p.identity_residual_snapshot = self._identity_residual
+            p.identity_residual_metadata_snapshot = self._identity_residual_metadata
             # Captura a guarda desta geracao sob o lock: se new_generation
             # trocar o objeto no meio da inferencia, o observe desta
             # passada escreve na instancia orfa, nao na guarda nova —
@@ -3107,8 +3136,14 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             and p.corners is not None
             and p.exposure_confirmed_anchor is not None
         ):
+            confirmed_anchor = p.exposure_confirmed_anchor
+            dx, dy = p.identity_residual_snapshot
+            if dx or dy:
+                confirmed_anchor = registration._shift_anchor_corners(
+                    confirmed_anchor, dx, dy, p.prob.shape
+                )
             matrix = registration._registration_matrix(
-                p.exposure_confirmed_anchor, p.corners, p.prob.shape
+                confirmed_anchor, p.corners, p.prob.shape
             )
             if not registration._registration_is_identity(matrix):
                 confirmed_ink = (
@@ -3172,8 +3207,6 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 self._marks_recovery_waited += 1
             else:
                 self._marks_recovery_waited = 0
-            p.identity_residual_snapshot = self._identity_residual
-            p.identity_residual_metadata_snapshot = self._identity_residual_metadata
             p.first_pass = p.generation != self._worker_generation
             p.recovering = self._identity_reference is not None and (
                 p.first_pass or self._identity_recovery_requested

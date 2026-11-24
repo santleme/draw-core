@@ -3368,6 +3368,24 @@ def test_identity_residual_does_not_shift_sideways_at_an_asymmetric_coverage_edg
     assert got == (0, -6)
 
 
+def test_identity_residual_does_not_hide_unmatched_ink_at_coverage_edge():
+    """A zero shift must not become +3 merely because the edge hides misses."""
+    ref = np.zeros((360, 120), np.uint8)
+    evidence = np.zeros((360, 120), np.float32)
+    for y in range(8, 8 + 20 * 16, 16):
+        ref[y : y + 6, 40:56] = 255
+        # The sheet is aligned; three columns fail the ink threshold.
+        evidence[y : y + 6, 40:53] = 0.95
+    coverage = np.zeros(ref.shape, dtype=bool)
+    coverage[:, 40:] = True
+
+    result = worker_mod._estimate_identity_residual_evidence(
+        ref, None, evidence, None, None, 0.5, coverage
+    )
+
+    assert result.shift == (0, 0)
+
+
 def test_identity_residual_abstains_when_the_shift_clips_nearly_all_the_ink():
     """Corte de borda sem sobra: so 3 linhas de 50 colunas (150 px < o minimo)
     permanecem na grade depois que a translacao empurra o resto para fora; o
