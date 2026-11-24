@@ -346,6 +346,7 @@ def test_step_sync_frame_raises_the_worker_error():
         step_sync_frame(_Pipe(), _Worker(True, error=error), object())
     assert exc.value.__cause__ is error
 
+
 def test_iter_frames_ordena_diretorio_por_sufixo_numerico(tmp_path):
     """f2.png (zeros) chega antes de f10.png (255): a ordem de nome
     os invertia e o replay/simulador consumia o quadro 10 no lugar
