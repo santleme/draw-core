@@ -86,6 +86,19 @@ class _FlakyCapture(_PacedCapture):
         return super().read()
 
 
+class _RaisingCapture:
+    """read() levanta cv2.error — a bomba morre com a excecao."""
+
+    def __init__(self):
+        self.released = threading.Event()
+
+    def read(self):
+        raise cv2.error("driver quebrou no meio do read")
+
+    def release(self):
+        self.released.set()
+
+
 class _BurstCapture:
     """Entrega uma rajada de quadros e depois trava no read()."""
 
@@ -173,6 +186,22 @@ def test_failure_limit_marks_dead():
     check(
         "quem espera acorda com None",
         source.wait_next(0, timeout=1.0) is None,
+    )
+    source.stop()
+
+
+def test_pump_exception_marks_dead_releases_and_exposes_error():
+    """read() que levanta cv2.error: a bomba declara a fonte morta,
+    libera a captura no finally proprio e publica a excecao em
+    .error — sem a propriedade, o motivo da morte era invisivel."""
+    capture = _RaisingCapture()
+    source = LatestFrameCapture(capture).start()
+    assert capture.released.wait(5.0)
+    check("fonte morta com read que levanta", source.dead)
+    check(
+        "excecao exposta no .error",
+        isinstance(source.error, cv2.error),
+        f"error={source.error!r}",
     )
     source.stop()
 

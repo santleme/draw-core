@@ -31,3 +31,24 @@ def test_local_capture_requests_format_minimal_buffer_and_fps():
     assert settings[cv2.CAP_PROP_FRAME_HEIGHT] == 720
     assert settings[cv2.CAP_PROP_BUFFERSIZE] == 1
     assert settings[cv2.CAP_PROP_FPS] == 30
+
+
+class _SetRaisesCapture:
+    """Driver que levanta cv2.error no set() — os pedidos de formato
+    nao podem derrubar a abertura nem vazar a captura emprestada."""
+
+    def __init__(self):
+        self.released = False
+
+    def set(self, *_args):
+        raise cv2.error("v4l2: VIDIOC_S_CTRL falhou no dispositivo")
+
+    def release(self):
+        self.released = True
+
+
+def test_configure_local_capture_cv2_error_nao_propaga():
+    capture = _SetRaisesCapture()
+    camera_module._configure_local_capture(capture)  # nao levanta
+    capture.release()
+    assert capture.released

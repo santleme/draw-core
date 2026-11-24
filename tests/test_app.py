@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -514,6 +515,42 @@ def test_run_check_avisa_sem_backend_gui(monkeypatch, capsys):
     monkeypatch.setattr(selfcheck_module.sys, "platform", "darwin")
     assert selfcheck_module.run_check(0) == 1
     assert "draw-core[gui]" in capsys.readouterr().out
+
+
+class _BrokenVideoCapture:
+    """VideoCapture que abre e quebra no read() — o check e o dono da
+    captura, entao ele tem de liberar o handle mesmo com cv2.error."""
+
+    def __init__(self):
+        self.released = False
+
+    def isOpened(self):
+        return True
+
+    def set(self, *args):
+        return True
+
+    def read(self):
+        raise cv2.error("v4l2: dispositivo desconectou no meio da leitura")
+
+    def release(self):
+        self.released = True
+
+
+def test_check_camera_open_cv2_error_falha_liberando_a_captura(monkeypatch, capsys):
+    capture = _BrokenVideoCapture()
+    monkeypatch.setattr(selfcheck_module.cv2, "VideoCapture", lambda _source: capture)
+    assert selfcheck_module._check_camera_open(0, "camera 0") is False
+    assert capture.released
+    assert "FAIL" in capsys.readouterr().out
+
+
+def test_check_remote_source_cv2_error_falha_liberando_a_captura(monkeypatch, capsys):
+    capture = _BrokenVideoCapture()
+    monkeypatch.setattr(selfcheck_module.cv2, "VideoCapture", lambda _source: capture)
+    assert selfcheck_module._check_remote_source("http://x/video") == 0
+    assert capture.released
+    assert "FAIL" in capsys.readouterr().out
 
 
 def test_gui_backend_compiled_gui_none(monkeypatch):
@@ -1035,6 +1072,90 @@ def test_open_ready_source_requires_a_first_frame(monkeypatch):
         assert source.wait_next(0, timeout=1.0) is not None
     finally:
         source.stop()
+
+
+class _SwitchCandidate:
+    """Candidato de troca de camera falso: stop() fica registrado."""
+
+    def __init__(self):
+        self.stopped = threading.Event()
+
+    def stop(self, *args, **kwargs):
+        self.stopped.set()
+
+
+def test_switch_drain_no_finally_para_candidato_publicado(monkeypatch, tmp_path):
+    """Saida com a troca publicada e ainda nao consumida: o finally
+    drena o candidato — sem isso, um LatestFrameCapture novo ficava
+    lendo a camera ate o processo morrer.
+
+    O evento destrava a trabalhadora exatamente na chamada de waitKey
+    que devolve 'q': o resultado publica na janela entre o break e o
+    pop do finally (ou depois — a autoparada cobre os dois lados)."""
+    worker_go = threading.Event()
+    candidate = _SwitchCandidate()
+
+    def fake_open(target, helper_token_file=None, rotation=0):
+        worker_go.wait(10.0)
+        return candidate
+
+    feed = _PacedStallFeed([_frame(), _frame()])
+    _patch_marker_run(monkeypatch, feed, [ord("q")])
+    monkeypatch.setattr(ui_module, "_open_ready_source", fake_open)
+    monkeypatch.setitem(ui_module._camera_menu, "request", None)
+    base_wait = app_module.cv2.waitKey  # wait_key roteado do _patch_marker_run
+    first = {"done": False}
+
+    def wait(ms):
+        if not first["done"]:
+            first["done"] = True
+            ui_module._camera_menu["request"] = 1
+        key = base_wait(ms)
+        if key == ord("q"):
+            worker_go.set()
+        return key
+
+    monkeypatch.setattr(app_module.cv2, "waitKey", wait)
+    app_module.run(source=0, save_dir=str(tmp_path), markers_mode=True)
+    assert candidate.stopped.is_set()
+    assert ui_module._camera_menu["request"] is None
+    assert ui_module._camera_menu["busy"] is None
+
+
+@pytest.mark.slow
+def test_switch_drain_autostop_quando_a_trabalhadora_publica_depois(
+    monkeypatch, tmp_path
+):
+    """Troca ainda abrindo na saida: o join do finally vence (~2 s, por
+    isso slow), "abandoned" fica marcado e a trabalhadora para ela
+    mesma o candidato que publica em seguida."""
+    worker_go = threading.Event()
+    candidate = _SwitchCandidate()
+
+    def fake_open(target, helper_token_file=None, rotation=0):
+        worker_go.wait(10.0)
+        return candidate
+
+    feed = _PacedStallFeed([_frame(), _frame()])
+    _patch_marker_run(monkeypatch, feed, [ord("q")])
+    monkeypatch.setattr(ui_module, "_open_ready_source", fake_open)
+    monkeypatch.setitem(ui_module._camera_menu, "request", None)
+    base_wait = app_module.cv2.waitKey
+    first = {"done": False}
+
+    def wait(ms):
+        if not first["done"]:
+            first["done"] = True
+            ui_module._camera_menu["request"] = 1
+        return base_wait(ms)
+
+    monkeypatch.setattr(app_module.cv2, "waitKey", wait)
+    app_module.run(source=0, save_dir=str(tmp_path), markers_mode=True)
+    # A trabalhadora seguia bloqueada na abertura: nada publicado, mas
+    # "abandoned" ja esta marcado — a autoparada cobre a publicacao.
+    assert not candidate.stopped.is_set()
+    worker_go.set()
+    assert candidate.stopped.wait(5.0)
 
 
 def test_waiting_view_keeps_the_controls_available():

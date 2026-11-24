@@ -235,13 +235,18 @@ def _check_camera_open(source, label):
     camera_module._configure_local_capture(capture)
     frame = None
     deadline = time.time() + 3.0
-    while time.time() < deadline:
-        ok, candidate = capture.read()
-        if ok and candidate is not None:
-            frame = candidate
-            break
-        time.sleep(0.1)
-    capture.release()
+    try:
+        while time.time() < deadline:
+            ok, candidate = capture.read()
+            if ok and candidate is not None:
+                frame = candidate
+                break
+            time.sleep(0.1)
+    except cv2.error as error:
+        print(f"FAIL: a leitura de {label} quebrou com erro do OpenCV ({error}).")
+        return False
+    finally:
+        capture.release()
     if frame is not None:
         print(
             f"PASS: quadro lido de {label}. "
@@ -330,13 +335,18 @@ def _check_remote_source(url):
         return 0
     frame = None
     deadline = time.time() + 5.0
-    while time.time() < deadline:
-        ok, candidate = capture.read()
-        if ok and candidate is not None:
-            frame = candidate
-            break
-        time.sleep(0.1)
-    capture.release()
+    try:
+        while time.time() < deadline:
+            ok, candidate = capture.read()
+            if ok and candidate is not None:
+                frame = candidate
+                break
+            time.sleep(0.1)
+    except cv2.error as error:
+        print(f"FAIL: a leitura da fonte de rede quebrou ({error}).")
+        return 0
+    finally:
+        capture.release()
     if frame is None:
         print("FAIL: a fonte abriu, mas nenhum quadro chegou em 5 segundos.")
         return 0

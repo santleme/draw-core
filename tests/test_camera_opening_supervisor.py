@@ -8,6 +8,7 @@ falsas: assenta de primeira, estoura e assenta na reabertura, estoura
 sempre (para nas tentativas maximas) e leitura quebrada (sem reabrir).
 """
 
+import cv2
 import numpy as np
 import pytest
 
@@ -35,6 +36,28 @@ class _FakeCapture:
     def release(self):
         self.released = True
         self._opened = False
+
+
+class _RaisesOnRead(_FakeCapture):
+    """read() levanta cv2.error de cara — driver quebrado."""
+
+    def read(self):
+        raise cv2.error("v4l2: dispositivo desconectou")
+
+
+class _DiesAfterFirstRead(_FakeCapture):
+    """Entrega um quadro e morre com cv2.error — driver que quebra
+    depois do aquecimento, dentro da janela de confirmacao."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._armed = True
+
+    def read(self):
+        if self._armed:
+            self._armed = False
+            return True, np.full((4, 4, 3), 200, np.uint8)
+        raise cv2.error("v4l2: dispositivo desconectou no meio da leitura")
 
 
 def _factory(captures):
@@ -115,6 +138,47 @@ def test_probe_exposure_reports_blown_mean():
 def test_probe_exposure_none_on_read_failure():
     cap = _FakeCapture(opened=False)
     assert camera_module._probe_exposure(cap, seconds=0.05) is None
+
+
+def test_probe_exposure_none_on_cv2_error_and_keeps_borrowed_capture():
+    """read() levantando cv2.error vira "sem evidencia" (None) — e a
+    captura NAO e liberada: ela e emprestada, o dono decide o desfecho."""
+    cap = _RaisesOnRead()
+    assert camera_module._probe_exposure(cap, seconds=1.0) is None
+    assert not cap.released
+
+
+def test_confirm_stream_alive_false_on_cv2_error_and_keeps_capture():
+    """Mesma regra na confirmacao: cv2.error vira False e a captura
+    emprestada segue aberta para o dono liberar."""
+    cap = _RaisesOnRead()
+    assert camera_module._confirm_stream_alive(cap, window_s=1.0) is False
+    assert not cap.released
+
+
+def test_candidate_fallback_continues_when_read_raises_cv2_error(monkeypatch):
+    """Um candidato que morre com cv2.error no probe e liberado e o
+    proximo /dev/video* e testado — antes, a excecao subia vazando o
+    handle e abortando a varredura de cameras."""
+    monkeypatch.setattr(camera_module.sys, "platform", "linux")
+    monkeypatch.setattr(
+        camera_module,
+        "_video_nodes",
+        lambda: ["/dev/video0", "/dev/video1", "/dev/video2"],
+    )
+    monkeypatch.setattr(camera_module, "is_wsl", lambda: False)
+    closed = _FakeCapture(opened=False)
+    dying = _DiesAfterFirstRead()
+    good = _FakeCapture(value=110)
+    # Ordem das chamadas ao factory: fonte 0 (fechada), candidato 1
+    # (morre), candidato 2 (boa).
+    monkeypatch.setattr(
+        camera_module.cv2, "VideoCapture", _factory([closed, dying, good])
+    )
+    result = camera_module.open_capture(0)
+    assert result is good
+    assert dying.released
+    assert not good.released
 
 
 def test_open_probe_recorded_for_report_header():
