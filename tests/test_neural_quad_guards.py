@@ -289,22 +289,3 @@ def test_presenca_baixa_registra_area_da_mascara():
     reject = det.last_fit_reject
     assert reject["reason"] == "low_presence"
     assert reject["area_ratio"] == 0.0
-
-
-def main():
-    test_predict_matches_legacy_softmax_and_normalization()
-    test_middle_arm_notch_recovers_straight_chord_without_memory()
-    test_curved_arm_with_high_coverage_does_not_poison_memory()
-    test_rigid_guard_vetoes_single_edge_sleeve_but_allows_real_sheet_rotation()
-    test_fit_sem_contorno_reporta_no_contour()
-    test_fit_contorno_minusculo_reporta_min_area()
-    test_fit_com_folha_fecha_e_limpa_o_reject()
-    test_fit_implausivel_reporta_implausible()
-    test_rejeicao_de_suporte_reporta_unsupported()
-    test_presenca_baixa_registra_area_da_mascara()
-    print("TESTES DE GUARDAS NEURAIS OK.")
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

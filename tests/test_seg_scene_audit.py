@@ -10,22 +10,15 @@ contadores.
 """
 
 import json
-import sys
-from pathlib import Path
 
 import cv2
 import numpy as np
 import pytest
+from lab import seg_scene_audit as sa
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from lab import seg_scene_audit as sa  # noqa: E402
-
-from draw.perception import NeuralSheetDetector  # noqa: E402
-from draw.protocol import HEADER_SIZE, pack_record  # noqa: E402
-from test_neural_onnx_contract import _logits_for_classes, _Session  # noqa: E402
+from draw.perception import NeuralSheetDetector
+from draw.protocol import HEADER_SIZE, pack_record
+from test_neural_onnx_contract import _logits_for_classes, _Session
 
 
 def _detector_for_classes(classes):

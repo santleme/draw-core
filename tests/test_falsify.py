@@ -73,7 +73,7 @@ def _select_covering_indices(configs):
 
 def test_sampled_configs_build_valid_captures():
     rng = np.random.default_rng(11)
-    configs = [sample_config(rng, index) for index in range(40)]
+    configs = [sample_config(rng) for _ in range(40)]
     indices = sorted(set(range(10)) | set(_select_covering_indices(configs)))
     for idx in indices:
         cfg = configs[idx]
@@ -86,7 +86,7 @@ def test_sampled_configs_build_valid_captures():
 
 def test_mutation_stays_valid_and_near_parent():
     rng = np.random.default_rng(12)
-    parent = sample_config(rng, 0)
+    parent = sample_config(rng)
     children = [mutate_config(parent, rng) for _ in range(40)]
     selected: set[int] = set(range(8))
     seen_mutated: set[str] = set()
@@ -108,8 +108,8 @@ def test_mutation_never_leaves_parameter_contract():
     tem faixa própria."""
     rng = np.random.default_rng(42)
     children = []
-    for index in range(15):
-        parent = sample_config(rng, index)
+    for _ in range(15):
+        parent = sample_config(rng)
         for _ in range(25):
             child = mutate_config(parent, rng)
             params = child["params"]

@@ -90,7 +90,7 @@ def test_camera_switch_keeps_the_rotation(monkeypatch, tmp_path):
     """A troca de câmera abre a nova com a mesma rotação: sem isso, o
     quadro da câmera trocada voltaria de cabeça para baixo (review #49).
     Exercita o start_switch real dentro do run() headless."""
-    from tests.test_app import _frame, _PacedStallFeed, _patch_marker_run
+    from test_app import _frame, _PacedStallFeed, _patch_marker_run
 
     calls = []
 

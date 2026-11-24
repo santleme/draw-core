@@ -10,9 +10,12 @@ impõe o tamanho dele (512x512 no export original); um ONNX dinâmico
 7700X do Lucas em 2026-10-29 — session.run de 122 para 58 ms, IoU de
 máscara de 0,984 contra o 512, nenhum veredito de presença trocado
 nos frames dele fora as três frames da caixa branca, que a 384
-deixam de ser falso positivo. A sessão roda com 4 threads intra-op,
-também medido: o padrão do ONNX Runtime marcava 248 ms no mesmo
-tensor, 4 threads marcam 122 ms e 16 threads pioram para 210 ms
+deixam de ser falso positivo. O modelo T16 ativo (draw_seg_v3_dyn.onnx)
+tem H/W fixos em 512 e batch dinâmico; o 384 só vale para um ONNX com
+H/W simbólicos. A sessão de detecção roda hoje com _ORT_INTRA_THREADS
+= 3 threads intra-op. A medição de 2026-10-29 (4 threads) é histórica:
+o padrão do ONNX Runtime marcava 248 ms no mesmo tensor, 4 threads
+marcam 122 ms e 16 threads pioram para 210 ms
 (draw-lab/perf-ryzen-2026-10-29/REPORT.md). A
 presença decide se há papel. A máscara decide onde: o quadrilátero da
 folha sai do maior contorno da máscara limiarizada, com a mesma escada
@@ -56,7 +59,6 @@ O arquivo do modelo fica fora do repositório (binário de 15 MB). O
 caminho chega sempre por argumento explícito ao detector.
 """
 
-import inspect
 import time
 from pathlib import Path
 from typing import NamedTuple, Tuple
@@ -537,19 +539,15 @@ class NeuralSheetDetector:
             is_spread and prev_area > 0 and contour_area > prev_area * 1.05
         )
         fallback = None if spread_expanded else self._fallback_lines(mask)
-        # Dublês de teste antigos nao aceitam `contour`/`support_mask`;
-        # decide pela assinatura em vez de capturar TypeError (que
-        # mascararia erros reais do ajuste).
-        impl = _geometry._fit_quad_impl
-        params = inspect.signature(impl).parameters
-        kwargs = {}
-        if "contour" in params:
-            kwargs["contour"] = contour
-        if "support_mask" in params:
-            coverage = getattr(self, "last_coverage_mask", None)
-            kwargs["support_mask"] = coverage if coverage is not None else mask
-        corners, lines, trusted = impl(
-            mask, frame, fallback, scale_x, scale_y, **kwargs
+        coverage = getattr(self, "last_coverage_mask", None)
+        corners, lines, trusted = _geometry._fit_quad_impl(
+            mask,
+            frame,
+            fallback,
+            scale_x,
+            scale_y,
+            contour=contour,
+            support_mask=coverage if coverage is not None else mask,
         )
         # Issue #105: a folha distante (<1% da máscara) virava "sem
         # contorno" em silêncio; o motivo agora sobe no rastro de
@@ -660,9 +658,11 @@ class NeuralSheetDetector:
         native=True mantém a resolução de saída do modelo, sem resize.
         O padrão preserva a máscara full-res para diagnóstico/avaliação.
         O contrato legado tem uma máscara binária e um logit de presença.
-        O SegFormer de quatro classes exporta apenas logits semânticos;
-        nesse caso, papel e tinta formam a região da folha (a mão continua
-        excluída) e a própria área prevista fornece um sinal de presença.
+        O T16 de quatro classes exporta as saídas 'logits' e 'presence'.
+        Neste ramo ('logits') a cabeça 'presence' é solicitada à sessão,
+        mas não é lida: papel e tinta formam a região da folha (a mão
+        continua excluída) e a própria área prevista fornece o sinal de
+        presença.
 
         O nome da entrada e a lista de saídas vêm do arquivo
         (contract()), nunca de literais: um export com entrada

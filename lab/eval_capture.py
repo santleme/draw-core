@@ -26,7 +26,7 @@ _DEFAULT_SHEET_MODEL = (
     Path(__file__).resolve().parents[1] / "models" / "draw_seg_v3_dyn.onnx"
 )
 
-from lab.sync_workers import StepClock, SyncDetector, SyncPresence  # noqa: E402
+from lab.sync_workers import build_sync_pipeline, step_sync_frame  # noqa: E402
 
 
 def _sheet_model_path(explicit=None):
@@ -123,28 +123,21 @@ def run_pipeline(
     verify é o callable de integridade dos modelos: o padrão "manifest"
     injeta draw.infra.manifest.verify_model (sha256 + tamanho contra
     assets/manifest.json); None desliga, para bancadas e testes com
-    modelos fora do manifesto. ``pipeline_config`` (padrão: base legada
-    sem ganho, sem Detect-Wake e com InkConfig(), como em sim_writer;
-    ``desk_capture.main`` injeta ``PipelineConfig()``) alinha o Pipeline
-    e a PageCleanWorker no mesmo preset.
+    modelos fora do manifesto. ``pipeline_config`` (padrão:
+    ``PipelineConfig.legacy(paper_guard=True)`` — a base legada com a
+    guarda de papel, como em sim_writer; ``desk_capture.main`` injeta
+    ``PipelineConfig()``) alinha o Pipeline e a PageCleanWorker no
+    mesmo preset.
     """
-    from draw import config, hand
+    from draw import config
     from draw.contracts import FramePacket
-    from draw.hand_presence import make_hand_presence
     from draw.infra.manifest import verify_model
-    from draw.ink.config import InkConfig
-    from draw.ink.worker import PageCleanWorker
-    from draw.page_clean import PageCleanInk
-    from draw.perception import NeuralSheetDetector
-    from draw.pipeline import Pipeline
     from draw.settings import PipelineConfig
 
     if verify == "manifest":
         verify = verify_model
     if pipeline_config is None:
-        pipeline_config = PipelineConfig(
-            ink=InkConfig(), ink_auto_gain=False, detect_wake=False
-        )
+        pipeline_config = PipelineConfig.legacy(paper_guard=True)
 
     if not capture.isOpened():
         raise ValueError("não foi possível abrir a fonte de vídeo")
@@ -152,39 +145,20 @@ def run_pipeline(
     if not math.isfinite(fps) or fps <= 0:
         raise ValueError("vídeo sem FPS válido; informe --fps")
     neural_model = _sheet_model_path(neural_model)
-    neural = NeuralSheetDetector(neural_model, verify=verify) if neural_model else None
-    if neural is not None:
-        neural.load()
-    clock = StepClock()
-    hand_presence_worker = None
-    page_clean = PageCleanInk(page_clean_model, verify=verify)
-    page_clean.load()
-    ecc_hand_masker = (
-        hand.HandMasker(hand_model, verify=verify)
-        if hand.hand_model_available(hand_model)
-        else None
-    )
-    visibility_configured = ecc_hand_masker is not None
-    worker = PageCleanWorker(
-        page_clean,
-        ecc_hand_masker,
-        clock=clock,
-        config=pipeline_config.ink,
-        ink_divnorm=pipeline_config.ink_divnorm,
-    )
-    presence = make_hand_presence(hand_model, verify=verify)
-    if presence is not None:
-        hand_presence_worker = SyncPresence(presence)
-    detector = SyncDetector(neural, detect_ms=0.0)
-    loop = Pipeline(
-        detection_worker=detector,
-        ink_worker=worker,
-        hand_presence_worker=hand_presence_worker,
-        hand_masker=ecc_hand_masker,
-        clock=clock,
-        log=lambda *_args: None,
+    bundle = build_sync_pipeline(
+        verify=verify,
         config=pipeline_config,
+        sheet_model=neural_model,
+        ink_model=page_clean_model,
+        hand_model=hand_model,
+        detect_ms=0.0,
     )
+    clock = bundle.clock
+    detector = bundle.detection_worker
+    hand_presence_worker = bundle.presence_worker
+    worker = bundle.ink_worker
+    loop = bundle.pipeline
+    visibility_configured = bundle.hand_masker is not None
     frame_index = 0
     anchors = []
     registrations = []
@@ -207,13 +181,15 @@ def run_pipeline(
             if not ok:
                 break
             clock.t = frame_index / fps
-            outcome = loop.step(
-                FramePacket(image=frame, captured_at=clock.t, sequence=frame_index + 1)
-            )
+            # O snapshot ANTES do quadro (não entre step e pump): o
+            # step não roda passada — o valor é o mesmo, e o
+            # step_sync_frame concentra step/pump/colheita/erro.
             passes_before = worker.stats()["passes_total"]
-            pumped = worker.pump()
-            if pumped and outcome is None:
-                outcome = loop.collect_ink()
+            pumped = step_sync_frame(
+                loop,
+                worker,
+                FramePacket(image=frame, captured_at=clock.t, sequence=frame_index + 1),
+            )
             if worker.canvas_epoch != canvas_epoch:
                 # O acumulador foi zerado (timeout de identidade
                 # ou página nova): os registros anteriores
@@ -255,20 +231,13 @@ def run_pipeline(
                         }
                         registrations.append(record)
                         registration_history.append(record)
-            if worker.error is not None:
-                raise RuntimeError("worker de tinta falhou") from worker.error
-            if outcome is not None:
-                raise RuntimeError(f"laço do Draw encerrou: {outcome}")
             if on_frame is not None:
                 on_frame(loop, worker, frame_index)
             frame_index += 1
     finally:
         # Os landmarkers (MediaPipe) fecham aqui, não pelo __del__:
         # num vídeo longo eles vazavam até o fim do processo.
-        if ecc_hand_masker is not None:
-            ecc_hand_masker.close()
-        if presence is not None:
-            presence.close()
+        bundle.close()
     if frame_index == 0:
         raise ValueError("fonte de vídeo não contém frames decodificáveis")
     mask = None if loop.clean_mask is None else loop.clean_mask.copy()
@@ -286,7 +255,7 @@ def run_pipeline(
         "detections": detector.sequence,
         "status": "ok" if mask is not None else "no_canvas",
         "mode": "page_clean",
-        "sheet_detector": "neural+classic" if neural is not None else "classic",
+        "sheet_detector": ("neural+classic" if neural_model is not None else "classic"),
         "canvas_shape": [config.current().height, config.current().width],
         "scheduler": "synchronous_video_clock",
         "hand_visibility_configured": visibility_configured,

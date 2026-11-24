@@ -1,14 +1,15 @@
 """Recorte do tools/replay_reregister.py so com o que os testes do
 motor usam: paginas sinteticas, relogio de cena, trabalhadora
-sincrona e a page_clean falsa (_ProbIsWarp)."""
+sincrona, a page_clean falsa (_ProbIsWarp) e a bancada reg/anchor
+(SHAPE/BASE, drive sincrono e o replay de paridade GOLDEN)."""
 
-import copy
-import threading
-import zlib
+import hashlib
+import time
 
 import cv2
 import numpy as np
 
+from draw.contracts import WarpedPage
 from draw.ink.accumulator import LayeredInkAccumulator
 from draw.ink.registration import _corners_page_matrix
 from draw.ink.worker import PageCleanWorker
@@ -188,31 +189,9 @@ class CountingAccumulator(LayeredInkAccumulator):
         return result
 
 
-class ReplayInkWorker(PageCleanWorker):
-    """A trabalhadora real, dirigida por pump() (sem thread).
-
-    Só acrescenta cópia profunda (os cenários partem de uma cópia do
-    app assentado); nenhum comportamento é sobrescrito — o teste
-    tests/test_replay_reregister.py cobra isso.
-    """
-
-    def __deepcopy__(self, memo):
-        clone = type(self).__new__(type(self))
-        memo[id(self)] = clone
-        for key, value in self.__dict__.items():
-            if key in ("_condition", "_thread"):
-                continue
-            setattr(clone, key, copy.deepcopy(value, memo))
-        clone._condition = threading.Condition()
-        clone._thread = threading.Thread(
-            target=clone._work, name="draw-page-clean", daemon=True
-        )
-        return clone
-
-
 def make_ink_worker(page_clean, clock, config=None):
     """`PageCleanWorker` real em modo síncrono, com histórico completo."""
-    worker = ReplayInkWorker(
+    worker = PageCleanWorker(
         page_clean, clock=clock, history=(None, None), config=config
     )
     worker._accumulator = CountingAccumulator(
@@ -222,10 +201,6 @@ def make_ink_worker(page_clean, clock, config=None):
     if bind is not None:
         bind(worker)
     return worker
-
-
-def _rng(*names):
-    return np.random.default_rng(zlib.crc32("/".join(names).encode()))
 
 
 # --------------------------------------------------------------------
@@ -240,3 +215,98 @@ class _ProbIsWarp:
 
     def ink_prob(self, warped):
         return warped
+
+
+# --------------------------------------------------------------------
+# Bancada reg/anchor: página miniatura 120x85, drive síncrono e o
+# replay de paridade compartilhado pelos testes de registro e âncora.
+# --------------------------------------------------------------------
+
+SHAPE = (120, 85)
+BASE = base_quad(SHAPE)
+
+
+def _page():
+    """A página assentada do desenho sintético fixo da bancada."""
+    _drawing, settled = synthetic_pages(SHAPE, stages=3, seed=3)
+    return settled[0]
+
+
+def _pass(page, warp_corners):
+    """A pagina parada em BASE, retificada com o quad do detector."""
+    corners = np.asarray(warp_corners, np.float32)
+    return render_pass(page, BASE, corners), corners
+
+
+def _settled(content, passes=4):
+    return [(content, BASE.copy()) for _ in range(passes)]
+
+
+def _drive(worker, generation, sequence):
+    for prob, corners in sequence:
+        before = worker.stats()["passes_total"]
+        worker.submit(WarpedPage(prob, generation, corners))
+        deadline = time.monotonic() + 5.0
+        while worker.stats()["passes_total"] <= before:
+            assert time.monotonic() < deadline, "a passada nao executou"
+            time.sleep(0.001)
+
+
+def _run(sequence, config=None):
+    worker = PageCleanWorker(_ProbIsWarp(), config=config).start()
+    try:
+        generation = worker.new_generation()
+        _drive(worker, generation, sequence)
+        _disp = worker.poll_display(generation, 0)
+        _version, confirmed, provisional = (
+            _disp.version,
+            _disp.confirmed,
+            _disp.provisional,
+        )
+        return worker, confirmed, provisional
+    finally:
+        worker.stop()
+
+
+# sha256 de confirmado + provisorio publicados, gerados na main
+# 8dcce18 (antes das flags), no replay sintetico de
+# tools/replay_reregister.py com tremor de 4 px e recuperacao.
+GOLDEN = {
+    "jitter": "f5c9b83c2462b5e2d8608a824d24e8b6b5c28b391129e9388684eab5e4f1afbf",
+    "recover": "42a9851ef5e027e0b868ae8f75f86d548da49b1dde3a2426dbb772405c7a151b",
+}
+
+
+def _parity_canvas(scenario, config=None):
+    drawing, settled = synthetic_pages(SHAPE, stages=3, seed=3)
+    rng = np.random.default_rng(0)
+    sequence = []
+    for stage in drawing + [settled]:
+        for k in range(4):
+            corners = (BASE + rng.normal(0, 4.0, size=(4, 2))).astype(np.float32)
+            sequence.append(
+                (render_pass(stage[k % len(stage)], BASE, corners), corners)
+            )
+    return_at = None
+    if scenario == "recover":
+        return_at = len(sequence)
+        moved = BASE + np.float32([6.0, -4.0])
+        sequence += [(render_pass(settled[0], BASE, moved), moved)] * 3
+    worker = PageCleanWorker(_ProbIsWarp(), config=config).start()
+    try:
+        generation = worker.new_generation()
+        for i, (prob, corners) in enumerate(sequence):
+            if i == return_at:
+                generation = worker.new_generation(preserve_identity=True)
+            _drive(worker, generation, [(prob, corners)])
+        _disp = worker.poll_display(generation, 0)
+        _version, confirmed, provisional = (
+            _disp.version,
+            _disp.confirmed,
+            _disp.provisional,
+        )
+        snapshot = worker.telemetry_snapshot()
+    finally:
+        worker.stop()
+    digest = hashlib.sha256(confirmed.tobytes() + provisional.tobytes()).hexdigest()
+    return digest, snapshot
