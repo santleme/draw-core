@@ -337,6 +337,73 @@ def test_drawcap_atrasado_nao_espera(tmp_path, monkeypatch):
     assert clock.sleeps == []
 
 
+def test_drawcap_pace_teto_para_timestamp_corrompido(tmp_path, monkeypatch):
+    """capture_ts_us saltado (gravação corrompida) não prende o replay:
+    a espera é cortada no teto em vez de seguir o delay gravado."""
+    from draw.protocol import _MAX_PACE_DELAY_S, _PACE_SLICE_S
+
+    clock = _FakeClock()
+    _patch_clock(monkeypatch, clock)
+    frames = [(0, 0, _jpeg()), (1, 3_600_000_000, _jpeg())]  # +1 h
+    capture = HelperCapture(str(_drawcap(tmp_path / "s.drawcap", frames)))
+    ok, _frame = capture.read()
+    assert ok
+    ok, frame = capture.read()
+    assert ok and frame is not None
+    assert sum(clock.sleeps) == pytest.approx(_MAX_PACE_DELAY_S)
+    assert all(s <= _PACE_SLICE_S for s in clock.sleeps)
+    capture.release()
+
+
+def test_drawcap_pace_interrompido_pelo_release(tmp_path, monkeypatch):
+    """release() durante a espera de pacing destrava o read() na fatia
+    seguinte — sem dormir o delay inteiro do quadro."""
+    sleeping = threading.Event()
+    real_sleep = time.sleep
+
+    def spy(delay):
+        sleeping.set()
+        real_sleep(delay)
+
+    monkeypatch.setattr("draw.protocol.time.sleep", spy)
+    frames = [(0, 0, _jpeg()), (1, 500_000, _jpeg())]  # gap de 0.5 s
+    capture = HelperCapture(str(_drawcap(tmp_path / "s.drawcap", frames)))
+    ok, _frame = capture.read()
+    assert ok
+    results = []
+    thread = threading.Thread(
+        target=lambda: results.append(capture.read()), daemon=True
+    )
+    thread.start()
+    assert sleeping.wait(timeout=3)  # leitor entrou na espera de pacing
+    started = time.monotonic()  # mede a latencia do wake-up, nao o startup
+    capture.release()
+    thread.join(timeout=3)
+    assert not thread.is_alive()
+    assert results == [(False, None)]
+    assert time.monotonic() - started < 0.4  # não esperou o gap de 0.5 s
+
+
+def test_helper_capture_drawcap_open_oserror_falha_limpa(tmp_path, monkeypatch):
+    """OSError no open() (ex.: permissão): falha de abertura limpa —
+    isOpened() False e motivo em last_error, sem traceback cru."""
+    path = _drawcap(tmp_path / "s.drawcap", [(0, 0, _jpeg())])
+    real_open = open
+
+    def denied(target, *args, **kwargs):
+        if str(target) == str(path):
+            raise PermissionError(13, "Permission denied", str(target))
+        return real_open(target, *args, **kwargs)
+
+    monkeypatch.setattr("draw.protocol.open", denied, raising=False)
+    capture = HelperCapture(str(path))
+    assert not capture.isOpened()
+    assert isinstance(capture.last_error, PermissionError)
+    ok, frame = capture.read()
+    assert not ok and frame is None
+    capture.release()
+
+
 def test_token_file_ilegivel_vira_erro_de_autenticacao(tmp_path):
     from draw.protocol import resolve_token
 
