@@ -1,5 +1,7 @@
 """Position-veto recovery must finish before the worker goes idle."""
 
+import dataclasses
+
 import numpy as np
 import pytest
 
@@ -41,8 +43,15 @@ def test_erase_redraw_after_hand_exit_finishes_without_another_wake(second_edit_
     if second_edit_after is not None:
         model.prob[old_second] = 0.95
     now = [1000.0]
+    # O veto de posicao e a cadencia do voto de remocao seguem no
+    # regime removivel: sob confirmed_immutable a borracha nao existe.
     worker = PageCleanWorker(
-        model, config=InkConfig.production(pass_interval_s=0.01), clock=lambda: now[0]
+        model,
+        config=dataclasses.replace(
+            InkConfig.production(pass_interval_s=0.01),
+            confirmed_immutable=False,
+        ),
+        clock=lambda: now[0],
     )
     generation = worker.new_generation()
 

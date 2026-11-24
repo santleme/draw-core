@@ -3355,8 +3355,14 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 if not p.identity_hold:
                     self._identity_defer_count += 1
                 p.quarantine_frames = self._identity_defer_count
+                # Sob certeza, o timeout e perda de lock e nao
+                # prova de pagina nova: a quarentena segue adiada ate
+                # a evidencia limpa decidir; a referencia (o desenho
+                # salvo) nunca e destruida por prazo, so pela virada
+                # comprovada.
                 p.identity_timed_out = (
-                    p.quarantine_frames > identity._PAGE_IDENTITY_MAX_DEFERRALS
+                    not self._config.confirmed_immutable
+                    and p.quarantine_frames > identity._PAGE_IDENTITY_MAX_DEFERRALS
                 )
             if p.identity_hold:
                 # O hold e pegajoso na recuperacao: depois de um
@@ -4302,6 +4308,19 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         self._provisional_px = result["provisional_px"]
         self._confirmed_px = result["confirmed_px"]
         self._retracted_px_total = result["retracted_px_total"]
+        # Certeza: enquanto a identidade da folha salva esta pendente
+        # (referencia guardada aguardando veredito), nada publica — o
+        # canvas do usuario congela na ultima versao comprovada em vez
+        # de piscar o quadro vazio da quarentena. Na passada que resolve,
+        # _pass_identity ja consumiu a referencia e o congelamento abre:
+        # same_page devolve o desenho (restore_confirmed + confirmed_changed
+        # ou a publicacao forcada da decisao); new_page comprovado traz o
+        # canvas vazio da folha nova. O timeout nao existe sob a bandeira.
+        identity_frozen = (
+            self._config.confirmed_immutable
+            and self._identity_recovery_requested
+            and self._identity_reference is not None
+        )
         publish_confirmed = (
             p.first_pass
             or p.identity_timed_out
@@ -4311,7 +4330,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             # Migracao: o canvas migrado nao "muda" para o
             # voto, mas a tela mostraria a grade velha.
             or p.force_publish
-        )
+        ) and not identity_frozen
         if publish_confirmed:
             self._version += 1
             self._published = (
@@ -4328,7 +4347,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 p.captured_at,
                 None if self._anchor_corners is None else self._anchor_corners.copy(),
             )
-        if publish_confirmed or provisional_display_changed:
+        if (publish_confirmed or provisional_display_changed) and not identity_frozen:
             self._display_version += 1
             self._published_display = (
                 p.generation,

@@ -1027,23 +1027,32 @@ class Pipeline:
                     frame, packet.captured_at, source_id=self._source_id
                 )
             if not self.ink_session_open:
-                # Folha nova na cena: canvas e geometria recomecam.
-                self.clean_mask = None
-                # accumulated_canvas tambem zera: sem isto, o
-                # painel continuava exibindo o canvas da folha
-                # ANTERIOR ate a trabalhadora publicar a
-                # primeira mascara da geracao nova (ate ~250 ms
-                # de cadencia mais a passada do modelo), e a
-                # tecla s salvava esse canvas errado.
-                self.accumulated_canvas = None
+                recovery_pending = self.clean_recovery_pending
+                # Certeza: a queda transitoria nao descarta o canvas
+                # antes da identidade decidir — sob confirmed_immutable
+                # a trabalhadora congela as publicacoes ate o veredito
+                # (same_page devolve o desenho; new_page comprovado traz
+                # o canvas vazio da folha nova), entao a mascara exibida
+                # segue valida durante a quarentena. Sem a bandeira,
+                # comportamento historico: canvas e geometria recomecam.
+                freeze = recovery_pending and self._config.ink.confirmed_immutable
+                if not freeze:
+                    self.clean_mask = None
+                    # accumulated_canvas tambem zera: sem isto, o
+                    # painel continuava exibindo o canvas da folha
+                    # ANTERIOR ate a trabalhadora publicar a
+                    # primeira mascara da geracao nova (ate ~250 ms
+                    # de cadencia mais a passada do modelo), e a
+                    # tecla s salvava esse canvas errado.
+                    self.accumulated_canvas = None
+                    self.clean_provisional_mask = None
                 self.generation_events["reopen"] += 1
                 self.clean_generation = self.ink_worker.new_generation(
-                    preserve_identity=self.clean_recovery_pending
+                    preserve_identity=recovery_pending
                 )
                 self._reset_paper_gain()
                 self.clean_recovery_pending = False
                 self.clean_display_version = 0
-                self.clean_provisional_mask = None
                 self.corner_history.clear()
                 self.ink_session_open = True
             # Sem mao, a geometria da tinta congela na

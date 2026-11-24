@@ -1,5 +1,6 @@
 """Guarda fotometrica pelo worker real (issue #129): mao sem mascara."""
 
+import dataclasses
 import threading
 import time
 
@@ -263,7 +264,9 @@ def test_stroke_hidden_on_the_first_post_exit_pass_still_confirms(monkeypatch):
 def test_stroke_erased_under_a_shadow_is_removed_after_hand_exit(monkeypatch):
     """Apagou um traco confirmado sob a sombra da mao: ao levantar a mao, o
     hold barra a remocao, mas o descanso nao pode chegar antes dela."""
-    config = InkConfig.production()
+    # Regime com remocao: a borracha segue no perfil sem a bandeira
+    # (confirmed_immutable desligada; production() a liga).
+    config = dataclasses.replace(InkConfig.production(), confirmed_immutable=False)
     worker, ink, generation = _mature(monkeypatch, config, idle_probe=True)
     try:
         worker.set_hand_presence(True)

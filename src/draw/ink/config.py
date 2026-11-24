@@ -164,6 +164,28 @@ class InkConfig:
     # "novo" ainda nao foi calibrado em corpus real — ligar para
     # replay/mesa, nao para o preset validado.
     page_model: bool = False
+    # Certeza da tinta confirmada: dentro da geracao ela nao sai por
+    # nada — nem voto de remocao, nem timeout de quarentena da
+    # identidade (perda de lock nao e prova de pagina nova), nem queda
+    # transitoria do tracker (a referencia da identidade segura o
+    # desenho ate evidencia limpa). So a virada comprovada (new_page
+    # por consenso, ou geracao sem preservacao) limpa o canvas. O voto
+    # de remocao continua existindo nos perfis sem este campo (borracha
+    # do lapis, legado).
+    confirmed_immutable: bool = False
+    # Verificador estrutural de tracos (draw.ink.stroke_verify): so
+    # promove a confirmado os pixels de componentes cujo esqueleto de
+    # 1 px fecha um par (comeco, fim) — traco aberto com duas pontas,
+    # extensao ancorada em tinta ja confirmada (comeco = contato) ou
+    # laco fechado com arco minimo; poeira e fragmentos de ponta unica
+    # seguem na provisoria. Opt-in ate a latencia ser medida.
+    stroke_endpoint_certainty: bool = False
+    # Arco minimo do esqueleto (px na grade da pagina) para o
+    # componente valer como traco.
+    stroke_min_length_px: int = 12
+    # Poda de esporoes (x a largura local na juncao) antes de contar as
+    # pontas; 0 desliga a poda.
+    stroke_spur_ratio: float = 1.5
 
     def __post_init__(self):
         if not 0.0 < self.t_low < self.t_high <= 1.0:
@@ -187,6 +209,10 @@ class InkConfig:
             raise ValueError(
                 f"border_guard_px deve ser >= 0 ou None: {self.border_guard_px!r}"
             )
+        if self.stroke_min_length_px < 1:
+            raise ValueError("stroke_min_length_px deve ser >= 1")
+        if not self.stroke_spur_ratio >= 0.0:
+            raise ValueError("stroke_spur_ratio deve ser >= 0")
 
     @classmethod
     def strict_vote(cls, level, **overrides):
@@ -250,6 +276,9 @@ class InkConfig:
         impressa (PR #56, recall do braco 8,6%), e o voto 0,85 afina o
         traco (-27% a -48%, PR #53) e so funciona com `ink_auto_gain`.
         `ruling_removal=False` (--no-ink-ruling) deixa so a pauta de fora.
+        A tinta confirmada e permanente dentro da geracao — so sai com
+        a virada comprovada; `sketch()` mantem a borracha/remocao
+        porque o lapis precisa dela.
         """
         return cls.strict_vote(
             vote_level,
@@ -258,6 +287,7 @@ class InkConfig:
             motion_veto=True,
             pass_interval_s=pass_interval_s,
             border_guard_px=None,
+            confirmed_immutable=True,
         )
 
     @classmethod

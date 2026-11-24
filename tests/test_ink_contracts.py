@@ -448,49 +448,61 @@ def test_dim_static_scene_does_not_churn(ink):
 # ------------------------------------------------------------------
 
 
-def test_eraser_removes_stroke_without_false_ink(ink):
-    worker, clock = ink
-    generation = worker.new_generation()
-    scene = _Scene()
-    _passes(worker, clock, generation, scene, 4, dt=_DT_IDLE)
+def test_eraser_removes_stroke_without_false_ink(regime):
+    # Contrato 6 vale no regime com remocao: a borracha apaga o
+    # traco; sob confirmed_immutable (production) ela nao existe.
+    clock, worker = _worker(
+        dataclasses.replace(REGIMES[regime], confirmed_immutable=False)
+    )
+    try:
+        generation = worker.new_generation()
+        scene = _Scene()
+        _passes(worker, clock, generation, scene, 4, dt=_DT_IDLE)
 
-    # Dois tracos: o desenho inteiro segue em cena depois da borracha,
-    # entao a passada tem testemunha de que a folha ainda e a mesma.
-    stroke_a = (90, 96, 60, 260)
-    stroke_b = (150, 156, 60, 200)
-    _write_stroke(worker, clock, generation, scene, stroke_a)
-    want_a = _stroke_mask(scene)
-    _write_stroke(worker, clock, generation, scene, stroke_b)
-    want_b = _stroke_mask(scene) & ~want_a
-    want = want_a | want_b
-    # Cada traco precisa estar confirmado por si: se o alvo da
-    # borracha nunca tivesse confirmado, o fim do teste passaria
-    # sem remover tinta alguma.
-    got0 = _confirmed(worker, generation) > 0
-    assert _frac(got0, want_a) >= 0.9
-    assert _frac(got0, want_b) >= 0.9
+        # Dois tracos: o desenho inteiro segue em cena depois da borracha,
+        # entao a passada tem testemunha de que a folha ainda e a mesma.
+        stroke_a = (90, 96, 60, 260)
+        stroke_b = (150, 156, 60, 200)
+        _write_stroke(worker, clock, generation, scene, stroke_a)
+        want_a = _stroke_mask(scene)
+        _write_stroke(worker, clock, generation, scene, stroke_b)
+        want_b = _stroke_mask(scene) & ~want_a
+        want = want_a | want_b
+        # Cada traco precisa estar confirmado por si: se o alvo da
+        # borracha nunca tivesse confirmado, o fim do teste passaria
+        # sem remover tinta alguma.
+        got0 = _confirmed(worker, generation) > 0
+        assert _frac(got0, want_a) >= 0.9
+        assert _frac(got0, want_b) >= 0.9
 
-    # A borracha apaga um terco do traco A sob a mao: a mao cobre a
-    # regiao enquanto os pixels voltam ao nivel do papel; depois sai.
-    y0, y1, x0, x1 = stroke_a
-    cut = x0 + (x1 - x0) // 3
-    scene.hand_on(stroke_a)
-    worker.set_hand_presence(True, moved=True)
-    _passes(worker, clock, generation, scene, 2)
-    scene.page[y0:y1, x0:cut] = PAPER
-    scene.hand_on((y0, y1, x0, cut))
-    _passes(worker, clock, generation, scene, 2)
-    scene.hand_off()
-    worker.set_hand_presence(False)
-    _passes(worker, clock, generation, scene, 8, dt=_DT_IDLE)
+        # A borracha apaga um terco do traco A sob a mao: a mao cobre a
+        # regiao enquanto os pixels voltam ao nivel do papel; depois sai.
+        y0, y1, x0, x1 = stroke_a
+        cut = x0 + (x1 - x0) // 3
+        scene.hand_on(stroke_a)
+        worker.set_hand_presence(True, moved=True)
+        _passes(worker, clock, generation, scene, 2)
+        scene.page[y0:y1, x0:cut] = PAPER
+        scene.hand_on((y0, y1, x0, cut))
+        _passes(worker, clock, generation, scene, 2)
+        scene.hand_off()
+        worker.set_hand_presence(False)
+        _passes(worker, clock, generation, scene, 8, dt=_DT_IDLE)
 
-    got = _confirmed(worker, generation) > 0
-    erased = want_a.copy()
-    erased[:, cut:] = False
-    kept = want & ~erased
-    assert np.count_nonzero(got & erased) <= 0.05 * np.count_nonzero(erased)
-    assert _beyond(got, want, 3) == 0
-    assert _frac(got, kept) >= 0.90
+        got = _confirmed(worker, generation) > 0
+        erased = want_a.copy()
+        erased[:, cut:] = False
+        kept = want & ~erased
+        assert np.count_nonzero(got & erased) <= 0.05 * np.count_nonzero(erased)
+        assert _beyond(got, want, 3) == 0
+        assert _frac(got, kept) >= 0.90
+    finally:
+        try:
+            worker.stop()
+        except RuntimeError:
+            # Modo pump(): a thread nunca foi iniciada e stop() tenta o
+            # join do mesmo jeito — sem thread para esperar, nada a fazer.
+            pass
 
 
 # ------------------------------------------------------------------

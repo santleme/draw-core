@@ -5,7 +5,7 @@ from collections import deque
 import cv2
 import numpy as np
 
-from . import hysteresis, identity, registration, votes
+from . import hysteresis, identity, registration, stroke_verify, votes
 from .config import InkConfig
 
 
@@ -125,6 +125,10 @@ class LayeredInkAccumulator:
         guarda (PaperExposureGuard), fora desta camada. Nones mantem o
         comportamento sem guarda."""
         prob = np.asarray(prob, dtype=np.float32)
+        # Certeza (InkConfig.confirmed_immutable): tinta confirmada nao
+        # sai dentro da geracao por nada — o voto de remocao nem conta;
+        # so a virada comprovada de pagina (identidade/geracao) a limpa.
+        removal_allowed = removal_allowed and not self._config.confirmed_immutable
         if visible is not None:
             visible = np.asarray(visible, dtype=bool)
             if visible.shape != prob.shape:
@@ -255,6 +259,17 @@ class LayeredInkAccumulator:
             kept = hysteresis.keep_anchored(weak, strong | confirmed_before)
             confirmed_rule = strong | kept
         new_confirmed = confirmed_rule & ~confirmed_before
+        if self._config.stroke_endpoint_certainty and np.any(new_confirmed):
+            # So sobem a confirmado pixels de componentes cujo esqueleto
+            # fecha um par (comeco, fim); o rejeitado segue na provisoria
+            # (provisional_now = seen & ~confirmed) e tenta de novo na
+            # proxima passada.
+            new_confirmed = stroke_verify.filter_verified(
+                new_confirmed,
+                confirmed_before,
+                min_length_px=self._config.stroke_min_length_px,
+                spur_ratio=self._config.stroke_spur_ratio,
+            )
         new_confirmed_px = int(np.count_nonzero(new_confirmed))
         if new_confirmed_px:
             self._confirmed[new_confirmed] = 255
@@ -356,6 +371,10 @@ class LayeredInkAccumulator:
                     registration._REMOVAL_PASSES,
                 ).astype(np.uint8)
         removed = self._removal_streak >= registration._REMOVAL_PASSES
+        if self._config.confirmed_immutable:
+            # O commit fica selado junto com o voto: nem um streak
+            # armado antes da politica vigorar tira tinta da camada.
+            removed[:] = False
         removed_px = int(np.count_nonzero(removed))
         if removed_px:
             self._confirmed[removed] = 0
