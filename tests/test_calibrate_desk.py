@@ -10,15 +10,9 @@ detector — as contaminações que o rótulo elimina.
 """
 
 import json
-import sys
-from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from lab import calibrate_desk as cd  # noqa: E402
+from lab import calibrate_desk as cd
 
 
 def _acq(source, logit=None, fit_reject=None):

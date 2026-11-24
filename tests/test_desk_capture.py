@@ -6,21 +6,16 @@ ponta (Pipeline real + PageCleanWorker) sem camera e sem threads.
 """
 
 import json
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import cv2
 import numpy as np
 import pytest
+from lab import desk_capture as dc
+from lab import eval_capture as ec
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from lab import desk_capture as dc  # noqa: E402
-from lab import eval_capture as ec  # noqa: E402
-
-onnx_fixtures = pytest.importorskip("onnx_fixtures")  # noqa: E402
+onnx_fixtures = pytest.importorskip("onnx_fixtures")
 
 
 class _Frames:

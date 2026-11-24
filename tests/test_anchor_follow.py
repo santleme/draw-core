@@ -62,14 +62,18 @@ STEP = BASE + np.float32([120.0, 0.0])
 
 def _run(sequence, stop=True, config=None):
     worker = worker_mod.PageCleanWorker(_ProbIsWarp(), config=config).start()
-    generation = worker.new_generation()
-    _drive(worker, generation, sequence)
-    _disp = worker.poll_display(generation, 0)
-    _version, confirmed, _provisional = (
-        _disp.version,
-        _disp.confirmed,
-        _disp.provisional,
-    )
+    try:
+        generation = worker.new_generation()
+        _drive(worker, generation, sequence)
+        _disp = worker.poll_display(generation, 0)
+        _version, confirmed, _provisional = (
+            _disp.version,
+            _disp.confirmed,
+            _disp.provisional,
+        )
+    except BaseException:
+        worker.stop()  # nunca entrega um worker vivo para ninguém
+        raise
     if stop:
         worker.stop()
     return worker, generation, confirmed
