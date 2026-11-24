@@ -132,9 +132,10 @@ def _keep_component_pixel(src, skel):
     in_missing[missing] = True
     labels_flat = labels.ravel()
     miss_flat = np.flatnonzero(in_missing[labels_flat])
-    order = np.argsort(labels_flat[miss_flat], kind="stable")
+    miss_lbl = labels_flat[miss_flat]
+    order = np.argsort(miss_lbl, kind="stable")
     sorted_flat = miss_flat[order]
-    counts = np.bincount(labels_flat[sorted_flat], minlength=n)
+    counts = np.bincount(miss_lbl[order], minlength=n)
     splits = np.cumsum(counts)
     width = labels.shape[1]
     for i in missing:
