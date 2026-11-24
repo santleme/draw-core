@@ -500,8 +500,8 @@ def lk_track_corners(prev_gray, next_gray, corners):
     criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01)
     # Janela 31x31 e piramide de 2 niveis: com 21x21 e 3 niveis, a
     # volta da checagem divergia em janelas de textura repetitiva
-    # mesmo com a ida perfeita (medido no teste sintetico denso e
-    # na taxa de rejeicao da validacao em video real).
+    # mesmo com a ida perfeita (medido na taxa de rejeicao da
+    # validacao em video real).
     tracked, status, _err = cv2.calcOpticalFlowPyrLK(
         prev_gray,
         next_gray,
@@ -806,7 +806,6 @@ class DetectWakeGate:
         self._force_next = False
         self._stable_count = 0
         self._last_corners = None
-        self._last_detect_at = None
         self._last_submit_at = None
         self._ref_xs = None
         self._ref_ys = None
@@ -853,7 +852,6 @@ class DetectWakeGate:
             self._stable_count = 1
             self._settled = False
         self._last_corners = corners_arr.copy()
-        self._last_detect_at = float(captured_at)
         self._last_submit_at = float(captured_at)
         if self._stable_count >= self.settle_detections:
             xs, ys, prof, valid = _sample_border_profiles(
@@ -918,12 +916,10 @@ class DetectWakeGate:
             self.wake(force_next=False)
             self._last_submit_at = now
             return True
-        last_ref = (
-            self._last_submit_at
-            if self._last_submit_at is not None
-            else self._last_detect_at
-        )
-        if last_ref is None or now - last_ref >= self.settled_interval_s - 1e-9:
+        # O batimento mede o intervalo desde a ultima submissao:
+        # _settled so fica de pe via on_detection, que sempre escreve
+        # _last_submit_at — a referencia nunca e None neste ponto.
+        if now - self._last_submit_at >= self.settled_interval_s - 1e-9:
             self.heartbeat_events += 1
             self._last_submit_at = now
             return True

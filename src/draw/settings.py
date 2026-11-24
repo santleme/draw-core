@@ -113,6 +113,10 @@ class PipelineConfig:
                 "detect_wake_interval_s fora de (0, 5] s: "
                 f"{self.detect_wake_interval_s!r}"
             )
+        if not 0.0 <= self.coverage_iou_floor <= 1.0:
+            raise ValueError(
+                f"coverage_iou_floor fora de [0, 1]: {self.coverage_iou_floor!r}"
+            )
         if self.spread_mode not in ("auto", "always", "never"):
             raise ValueError(
                 f"spread_mode deve ser um de: auto, always, never: {self.spread_mode!r}"
