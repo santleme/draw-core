@@ -278,6 +278,10 @@ def test_rotated_landing_with_an_active_residual(fast, k, residual):
         assert [event["verdict"] for event in events] == ["landing_rotated"]
         assert events[0]["rotation_k"] == k
         assert events[0]["scores_cyclic"][k] >= 0.9
+        assert events[0]["identity_residual_fresh"] is False
+        assert events[0]["pose_displacement_source"] == (
+            "pose" if residual == (0, 0) else "stale_residual"
+        )
         np.testing.assert_allclose(worker._anchor_corners, np.roll(moved, k, axis=0))
         confirmed = worker.poll_display(generation, 0).confirmed
     finally:
@@ -314,3 +318,71 @@ def test_overlap_fraction_uses_the_transformed_mass_after_translation():
     assert _overlap_fraction(clipped, half_snapshot) == 0.5
     assert _overlap_fraction(clipped, half_snapshot) <= 1.0
     assert _overlap_fraction(np.zeros_like(clipped), half_snapshot) == 0.0
+
+
+def test_cyclic_linear_resize_keeps_a_thin_stroke_score_bounded():
+    """O resize INTER_LINEAR de rot90 pode inflar uma linha de 1 px.
+
+    No canto da grade, a massa transformada fica 11,1% maior que a bruta.
+    Dividir pelo total bruto dá 1,111; a definição atual divide pelo mapa
+    transformado, que está no mesmo domínio do numerador.
+    """
+    from draw.ink.anchor import _overlap_fraction
+
+    prob = np.zeros((240, 320), dtype=np.float32)
+    prob[:, -1] = 1.0
+    transformed = registration_mod._permute_prob(prob, 1)
+    snapshot = transformed > 0
+
+    raw_total = float(np.sum(prob))
+    # Sem translacao, a regra anterior nao via massa cortada e mantinha
+    # `raw_total` como denominador, mesmo com a soma inflada pelo resize.
+    old_score = float(np.sum(transformed[snapshot])) / raw_total
+    score = _overlap_fraction(transformed, snapshot)
+    assert float(np.sum(transformed)) / float(np.sum(prob)) == pytest.approx(10 / 9)
+    assert old_score > 1.1
+    assert score == 1.0
+
+
+@pytest.mark.parametrize(
+    ("limit", "expected_displacement", "expected_source"),
+    [
+        (1.9, 10.0, "fresh_residual_does_not_explain_pose"),
+        (2.0, 2.0, "fresh_residual_explains_pose"),
+        (2.1, 2.0, "fresh_residual_explains_pose"),
+    ],
+)
+def test_pose_residual_tolerance_is_configured_at_1_9_2_and_2_1_px(
+    limit, expected_displacement, expected_source
+):
+    from draw.ink.config import InkConfig
+
+    worker = worker_mod.PageCleanWorker(
+        _ProbIsWarp(), config=InkConfig(residual_explains_px=limit)
+    )
+    worker._anchor_corners = BASE.copy()
+    corners = registration_mod._shift_anchor_corners(BASE, 0, 10, SHAPE)
+
+    displacement, source = worker._pose_displacement(
+        corners, SHAPE, (0, 8), residual_fresh=True
+    )
+
+    assert displacement == pytest.approx(expected_displacement, abs=0.01)
+    assert source == expected_source
+
+
+def test_stale_identity_residual_cannot_explain_a_pose_displacement():
+    from draw.ink.config import InkConfig
+
+    worker = worker_mod.PageCleanWorker(
+        _ProbIsWarp(), config=InkConfig(residual_explains_px=2.0)
+    )
+    worker._anchor_corners = BASE.copy()
+    corners = registration_mod._shift_anchor_corners(BASE, 0, 10, SHAPE)
+
+    displacement, source = worker._pose_displacement(
+        corners, SHAPE, (0, 8), residual_fresh=False
+    )
+
+    assert displacement == pytest.approx(10.0, abs=0.01)
+    assert source == "stale_residual"

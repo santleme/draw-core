@@ -552,10 +552,67 @@ def _exact_recall(prior, seen, dx, dy, prior_px, coverage=None):
     return hit / observable, hit, observable
 
 
-def _estimate_identity_residual(
+@dataclass(frozen=True, slots=True)
+class _ResidualEvidence:
+    """Evidencia produzida por uma estimativa de deslocamento de identidade."""
+
+    shift: tuple[int, int] = (0, 0)
+    support_px: int = 0
+    observable_px: int = 0
+    recall: float = 0.0
+    score_margin_px: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _IdentityResidualMetadata:
+    """Proveniencia do residuo que pode ser reaplicado na geracao corrente."""
+
+    shift: tuple[int, int]
+    generation: int
+    measured_at: float
+    reference_pose: tuple[float, ...]
+    support_px: int
+    observable_px: int
+    recall: float
+    score_margin_px: float | None
+
+
+def _identity_residual_pose_freshness(
+    metadata, generation, corners, shape, step_px, invalidated
+):
+    """Indica se o residuo ainda pode explicar deslocamento de pose.
+
+    A frescura e por geracao e continuidade geometrica, nao por timeout:
+    o carimbo temporal fica disponivel para diagnostico, enquanto um salto
+    maior que o limiar de assentamento ou uma perda de pose invalida o ramo
+    geometrico ate a proxima decisao de identidade.
+    """
+    if metadata is None:
+        return False, "missing_metadata", None
+    if metadata.generation != generation:
+        return False, "generation_mismatch", None
+    if corners is None:
+        return False, "pose_missing", None
+    if invalidated:
+        return False, "previous_pose_gap_or_jump", None
+    jump_limit = anchor_mod._FOLLOW_SETTLE_PX
+    if step_px is not None and step_px > jump_limit:
+        return False, "pose_jump", float(step_px)
+    reference = np.asarray(metadata.reference_pose, dtype=np.float32).reshape(4, 2)
+    drift = anchor_mod._matrix_grid_displacement(
+        registration._registration_matrix(reference, corners, shape), shape
+    )
+    if drift > jump_limit:
+        return False, "reference_pose_drift", drift
+    if metadata.support_px < _RESIDUAL_MIN_PX:
+        return False, "insufficient_support", drift
+    return True, "fresh", drift
+
+
+def _estimate_identity_residual_evidence(
     reference, baseline, evidence, visible, sampled, threshold, coverage=None
 ):
-    """(dx, dy) inteiro que alinha a evidencia da passada a referencia.
+    """Estima (dx, dy) e registra suporte, recall e margem do candidato.
 
     Funcao pura. Falha com seguranca: devolve (0, 0) quando a estimativa
     e ambigua (pouca tinta, correlacao fraca, ganho pequeno). A metrica
@@ -566,7 +623,7 @@ def _estimate_identity_residual(
     prior = reference > 0
     seen = evidence > threshold
     if prior.shape != seen.shape:
-        return 0, 0
+        return _ResidualEvidence()
     if baseline is not None and baseline.shape == seen.shape and baseline.any():
         kernel = np.ones((identity._IDENTITY_DILATION_KERNEL,) * 2, np.uint8)
         excluded = cv2.dilate(baseline.astype(np.uint8), kernel) > 0
@@ -589,7 +646,7 @@ def _estimate_identity_residual(
         np.count_nonzero(prior) < _RESIDUAL_MIN_PX
         or np.count_nonzero(seen) < _RESIDUAL_MIN_PX
     ):
-        return 0, 0
+        return _ResidualEvidence()
     ys, xs = np.nonzero(prior)
     pad = _RESIDUAL_CROP_PAD
     y0, y1 = max(0, ys.min() - pad), ys.max() + pad + 1
@@ -611,7 +668,7 @@ def _estimate_identity_residual(
     corr = cv2.matchTemplate(padded, blur(prior_c), cv2.TM_CCORR_NORMED)
     _, peak, _, loc = cv2.minMaxLoc(corr)
     if not peak > _RESIDUAL_MIN_PEAK:
-        return 0, 0
+        return _ResidualEvidence()
 
     def ambiguous(profile, at):
         """Outro MAXIMO LOCAL distante, quase tao bom: o eixo nao e
@@ -633,7 +690,7 @@ def _estimate_identity_residual(
     amb_x = ambiguous(corr.max(axis=0), loc[0])
     amb_y = ambiguous(corr.max(axis=1), loc[1])
     if amb_y:
-        return 0, 0
+        return _ResidualEvidence()
     cx = 0 if amb_x else -(loc[0] - reach) * 2
     cy = -(loc[1] - reach) * 2
     prior_px = float(np.count_nonzero(prior_c))
@@ -670,16 +727,37 @@ def _estimate_identity_residual(
             # deslocamento lateral que so esconde 4 px nao casados atras da
             # borda da cobertura nao pode vencer por isso.
             score = hit - _RESIDUAL_MISS_WEIGHT * (observable - hit)
-            scored.append((score, dx, dy))
+            scored.append((score, dx, dy, recall, hit, observable))
     if not scored:
-        return 0, 0
+        return _ResidualEvidence()
     top = max(item[0] for item in scored)
     tol = max(2.0, _RESIDUAL_TIE_FRACTION * prior_px)
     near = [item for item in scored if item[0] >= top - tol]
     # Equivalentes: vence o de MENOR deslocamento. Um eixo extra de movimento
     # so e aceito se explicar mais tinta, nao se esconder a que sobra.
-    _score, dx, dy = min(near, key=lambda i: (abs(i[1]) + abs(i[2]), -i[0]))
-    return int(dx), int(dy)
+    selected = min(near, key=lambda i: (abs(i[1]) + abs(i[2]), -i[0]))
+    _score, dx, dy, recall, hit, observable = selected
+    runner_up = max(
+        (item[0] for item in scored if (item[1], item[2]) != (dx, dy)),
+        default=None,
+    )
+    margin = None if runner_up is None else max(0.0, top - runner_up)
+    return _ResidualEvidence(
+        shift=(int(dx), int(dy)),
+        support_px=int(hit),
+        observable_px=int(observable),
+        recall=float(recall),
+        score_margin_px=margin,
+    )
+
+
+def _estimate_identity_residual(
+    reference, baseline, evidence, visible, sampled, threshold, coverage=None
+):
+    """Forma compatível: (dx, dy) que alinha a evidência à referência."""
+    return _estimate_identity_residual_evidence(
+        reference, baseline, evidence, visible, sampled, threshold, coverage
+    ).shift
 
 
 def _evaluate_page_identity(
@@ -1403,6 +1481,12 @@ class _Pass:
     identity_hold_seen_snap: bool = False
     identity_precomputed: object = None
     identity_residual: tuple = (0, 0)
+    identity_residual_snapshot: tuple = (0, 0)
+    identity_residual_metadata_snapshot: object = None
+    identity_residual_metadata: object = None
+    identity_residual_estimated_this_pass: bool = False
+    identity_residual_pose_fresh: bool = False
+    identity_residual_freshness_reason: object = None
     anchor_unshifted: object = None
     identity_decision: object = None
     identity_recall: object = None
@@ -1635,6 +1719,8 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         self._identity_reference_corners = None
         self._identity_gray_ref = None
         self._identity_residual = (0, 0)
+        self._identity_residual_metadata = None
+        self._identity_residual_pose_invalidated = False
         self._identity_recovery_requested = False
         self._identity_defer_count = 0
         self._identity_switch_votes = 0
@@ -1738,6 +1824,8 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         with self._pm_gate, self._condition:
             self._identity_recovery_requested = bool(preserve_identity)
             self._identity_residual = (0, 0)
+            self._identity_residual_metadata = None
+            self._identity_residual_pose_invalidated = False
             self._identity_defer_count = 0
             self._identity_switch_votes = 0
             self._identity_hold_seen = False
@@ -2976,6 +3064,8 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 self._marks_recovery_waited += 1
             else:
                 self._marks_recovery_waited = 0
+            p.identity_residual_snapshot = self._identity_residual
+            p.identity_residual_metadata_snapshot = self._identity_residual_metadata
             p.first_pass = p.generation != self._worker_generation
             p.recovering = self._identity_reference is not None and (
                 p.first_pass or self._identity_recovery_requested
@@ -3145,7 +3235,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 pass_corners=p.corners,
                 sampled=sampled,
             )
-            p.identity_residual = _estimate_identity_residual(
+            estimate = _estimate_identity_residual_evidence(
                 p.identity_reference_snap,
                 p.identity_baseline_snap,
                 prob,
@@ -3154,8 +3244,36 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 self._accumulator.threshold,
                 self._coverage_for_estimate(p),
             )
+            p.identity_residual = estimate.shift
+            p.identity_residual_estimated_this_pass = True
+            if estimate.shift != (0, 0) and p.corners is not None:
+                p.identity_residual_metadata = _IdentityResidualMetadata(
+                    shift=estimate.shift,
+                    generation=p.generation,
+                    measured_at=p.pass_started,
+                    reference_pose=tuple(float(v) for v in p.corners.reshape(-1)),
+                    support_px=estimate.support_px,
+                    observable_px=estimate.observable_px,
+                    recall=estimate.recall,
+                    score_margin_px=estimate.score_margin_px,
+                )
+            p.reg_info.update(
+                {
+                    "identity_residual_estimated_dx": estimate.shift[0],
+                    "identity_residual_estimated_dy": estimate.shift[1],
+                    "identity_residual_estimate_support_px": estimate.support_px,
+                    "identity_residual_estimate_observable_px": (
+                        estimate.observable_px
+                    ),
+                    "identity_residual_estimate_recall": estimate.recall,
+                    "identity_residual_estimate_score_margin_px": (
+                        estimate.score_margin_px
+                    ),
+                }
+            )
         else:
-            p.identity_residual = self._identity_residual
+            p.identity_residual = p.identity_residual_snapshot
+            p.identity_residual_metadata = p.identity_residual_metadata_snapshot
         dx, dy = p.identity_residual
         if dx or dy:
             p.anchor = registration._shift_anchor_corners(
@@ -3397,14 +3515,12 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             # Duas leituras (ver anchor._pose_displacement): o residuo de erro
             # de rastreio nao e movimento (pose_matrix); o de folha movida e
             # acompanhada deixa a ancora efetiva parada (matrix) e a evidencia
-            # chega alinhada. A efetiva so vale se explica a pose por inteiro.
+            # chega alinhada. A escolha final espera a validade temporal do
+            # residuo, calculada no commit junto com o degrau de pose.
             pose_px = anchor_mod._matrix_grid_displacement(pose_matrix, p.prob.shape)
             effective_px = anchor_mod._matrix_grid_displacement(matrix, p.prob.shape)
-            p.reg_info["registration_displacement_px"] = (
-                effective_px
-                if effective_px <= anchor_mod._RESIDUAL_EXPLAINS_PX
-                else pose_px
-            )
+            p.reg_info["registration_pose_displacement_px"] = pose_px
+            p.reg_info["registration_effective_displacement_px"] = effective_px
             p.reg_info["registration_is_identity"] = (
                 registration._registration_is_identity(matrix)
             )
@@ -3496,6 +3612,110 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                         )
                     )
                 self._previous_corners = p.corners.copy()
+            if not p.identity_residual_estimated_this_pass:
+                if p.corners is None:
+                    self._identity_residual_pose_invalidated = True
+                elif (
+                    p.watch_step_px is not None
+                    and p.watch_step_px > anchor_mod._FOLLOW_SETTLE_PX
+                ):
+                    self._identity_residual_pose_invalidated = True
+            reference_pose_drift_px = None
+            if p.identity_residual_estimated_this_pass:
+                metadata = p.identity_residual_metadata
+                reference_pose_drift_px = 0.0 if metadata is not None else None
+                p.identity_residual_pose_fresh = bool(
+                    metadata is not None
+                    and metadata.generation == p.generation
+                    and metadata.support_px >= _RESIDUAL_MIN_PX
+                )
+                p.identity_residual_freshness_reason = (
+                    "estimated_this_pass"
+                    if p.identity_residual_pose_fresh
+                    else "no_supported_estimate"
+                )
+            else:
+                (
+                    p.identity_residual_pose_fresh,
+                    p.identity_residual_freshness_reason,
+                    reference_pose_drift_px,
+                ) = _identity_residual_pose_freshness(
+                    p.identity_residual_metadata,
+                    p.generation,
+                    p.corners,
+                    p.prob.shape,
+                    p.watch_step_px,
+                    self._identity_residual_pose_invalidated,
+                )
+                if p.identity_residual_freshness_reason in (
+                    "pose_jump",
+                    "reference_pose_drift",
+                    "pose_missing",
+                ):
+                    self._identity_residual_pose_invalidated = True
+            metadata = p.identity_residual_metadata
+            p.reg_info.update(
+                {
+                    "identity_residual_pose_fresh": p.identity_residual_pose_fresh,
+                    "identity_residual_freshness_reason": (
+                        p.identity_residual_freshness_reason
+                    ),
+                    "identity_residual_shift": list(p.identity_residual),
+                    "identity_residual_generation": (
+                        None if metadata is None else metadata.generation
+                    ),
+                    "identity_residual_age_s": (
+                        None
+                        if metadata is None
+                        else max(0.0, p.pass_started - metadata.measured_at)
+                    ),
+                    "identity_residual_support_px": (
+                        None if metadata is None else metadata.support_px
+                    ),
+                    "identity_residual_observable_px": (
+                        None if metadata is None else metadata.observable_px
+                    ),
+                    "identity_residual_recall": (
+                        None if metadata is None else metadata.recall
+                    ),
+                    "identity_residual_score_margin_px": (
+                        None if metadata is None else metadata.score_margin_px
+                    ),
+                    "identity_residual_reference_pose": (
+                        None if metadata is None else metadata.reference_pose
+                    ),
+                    "identity_residual_reference_pose_drift_px": (
+                        reference_pose_drift_px
+                    ),
+                }
+            )
+            if "registration_pose_displacement_px" in p.reg_info:
+                pose_px = p.reg_info["registration_pose_displacement_px"]
+                effective_px = p.reg_info["registration_effective_displacement_px"]
+                use_residual = (
+                    p.identity_residual_pose_fresh
+                    and bool(p.identity_residual[0] or p.identity_residual[1])
+                    and pose_px > self._config.residual_explains_px
+                    and effective_px <= self._config.residual_explains_px
+                )
+                p.reg_info["registration_displacement_px"] = (
+                    effective_px if use_residual else pose_px
+                )
+                if use_residual:
+                    displacement_source = "fresh_residual_explains_pose"
+                elif not p.identity_residual_pose_fresh and (
+                    p.identity_residual[0] or p.identity_residual[1]
+                ):
+                    displacement_source = "stale_residual"
+                elif pose_px > self._config.residual_explains_px and (
+                    p.identity_residual[0] or p.identity_residual[1]
+                ):
+                    displacement_source = "fresh_residual_does_not_explain_pose"
+                elif p.identity_residual[0] or p.identity_residual[1]:
+                    displacement_source = "pose_within_tolerance"
+                else:
+                    displacement_source = "pose"
+                p.reg_info["registration_displacement_source"] = displacement_source
             self._pass_identity(p)
             p.identity_owned = (
                 p.first_pass
@@ -3702,6 +3922,8 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 if p.identity_timed_out:
                     # Perda de lock, nao voto de pagina nova.
                     self._identity_residual = (0, 0)
+                    self._identity_residual_metadata = None
+                    self._identity_residual_pose_invalidated = False
                     # A proxima passada estabelece outra ancora.
                     self._accumulator.reset()
                     self._pm_rezero_requested = False
@@ -3728,6 +3950,8 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     self._still_passes = 0
                 elif not p.keep_page:
                     self._identity_residual = (0, 0)
+                    self._identity_residual_metadata = None
+                    self._identity_residual_pose_invalidated = False
                     self._accumulator.reset()
                     self._pm_rezero_requested = False
                     self._pm_rezero_seeding = False
@@ -3749,6 +3973,8 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     # resolucao.
                     self._accumulator.restore_confirmed(identity_reference)
                     self._identity_residual = p.identity_residual
+                    self._identity_residual_metadata = p.identity_residual_metadata
+                    self._identity_residual_pose_invalidated = False
                 # Keep the old anchor when identity matched: all future
                 # observations remain registered into the same canvas.
                 self._identity_hold_seen = False
@@ -3782,6 +4008,8 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             p.camera_prob,
             p.visible,
             p.identity_residual,
+            p.identity_residual_pose_fresh,
+            p.reg_info,
         )
         p.arbitration_abstain = arb_status == "open"
         p.reg_info["arb_event_open"] = self._arb_event_open
@@ -3821,6 +4049,8 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             p.watch_step_px,
             arb_event,
             p.identity_residual,
+            p.identity_residual_pose_fresh,
+            p.reg_info,
         )
         p.follow_abstain = follow_status == "open"
         p.reg_info["follow_event_open"] = self._follow_event_open

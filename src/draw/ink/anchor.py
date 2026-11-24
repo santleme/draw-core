@@ -72,7 +72,6 @@ _FOLLOW_DISPLACEMENT_PX = _ANCHOR_MIGRATION_DISPLACEMENT_PX
 # residuo e inteiro, o erro de arredondamento fica abaixo disto. Reduzir
 # o deslocamento pela metade nao explica nada — um deslize real de 14 px com
 # residuo de 6 nao pode virar 8 (review do #180).
-_RESIDUAL_EXPLAINS_PX = 2.0
 _FOLLOW_PASSES = _ANCHOR_MIGRATION_PASSES
 _FOLLOW_SETTLE_PX = 6.0
 
@@ -117,17 +116,19 @@ class _AnchorSteps:
         self._follow_streak_quads = []
         self._follow_hold = False
 
-    def _pose_displacement(self, corners, shape, residual=(0, 0)):
-        """Deslocamento posicional do quad contra a ancora, em px da grade.
+    def _pose_displacement(
+        self, corners, shape, residual=(0, 0), *, residual_fresh=True
+    ):
+        """Deslocamento posicional e ramo escolhido, em px da grade.
 
         Com residuo de registro (F-11) ha duas leituras: contra a ancora SEM
         o residuo (erro de rastreio: os cantos nao andaram, so o conteudo do
         warp; o residuo nao e movimento da pagina) e contra a ancora COM ele
         (folha movida de verdade e acompanhada pelo tracker: o warp ja esta
         alinhado e o residuo so cancela o registro). A segunda so vale
-        quando EXPLICA a pose por inteiro (<= _RESIDUAL_EXPLAINS_PX): medir
-        so a primeira deixava o evento reabrir sem fim neste ultimo caso e
-        a passada abstinha para sempre (review do #180)."""
+        quando o residuo e fresco e EXPLICA a pose por inteiro, dentro do
+        limite configurado. Residuo velho continua corrigindo o registro do
+        conteudo, mas nao pode suprimir um evento geometrico (review #180)."""
         trigger_anchor = (
             self._anchor_corners
             if self._anchor_roll == 0
@@ -136,14 +137,20 @@ class _AnchorSteps:
         matrix = registration._registration_matrix(trigger_anchor, corners, shape)
         displacement = _matrix_grid_displacement(matrix, shape)
         dx, dy = residual
-        if displacement > _RESIDUAL_EXPLAINS_PX and (dx or dy):
+        if not (dx or dy):
+            return displacement, "pose"
+        if not residual_fresh:
+            return displacement, "stale_residual"
+        limit = self._config.residual_explains_px
+        if displacement > limit:
             shifted = registration._shift_anchor_corners(trigger_anchor, dx, dy, shape)
             effective = _matrix_grid_displacement(
                 registration._registration_matrix(shifted, corners, shape), shape
             )
-            if effective <= _RESIDUAL_EXPLAINS_PX:
-                return effective
-        return displacement
+            if effective <= limit:
+                return effective, "fresh_residual_explains_pose"
+            return displacement, "fresh_residual_does_not_explain_pose"
+        return displacement, "pose_within_tolerance"
 
     def _arb_restart_streak(self):
         confirmed = self._accumulator._confirmed
@@ -172,6 +179,8 @@ class _AnchorSteps:
         registered_prob,
         visible=None,
         grid_shift=(0, 0),
+        residual_fresh=True,
+        reg_info=None,
     ):
         """Avanca o evento de arbitragem; arbitra no fecho do streak.
 
@@ -194,7 +203,12 @@ class _AnchorSteps:
         # fazer toda passada seguinte parecer deslocada pela
         # permutacao — o deslocamento que abre evento e o da pose,
         # nao o da rotulacao.
-        displacement = self._pose_displacement(corners, shape, grid_shift)
+        displacement, displacement_source = self._pose_displacement(
+            corners, shape, grid_shift, residual_fresh=residual_fresh
+        )
+        if reg_info is not None:
+            reg_info["arbitration_pose_displacement_px"] = displacement
+            reg_info["arbitration_pose_displacement_source"] = displacement_source
         if displacement <= _ANCHOR_MIGRATION_DISPLACEMENT_PX:
             self._arb_close_event()
             return "closed", None
@@ -312,6 +326,8 @@ class _AnchorSteps:
             "canvas_px": canvas_px,
             "pass_mass_px": mean_mass,
             "displacement_px": displacement,
+            "pose_displacement_source": displacement_source,
+            "identity_residual_fresh": bool(residual_fresh),
             "streak": len(self._arb_streak_quads),
         }
         self._arb_events.append(event)
@@ -353,6 +369,8 @@ class _AnchorSteps:
         step_px,
         arb_event,
         grid_shift=(0, 0),
+        residual_fresh=True,
+        reg_info=None,
     ):
         """Avanca o evento de divergencia assentada; re-ancora no
         fecho do streak.
@@ -390,7 +408,12 @@ class _AnchorSteps:
             return "closed", None
         # O gatilho compara em termos POSICIONAIS, como o da
         # arbitragem: o roll parado nao e deslocamento de pose.
-        displacement = self._pose_displacement(corners, shape, grid_shift)
+        displacement, displacement_source = self._pose_displacement(
+            corners, shape, grid_shift, residual_fresh=residual_fresh
+        )
+        if reg_info is not None:
+            reg_info["follow_pose_displacement_px"] = displacement
+            reg_info["follow_pose_displacement_source"] = displacement_source
         if displacement <= _FOLLOW_DISPLACEMENT_PX:
             self._follow_close_event()
             return "closed", None

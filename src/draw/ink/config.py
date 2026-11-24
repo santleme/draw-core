@@ -1,5 +1,6 @@
 """Preset de producao do motor de tinta (o que as flags Tier A/B liam do ambiente)."""
 
+import math
 from dataclasses import dataclass
 
 # Nivel de voto que reproduz o legado: a media das 3 passadas que fecha a
@@ -164,6 +165,11 @@ class InkConfig:
     # "novo" ainda nao foi calibrado em corpus real — ligar para
     # replay/mesa, nao para o preset validado.
     page_model: bool = False
+    # Maximo erro residual (px da grade) para uma correcao de identidade
+    # explicar por inteiro a pose. Mantido em config para calibracao/teste,
+    # sem flag de ambiente. Aparece no fim para preservar a ordem posicional
+    # dos campos existentes.
+    residual_explains_px: float = 2.0
 
     def __post_init__(self):
         if not 0.0 < self.t_low < self.t_high <= 1.0:
@@ -175,6 +181,11 @@ class InkConfig:
             raise ValueError("provisional_min_px deve ser >= 1")
         if not self.motion_veto_px > 0.0:
             raise ValueError("motion_veto_px deve ser > 0")
+        if (
+            not math.isfinite(self.residual_explains_px)
+            or self.residual_explains_px < 0.0
+        ):
+            raise ValueError("residual_explains_px deve ser finito e >= 0")
         if not 0 <= self.occlusion_hold_passes <= 10:
             raise ValueError("occlusion_hold_passes fora de [0, 10]")
         if not 0 <= self.unseeded_hold_passes <= 10:

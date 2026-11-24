@@ -139,6 +139,23 @@ def test_worker_hands_the_config_to_its_accumulator():
     assert worker._accumulator._config.vote_score_strong == cfg.vote_score_strong
 
 
+@pytest.mark.parametrize("limit", [1.9, 2.0, 2.1])
+def test_residual_pose_tolerance_is_an_ink_config_field(limit):
+    assert InkConfig(residual_explains_px=limit).residual_explains_px == limit
+
+
+def test_residual_pose_tolerance_keeps_existing_positional_fields_in_place():
+    cfg = InkConfig(False, False, 0.65)
+    assert cfg.seen_threshold == 0.65
+    assert cfg.residual_explains_px == 2.0
+
+
+@pytest.mark.parametrize("limit", [float("nan"), float("inf"), -float("inf"), -0.1])
+def test_residual_pose_tolerance_rejects_nonfinite_or_negative_values(limit):
+    with pytest.raises(ValueError, match="residual_explains_px"):
+        InkConfig(residual_explains_px=limit)
+
+
 def test_main_ink_vote_flag_builds_the_pipeline_config(monkeypatch):
     seen = []
     monkeypatch.setattr(app_module, "run", lambda **kw: seen.append(kw))

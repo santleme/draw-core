@@ -16,6 +16,7 @@ cinco falhas da fila de robustez de 2026-11-21:
   borracha nunca le como tinta.
 """
 
+import os
 import threading
 import time
 
@@ -174,6 +175,10 @@ def test_shape_mismatch_raises():
 
 
 @pytest.mark.timing
+@pytest.mark.skipif(
+    os.environ.get("RUN_PAGE_MODEL_TIMING") != "1",
+    reason="benchmark de parede opt-in; execute com RUN_PAGE_MODEL_TIMING=1",
+)
 def test_observe_budget_on_a4_grid():
     model = pm_mod.PageModel((1200, 850), confirm_obs=3)
     gray = _paper((1200, 850))
@@ -3167,6 +3172,21 @@ def test_identity_residual_estimate_recovers_a_vertical_shift(dy):
     assert containment == pytest.approx(1.0)
 
 
+def test_identity_residual_estimate_carries_auditable_support_and_margin():
+    ref, candidate = _shifted_evidence(6)
+
+    evidence = worker_mod._estimate_identity_residual_evidence(
+        ref, None, candidate, None, None, 0.5
+    )
+
+    assert evidence.shift == (0, -6)
+    assert evidence.support_px >= worker_mod._RESIDUAL_MIN_PX
+    assert evidence.observable_px >= evidence.support_px
+    assert evidence.recall == pytest.approx(1.0)
+    assert evidence.score_margin_px is not None
+    assert evidence.score_margin_px > 0.0
+
+
 def test_identity_residual_is_zero_when_the_evidence_is_aligned():
     ref, candidate = _shifted_evidence(0)
     assert worker_mod._estimate_identity_residual(
@@ -3387,6 +3407,87 @@ def test_identity_residual_fails_safe_without_ink(empty):
     assert worker_mod._estimate_identity_residual(
         ref, None, candidate, None, None, 0.5
     ) == (0, 0)
+
+
+def _identity_residual_metadata(generation=7, support_px=None):
+    corners = np.array(
+        [[10.0, 10.0], [110.0, 10.0], [110.0, 80.0], [10.0, 80.0]],
+        dtype=np.float32,
+    )
+    return worker_mod._IdentityResidualMetadata(
+        shift=(0, 6),
+        generation=generation,
+        measured_at=10.0,
+        reference_pose=tuple(float(value) for value in corners.reshape(-1)),
+        support_px=(worker_mod._RESIDUAL_MIN_PX if support_px is None else support_px),
+        observable_px=worker_mod._RESIDUAL_MIN_PX,
+        recall=0.95,
+        score_margin_px=12.0,
+    ), corners
+
+
+def test_identity_residual_freshness_accepts_same_generation_and_pose():
+    metadata, corners = _identity_residual_metadata()
+
+    fresh, reason, drift = worker_mod._identity_residual_pose_freshness(
+        metadata, 7, corners, (H, W), 0.0, False
+    )
+
+    assert fresh
+    assert reason == "fresh"
+    assert drift == pytest.approx(0.0, abs=0.01)
+
+
+def test_new_generation_discards_previous_identity_residual_provenance():
+    worker = worker_mod.PageCleanWorker(_ScriptInk(), config=InkConfig())
+    metadata, _corners = _identity_residual_metadata(generation=3)
+    worker._identity_residual = (0, 6)
+    worker._identity_residual_metadata = metadata
+    worker._identity_residual_pose_invalidated = True
+
+    worker.new_generation()
+
+    assert worker._identity_residual == (0, 0)
+    assert worker._identity_residual_metadata is None
+    assert worker._identity_residual_pose_invalidated is False
+
+
+@pytest.mark.parametrize(
+    ("generation", "corners_case", "step", "invalidated", "support", "reason"),
+    [
+        (8, "same", 0.0, False, None, "generation_mismatch"),
+        (7, "missing", None, False, None, "pose_missing"),
+        (7, "same", 0.0, True, None, "previous_pose_gap_or_jump"),
+        (7, "same", 6.1, False, None, "pose_jump"),
+        (7, "shifted", 0.0, False, None, "reference_pose_drift"),
+        (
+            7,
+            "same",
+            0.0,
+            False,
+            worker_mod._RESIDUAL_MIN_PX - 1,
+            "insufficient_support",
+        ),
+    ],
+)
+def test_identity_residual_freshness_rejects_stale_provenance(
+    generation, corners_case, step, invalidated, support, reason
+):
+    metadata, reference = _identity_residual_metadata(support_px=support)
+    corners = (
+        None
+        if corners_case == "missing"
+        else reference
+        if corners_case == "same"
+        else reference + np.float32([7.0, 0.0])
+    )
+
+    fresh, actual_reason, _drift = worker_mod._identity_residual_pose_freshness(
+        metadata, generation, corners, (H, W), step, invalidated
+    )
+
+    assert not fresh
+    assert actual_reason == reason
 
 
 _RETURN_ROWS = (14, 34, 54, 74)

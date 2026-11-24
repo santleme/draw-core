@@ -143,3 +143,57 @@ Bloqueantes do #180:
 Desejáveis: fundir hipóteses equivalentes antes da margem e usar margem relativa; observabilidade
 por eixo no estimador; testes de propriedade; 30–60 clipes reais com controle; medir o custo do
 estimador em A/B no fluxo completo e rebaixar o teste absoluto de 10 ms a opt-in.
+
+## 8. Execução local das recomendações
+
+Atualização da mesma branch, após a síntese acima. Código e documentação ainda não foram
+publicados no PR remoto.
+
+### Escore e limiar
+
+- Contrato adicionado para o caso extremo `rot90 + INTER_LINEAR` com linha vertical de 1 px
+  na borda da grade: a soma transformada é `266,67` contra `240` original. O cálculo anterior
+  pontua `1,111`; o atual, no domínio transformado, pontua `1,0`. O escore vazio continua
+  sendo `0`.
+- Comparação sintética de nove combinações (`k=1..3`; resíduos `(0,0)`, `(4,0)` e `(3,-5)`):
+  o melhor candidato cíclico permaneceu o mesmo e nenhuma margem entre candidatos cíclicos
+  cruzou `_ARB_DELTA=0,05`. A menor margem observada foi `0,381`. Os testes completos de
+  pouso rotacionado também mantiveram o veredito. Não alterei o limiar: isso é apenas evidência
+  sintética, e não calibração retida nem validação com câmera.
+- A normalização atual continua sem penalizar massa cortada da grade. O limiar de `0,05` e o
+  rival por eixo de `90%` continuam sem sustentação de fonte/calibração independente.
+
+### Proveniência e uso geométrico do resíduo
+
+- A estimativa agora carrega pixels casados (`support_px`), pixels observáveis, recall e margem
+  de escore top-vs-runner-up. Ao persistir, registra geração, tempo monotônico, pose de
+  referência e esses valores.
+- O uso geométrico é invalidado por falta de pose, salto entre poses acima de `6 px`, deriva
+  acumulada acima de `6 px`, suporte insuficiente ou troca de geração. Os `6 px` vêm do limiar
+  já usado para assentamento; a aplicação disso como critério de frescor é uma inferência de
+  engenharia, sem validação em clipe real. Uma nova geração sempre descarta o resíduo anterior.
+- O resíduo obsoleto ainda pode corrigir o alinhamento do conteúdo, mas nunca reduzir o
+  deslocamento usado pelos gatilhos de arbitragem/follow nem pelo portão de remoção. A
+  telemetria registra frescor, motivo, idade, pose de referência, deriva e ramo geométrico.
+- `residual_explains_px` ficou no fim de `InkConfig`, para preservar a ordem dos argumentos
+  posicionais existentes. O default segue em `2,0 px`; os testes cobrem configurações em
+  `1,9`, `2,0` e `2,1 px`, mas o valor de produção segue sem calibração empírica.
+
+### Verificação e limites restantes
+
+- Gate local: `ruff check .`, `ruff format --check .` e `pytest -q` passaram; `2334 passed`,
+  `2 skipped`. Os testes focados de âncora, identidade, contratos e movimento deram `327 passed`,
+  `1 skipped`.
+- O teste de orçamento de `PaperModel.observe` é opt-in via
+  `RUN_PAGE_MODEL_TIMING=1`; executei-o separadamente e passou. Isso evita um limite absoluto de
+  `10 ms` sujeito a contenção no gate padrão.
+- Mutações isoladas que removem o filtro de aceite dos candidatos, ignoram o frescor do resíduo
+  ou restauram o limiar fixo de `2 px` fizeram seus respectivos testes falharem. O contrato do
+  escore calcula explicitamente o resultado da fórmula anterior (`1,111`) e o distingue do
+  atual (`1,0`).
+- Não há clipe rotulado de queda/retorno do tracker nesta branch e não rodei CI remoto; a suíte
+  local não substitui esses dois itens. A descrição do PR ainda precisa declarar que a evidência
+  é sintética, que `2 px`, `90%` e `0,05` não têm calibração independente, que o escore ignora
+  massa cortada e que a regressão de remoção após movimento físico foi corrigida.
+- Testes de propriedade com Hypothesis, A/B de custo do estimador no fluxo completo e o corpus
+  real de 30–60 clipes seguem como trabalho futuro. Hypothesis não é dependência do projeto.
