@@ -19,7 +19,7 @@ from collections import deque
 import cv2
 import numpy as np
 
-from .contracts import DetectionResult, GateInfo
+from .contracts import DetectionResult
 
 # Os limites em pixels deste modulo (_SHEET_*_PX) foram calibrados
 # na mesa de referencia — webcam 1280x720 MJPG quase perpendicular,
@@ -533,30 +533,6 @@ def lk_track_corners(prev_gray, next_gray, corners):
     return tracked.reshape(-1, 2)
 
 
-def _gate_info_from_trace(trace):
-    """O pacote do portão de primeira confirmação de um rastro.
-
-    Extrai do rastro da combinada (draw.app) o que o laço precisa
-    para julgar a primeira confirmação (frente 88): a fonte do
-    desfecho, o logit de presença e o edge_in da máscara. Rastro sem
-    esses campos (detecção de dois elementos, bancada, replay)
-    devolve None e o laço não julga — o portão nunca bloqueia por
-    falta de sinal.
-    """
-    if not trace:
-        return None
-    # O campo do portão só existe no rastro quando a flag está
-    # ligada (draw.app só o escreve nesse caso): sem ele, não há
-    # pacote — o logit sozinho é observabilidade antiga, não portão.
-    if "edge_in" not in trace:
-        return None
-    return GateInfo(
-        source=trace.get("source"),
-        presence_logit=trace.get("presence_logit"),
-        edge_in=trace.get("edge_in"),
-    )
-
-
 # Teto da espera pela thread de deteccao na saida do app. Uma
 # deteccao nesta VM pode passar de 1 s; no Ryzen ela mede 36,7 ms.
 _DETECTION_STOP_TIMEOUT_SECONDS = 5.0
@@ -568,10 +544,7 @@ class SheetDetectionWorker:
     O laco entrega o quadro com submit() e segue: a fila tem
     tamanho 1 e um quadro nao processado e substituido pelo
     proximo, nunca acumulado. A thread roda a deteccao e publica
-    (sequencia, cantos, veredito, carimbo do quadro, duracao) — e,
-    quando a deteccao devolve rastro com os campos do portão de
-    primeira confirmação, um sexto elemento com esse pacote
-    (_gate_info_from_trace). O
+    (sequencia, cantos, veredito, carimbo do quadro, duracao). O
     laco colhe com poll() sem bloquear, em qualquer estado do
     rastreador, inclusive no missed: os 36,7 ms medidos da
     deteccao no Ryzen saiam do laco de exibicao, e no missed
@@ -668,7 +641,6 @@ class SheetDetectionWorker:
                     verdict=verdict,
                     captured_at=captured_at,
                     detect_ms=detect_ms,
-                    gate_info=_gate_info_from_trace(trace),
                     coverage_mask=(
                         extras.get("coverage_mask") if extras is not None else None
                     ),

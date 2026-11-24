@@ -92,7 +92,6 @@ class SyncDetector:
     def submit(self, frame, captured_at, frame_index=None):
         from draw.app import _detect_sheet_combined_traced
         from draw.contracts import DetectionResult
-        from draw.tracker import _gate_info_from_trace
 
         outcome = _detect_sheet_combined_traced(frame, self._detector)
         corners, verdict, trace = outcome[0], outcome[1], outcome[2]
@@ -104,7 +103,6 @@ class SyncDetector:
             verdict=verdict,
             captured_at=captured_at,
             detect_ms=self._detect_ms,
-            gate_info=_gate_info_from_trace(trace),
             coverage_mask=(extras.get("coverage_mask") if extras else None),
             hand_mask=(extras.get("hand_mask") if extras else None),
         )
