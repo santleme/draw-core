@@ -55,13 +55,36 @@ def test_scalar_scale_broadcasts_to_uniform_pair():
     assert _export_scale(400, 560, 210, 297, scale=np.int64(1)) == (1.0, 1.0)
 
 
-@pytest.mark.parametrize("bad", [0.0, -0.5, (0.5, -0.1), (0.0, 0.0)])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        0.0,
+        -0.5,
+        (0.5, -0.1),
+        (0.0, 0.0),
+        float("inf"),
+        (float("inf"), 0.5),
+        float("nan"),
+    ],
+)
 def test_non_positive_scale_rejected(bad):
     with pytest.raises(ValueError, match="positivo"):
         _export_scale(400, 560, 210, 297, scale=bad)
 
 
-@pytest.mark.parametrize("bad", [True, "0.5", (0.5, 0.5, 0.5), object()])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        True,
+        "0.5",
+        "12",
+        b"12",
+        {0.5, 0.25},
+        {1: "a", 2: "b"},
+        (0.5, 0.5, 0.5),
+        object(),
+    ],
+)
 def test_malformed_scale_rejected_with_clear_error(bad):
     """Nem par nem escalar: ValueError claro em vez de TypeError do
     desempacotamento (bool fica de fora do broadcast apesar de int)."""

@@ -11,6 +11,7 @@ vetorizado em numpy, neste arquivo. Os helpers de esqueleto, grafo e
 simplificacao compartilhados moram aqui; vectorize.py os importa.
 """
 
+import math
 import numbers
 import re
 from pathlib import Path
@@ -495,13 +496,20 @@ def _export_scale(img_w, img_h, paper_w_mm, paper_h_mm, scale=None, formats=None
         # escalares numpy (np.float32/int64 nao sao float/int nativos).
         if isinstance(scale, numbers.Real) and not isinstance(scale, bool):
             scale = (scale, scale)
+        # O par precisa ser uma sequencia ordenada — iterar uma str
+        # devolve caracteres ("12" virava (1, 2) em silencio), e set/dict
+        # desempacotam em ordem arbitraria.
+        if not isinstance(scale, (tuple, list, np.ndarray)):
+            raise ValueError(
+                f"scale_mm_per_px precisa ser um escalar ou par (sx, sy): {scale!r}"
+            )
         try:
             sx, sy = (float(v) for v in scale)
         except (TypeError, ValueError):
             raise ValueError(
                 f"scale_mm_per_px precisa ser um escalar ou par (sx, sy): {scale!r}"
             ) from None
-        if not (sx > 0 and sy > 0):
+        if not (math.isfinite(sx) and math.isfinite(sy) and sx > 0 and sy > 0):
             raise ValueError(f"scale_mm_per_px precisa ser positivo: {scale!r}")
         return sx, sy
     for _name, dimensions, grid, unit in formats or ():
