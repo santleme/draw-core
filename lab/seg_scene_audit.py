@@ -550,6 +550,10 @@ def main(argv=None):
             f"quadros gravado em {args.out}"
         )
         return 130
+    if not summary["frames"]:
+        # Fonte valida que nao entregou quadro nenhum: a auditoria
+        # vazia e falha, nao sucesso (o resumo com 0 fica no --out).
+        parser.exit(2, f"erro: nenhum frame encontrado em {args.source}\n")
     failures = summary["failures"]
     thresholds = summary["thresholds"]
     print(

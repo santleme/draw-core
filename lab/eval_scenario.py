@@ -728,20 +728,23 @@ def main(argv=None):
         help="grava a máscara confirmada de cada checkpoint como PNG",
     )
     args = parser.parse_args(argv)
-    report = audit(
-        args.video,
-        args.gt,
-        fps=args.fps,
-        models={
-            "neural": args.neural_model,
-            "page_clean": args.page_clean_model,
-            "hand": args.hand_model,
-        },
-        save_masks=args.save_masks,
-    )
-    text = json.dumps(report, ensure_ascii=False, indent=2)
-    if args.out:
-        args.out.write_text(text + "\n", encoding="utf-8")
+    try:
+        report = audit(
+            args.video,
+            args.gt,
+            fps=args.fps,
+            models={
+                "neural": args.neural_model,
+                "page_clean": args.page_clean_model,
+                "hand": args.hand_model,
+            },
+            save_masks=args.save_masks,
+        )
+        text = json.dumps(report, ensure_ascii=False, indent=2)
+        if args.out:
+            args.out.write_text(text + "\n", encoding="utf-8")
+    except (ValueError, RuntimeError, OSError, KeyError, cv2.error) as error:
+        parser.exit(2, f"erro: {error}\n")
     print(text)
     return 0
 

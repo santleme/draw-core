@@ -2,6 +2,7 @@
 
 import json
 import time
+from types import SimpleNamespace
 
 import cv2
 import numpy as np
@@ -365,6 +366,36 @@ def test_cli_requires_a_mode_and_rejects_unknown_presets(tmp_path):
     with pytest.raises(SystemExit) as error:
         bench.main(["--synthetic", "--presets", "inventado"])
     assert error.value.code == 2
+
+
+def _fake_models(monkeypatch):
+    """NeuralSheetDetector/PageCleanInk de mentira para o caminho --clips."""
+    import draw.page_clean as page_clean_mod
+    import draw.perception as perception
+
+    fake = lambda *a, **k: SimpleNamespace(load=lambda: None)  # noqa: E731
+    monkeypatch.setattr(perception, "NeuralSheetDetector", fake)
+    monkeypatch.setattr(page_clean_mod, "PageCleanInk", fake)
+
+
+def test_cli_clips_dir_ausente_sai_erro_2(tmp_path, monkeypatch, capsys):
+    """--clips apontando diretório inexistente: erro limpo, não traceback."""
+    _fake_models(monkeypatch)
+    with pytest.raises(SystemExit) as error:
+        bench.main(["--clips", str(tmp_path / "nada")])
+    assert error.value.code == 2
+    assert "erro:" in capsys.readouterr().err
+
+
+def test_cli_clip_json_sem_scene_fps_sai_erro_2(tmp_path, monkeypatch, capsys):
+    """clip.json sem 'scene_fps' virava KeyError cru; agora é erro + 2."""
+    _fake_models(monkeypatch)
+    clip = _fake_clip(tmp_path)
+    (clip / "clip.json").write_text(json.dumps({"frames": 10}))
+    with pytest.raises(SystemExit) as error:
+        bench.main(["--clips", str(tmp_path)])
+    assert error.value.code == 2
+    assert "erro:" in capsys.readouterr().err
 
 
 def test_pencil_on_line_has_the_ruling_thickness_and_is_not_a_short_stroke(page):

@@ -286,6 +286,24 @@ def test_arquivo_com_duas_sessoes_e_recusado(tmp_path):
         cd.summarize([path], [])
 
 
+def test_main_telemetria_ausente_sai_erro_2(tmp_path, capsys):
+    """--empty apontando arquivo inexistente: erro limpo, não traceback."""
+    assert cd.main(["--empty", str(tmp_path / "nada.jsonl")]) == 2
+    assert "erro:" in capsys.readouterr().err
+
+
+def test_linhas_json_nao_objeto_sao_puladas(tmp_path):
+    """Uma linha JSON válida mas não-objeto não derruba a leitura."""
+    from lab.calibrate_desk import _iter_records
+
+    path = tmp_path / "telemetry.jsonl"
+    path.write_text(
+        '[1, 2, 3]\n"texto"\n' + json.dumps({"event": "session_open"}) + "\n",
+        encoding="utf-8",
+    )
+    assert [r["event"] for r in _iter_records([path])] == ["session_open"]
+
+
 def test_main_recusa_sessao_mista_com_erro_claro(tmp_path, capsys):
     path = tmp_path / "telemetry.jsonl"
     path.write_text(

@@ -19,6 +19,7 @@ from lab.corpus.clip import (
 from lab.corpus.labels import ClipInitError, init_clip, upgrade_clip
 from lab.corpus.manifest import (
     MANIFEST_NAME,
+    MANIFEST_VERSION,
     build_manifest,
     hash_clip,
     iter_clip_dirs,
@@ -397,6 +398,71 @@ def test_load_manifest_absent_and_bad_schema(tmp_path):
     )
     with pytest.raises(ValueError):
         load_manifest(tmp_path)
+
+
+def test_build_manifest_recusa_clip_json_sem_frames(tmp_path):
+    """clip.json sem 'frames' virava KeyError cru; agora é ClipError."""
+    clip_dir = tmp_path / "clip-a"
+    _write_frames(clip_dir, count=1)
+    (clip_dir / "clip.json").write_text(
+        json.dumps({"scene_fps": 8.0, "desc": "sem frames"}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ClipError, match="clip-a"):
+        build_manifest(tmp_path)
+
+
+def test_build_manifest_recusa_clip_json_nao_objeto(tmp_path):
+    clip_dir = tmp_path / "clip-a"
+    _write_frames(clip_dir, count=1)
+    (clip_dir / "clip.json").write_text(json.dumps([1, 2, 3]), encoding="utf-8")
+    with pytest.raises(ClipError, match="objeto"):
+        build_manifest(tmp_path)
+
+
+def test_build_manifest_recusa_clip_json_ilegivel(tmp_path):
+    clip_dir = tmp_path / "clip-a"
+    _write_frames(clip_dir, count=1)
+    (clip_dir / "clip.json").write_text("{quebrado", encoding="utf-8")
+    with pytest.raises(ClipError, match="ilegivel"):
+        build_manifest(tmp_path)
+
+
+def test_cli_manifest_erro_limpo_em_clip_invalido(tmp_path, capsys):
+    """O subcomando `manifest` desce pelo except do __main__: erro + 2."""
+    from lab.corpus.__main__ import main
+
+    clip_dir = tmp_path / "clip-a"
+    _write_frames(clip_dir, count=1)
+    (clip_dir / "clip.json").write_text(
+        json.dumps({"scene_fps": 8.0}), encoding="utf-8"
+    )
+    assert main(["manifest", str(tmp_path)]) == 2
+    assert "erro:" in capsys.readouterr().err
+
+
+def test_load_manifest_recusa_entrada_nao_objeto(tmp_path):
+    """Entrada de clipe que não é objeto derrubava verify_manifest com
+    AttributeError em entry.get; agora falha como manifesto inválido."""
+    (tmp_path / MANIFEST_NAME).write_text(
+        json.dumps({"schema": MANIFEST_VERSION, "clips": {"clip-a": "nada"}}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError):
+        load_manifest(tmp_path)
+    problems = verify_manifest(tmp_path)
+    assert problems and "invalido" in problems[0]
+
+
+def test_verify_manifest_clip_json_nao_objeto_no_disco(tmp_path):
+    """clip.json que virou lista JSON no disco vira problema, não crash."""
+    clip_dir = tmp_path / "clip-a"
+    _write_frames(clip_dir, count=1)
+    init_clip(clip_dir, fps=8.0)
+    write_manifest(tmp_path, build_manifest(tmp_path))
+    (clip_dir / "clip.json").write_text(json.dumps([1, 2]), encoding="utf-8")
+    problems = verify_manifest(tmp_path)
+    assert any("clip-a" in p for p in problems)
 
 
 # --- Pin do sha256 do manifesto ---------------------------------------------

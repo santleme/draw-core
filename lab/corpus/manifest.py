@@ -4,7 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from lab.corpus.clip import clip_frames
+from lab.corpus.clip import ClipError, clip_frames
 
 MANIFEST_NAME = "corpus.json"
 MANIFEST_VERSION = 1
@@ -53,13 +53,22 @@ def build_manifest(root) -> dict:
     """Constroi o manifesto ``corpus.json`` a partir dos clipes em ``root``."""
     clips = {}
     for clip_dir in iter_clip_dirs(root):
-        meta = json.loads((clip_dir / "clip.json").read_text(encoding="utf-8"))
-        clips[clip_dir.name] = {
-            "sha256": hash_clip(clip_dir),
-            "frames": int(meta["frames"]),
-            "conditions": dict(meta.get("conditions") or {}),
-            "issues": list(meta.get("issues") or []),
-        }
+        meta_path = clip_dir / "clip.json"
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ClipError(f"clip.json ilegivel em {clip_dir.name}: {exc}") from exc
+        if not isinstance(meta, dict):
+            raise ClipError(f"clip.json deve ser objeto JSON: {meta_path}")
+        try:
+            clips[clip_dir.name] = {
+                "sha256": hash_clip(clip_dir),
+                "frames": int(meta["frames"]),
+                "conditions": dict(meta.get("conditions") or {}),
+                "issues": list(meta.get("issues") or []),
+            }
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ClipError(f"clip.json invalido em {clip_dir.name}: {exc}") from exc
     return {"schema": MANIFEST_VERSION, "clips": clips}
 
 
@@ -83,6 +92,7 @@ def load_manifest(root) -> dict | None:
         not isinstance(data, dict)
         or data.get("schema") != MANIFEST_VERSION
         or not isinstance(data.get("clips"), dict)
+        or not all(isinstance(entry, dict) for entry in data["clips"].values())
     ):
         raise ValueError(
             f"manifesto invalido ou schema diferente de {MANIFEST_VERSION}"
@@ -116,6 +126,9 @@ def verify_manifest(root) -> list[str]:
             meta = json.loads((clip_dir / "clip.json").read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             problems.append(f"clip.json ilegivel em {name!r}: {exc}")
+            continue
+        if not isinstance(meta, dict):
+            problems.append(f"clip.json nao e objeto em {name!r}")
             continue
         if meta.get("frames") != entry.get("frames"):
             problems.append(

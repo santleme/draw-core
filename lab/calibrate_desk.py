@@ -96,6 +96,8 @@ def _iter_records(paths):
                         rec = json.loads(line)
                     except json.JSONDecodeError:
                         continue
+                    if not isinstance(rec, dict):
+                        continue  # JSON não-objeto: linha quebrada, só pulada
                     if rec.get("event") == "session_open":
                         sessions += 1
                         if sessions > 1:
@@ -341,6 +343,9 @@ def main(argv=None):
             "faz append e a rotação move o arquivo cheio para .1)",
             file=sys.stderr,
         )
+        return 2
+    except (OSError, ValueError) as exc:
+        print(f"erro: {exc}", file=sys.stderr)
         return 2
     report = {
         "inputs": {

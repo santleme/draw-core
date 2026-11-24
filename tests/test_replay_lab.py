@@ -11,6 +11,7 @@ from lab.replay_lab import (
     build_panel,
     compute_signals,
     list_corpus_frames,
+    main,
     quad_area,
     quad_jump,
     select_worst,
@@ -23,6 +24,17 @@ def test_list_corpus_frames_prefere_raw(tmp_path):
     cv2.imwrite(str(tmp_path / "raw" / "f2.png"), np.zeros((4, 4, 3), np.uint8))
     cv2.imwrite(str(tmp_path / "raw" / "f1.png"), np.zeros((4, 4, 3), np.uint8))
     assert [p.name for p in list_corpus_frames(tmp_path)] == ["f1.png", "f2.png"]
+
+
+def test_main_corpus_vazio_sai_erro_2(tmp_path, capsys):
+    """Corpus sem frames: erro limpo em vez de traceback (mesmo erro
+    do list_corpus_frames, agora na superfície do CLI)."""
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    with pytest.raises(SystemExit) as exc:
+        main(["--corpus", str(corpus), "--out", str(tmp_path / "out")])
+    assert exc.value.code == 2
+    assert "erro:" in capsys.readouterr().err
 
 
 def test_list_corpus_frames_vazio_falha(tmp_path):

@@ -419,6 +419,32 @@ def test_main_interrompida_avisa_e_sai_130(tmp_path, monkeypatch, capsys):
     assert audit["interrupted"] is True and audit["frames"] == 1
 
 
+def test_main_fonte_sem_frames_sai_erro_2(tmp_path, monkeypatch, capsys):
+    """Fonte válida que não entrega nenhum quadro: erro limpo, não exit 0."""
+    from test_protocol import _jpeg
+
+    src = tmp_path / "vazia.drawcap"
+    src.write_bytes(pack_record(0, 0, _jpeg())[: HEADER_SIZE + 10])
+    det = _FakeDet([_exploded_item()])
+    monkeypatch.setattr("draw.perception.NeuralSheetDetector", lambda *a, **k: det)
+
+    with pytest.raises(SystemExit) as exc:
+        sa.main(
+            [
+                "--source",
+                str(src),
+                "--model",
+                "fake.onnx",
+                "--out",
+                str(tmp_path / "audit"),
+                "--allow-unverified",
+            ]
+        )
+
+    assert exc.value.code == 2
+    assert "erro:" in capsys.readouterr().err
+
+
 def test_run_com_dump_overlays_grava_overlay(tmp_path):
     src = tmp_path / "frames"
     src.mkdir()

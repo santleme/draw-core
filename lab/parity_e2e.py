@@ -32,6 +32,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import cv2
 import numpy as np
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -193,7 +194,7 @@ def run_legacy(
     if result.returncode != 0:
         print(result.stdout[-3000:])
         print(result.stderr[-3000:], file=sys.stderr)
-        raise SystemExit("driver legado falhou")
+        raise RuntimeError("driver legado falhou")
     out_dir = Path(out_dir)
     telemetry = json.loads((out_dir / "telemetry.json").read_text())
     with np.load(out_dir / "canvas.npz") as archive:
@@ -291,70 +292,78 @@ def main(argv=None):
     )
     args = ap.parse_args(argv)
 
-    legacy_repo = Path(args.legacy_repo)
-    if not (legacy_repo / "draw" / "loop.py").exists():
-        raise SystemExit(f"repo legado não encontrado em {legacy_repo}")
-    legacy_models = legacy_repo / "models"
-    sheet_model = Path(
-        args.sheet_model or legacy_models / "draw_seg_v3_dyn.onnx"
-    ).resolve()
-    ink_model = Path(args.ink_model or legacy_models / "page_clean_unet.onnx").resolve()
-    hand_model = Path(
-        args.hand_model or legacy_models / "hand_landmarker.task"
-    ).resolve()
-    out = Path(args.out)
-    out.mkdir(parents=True, exist_ok=True)
+    try:
+        legacy_repo = Path(args.legacy_repo)
+        if not (legacy_repo / "draw" / "loop.py").exists():
+            raise FileNotFoundError(f"repo legado não encontrado em {legacy_repo}")
+        legacy_models = legacy_repo / "models"
+        sheet_model = Path(
+            args.sheet_model or legacy_models / "draw_seg_v3_dyn.onnx"
+        ).resolve()
+        ink_model = Path(
+            args.ink_model or legacy_models / "page_clean_unet.onnx"
+        ).resolve()
+        hand_model = Path(
+            args.hand_model or legacy_models / "hand_landmarker.task"
+        ).resolve()
+        out = Path(args.out)
+        out.mkdir(parents=True, exist_ok=True)
 
-    if args.allow_unverified:
-        verify = None
-    else:
-        from draw.infra.manifest import verify_model
+        if args.allow_unverified:
+            verify = None
+        else:
+            from draw.infra.manifest import verify_model
 
-        verify = verify_model
-    new_records, new_masks, new_hand_samples = run_new(
-        args.corpus,
-        out / "new",
-        frames=args.frames,
-        fps=args.fps,
-        sheet_model=sheet_model,
-        ink_model=ink_model,
-        hand_model=hand_model,
-        verify=verify,
-    )
-    # Corpus vazio/ilegível: falha explícita antes de gastar a
-    # passada legada — o comparador também recusa zero frames.
-    if not new_records:
-        raise SystemExit("corpus sem frames legíveis — nada a comparar")
-    old_records, old_masks, old_hand_samples = run_legacy(
-        legacy_repo,
-        args.corpus,
-        out / "legacy",
-        frames=args.frames,
-        fps=args.fps,
-        sheet_model=sheet_model,
-        ink_model=ink_model,
-        hand_model=hand_model,
-    )
-    report = compare(
-        new_records,
-        new_masks,
-        old_records,
-        old_masks,
-        iou_min=args.iou_min,
-        corner_tol=args.corner_tol_px,
-    )
-    report["corpus"] = str(args.corpus)
-    report["sheet_model"] = str(sheet_model)
-    report["ink_model"] = str(ink_model)
-    report["hand_model"] = str(hand_model)
-    # Só conta como medida quando os DOIS lados produziram amostras
-    # reais de presença: com um lado a zero (mediapipe/modelo ausente
-    # ou sinal indisponível) o caminho de mão desse lado ficou ligado
-    # mas nada foi medido — um "ok" não cobre a mão nele.
-    report["hand_samples"] = {"new": new_hand_samples, "legacy": old_hand_samples}
-    report["hand_measured"] = bool(new_hand_samples and old_hand_samples)
-    (out / "parity.json").write_text(json.dumps(report, indent=1))
-    print(json.dumps(report, indent=1))
+            verify = verify_model
+        new_records, new_masks, new_hand_samples = run_new(
+            args.corpus,
+            out / "new",
+            frames=args.frames,
+            fps=args.fps,
+            sheet_model=sheet_model,
+            ink_model=ink_model,
+            hand_model=hand_model,
+            verify=verify,
+        )
+        # Corpus vazio/ilegível: falha explícita antes de gastar a
+        # passada legada — o comparador também recusa zero frames.
+        if not new_records:
+            raise ValueError("corpus sem frames legíveis — nada a comparar")
+        old_records, old_masks, old_hand_samples = run_legacy(
+            legacy_repo,
+            args.corpus,
+            out / "legacy",
+            frames=args.frames,
+            fps=args.fps,
+            sheet_model=sheet_model,
+            ink_model=ink_model,
+            hand_model=hand_model,
+        )
+        report = compare(
+            new_records,
+            new_masks,
+            old_records,
+            old_masks,
+            iou_min=args.iou_min,
+            corner_tol=args.corner_tol_px,
+        )
+        report["corpus"] = str(args.corpus)
+        report["sheet_model"] = str(sheet_model)
+        report["ink_model"] = str(ink_model)
+        report["hand_model"] = str(hand_model)
+        # Só conta como medida quando os DOIS lados produziram amostras
+        # reais de presença: com um lado a zero (mediapipe/modelo ausente
+        # ou sinal indisponível) o caminho de mão desse lado ficou ligado
+        # mas nada foi medido — um "ok" não cobre a mão nele.
+        report["hand_samples"] = {
+            "new": new_hand_samples,
+            "legacy": old_hand_samples,
+        }
+        report["hand_measured"] = bool(new_hand_samples and old_hand_samples)
+        (out / "parity.json").write_text(json.dumps(report, indent=1))
+        print(json.dumps(report, indent=1))
+    except (ValueError, RuntimeError, OSError, KeyError, cv2.error) as error:
+        ap.exit(2, f"erro: {error}\n")
     return 0 if report["ok"] else 2
 
 

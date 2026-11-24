@@ -447,52 +447,55 @@ def main(argv=None):
     ap.add_argument("--fps-cena", type=float, default=2.0)
     ap.add_argument("--flags", default="")
     args = ap.parse_args(argv)
-    flags = [f for f in args.flags.split(",") if f.strip()]
-    out = Path(args.out)
-    records = run_replay(
-        args.corpus,
-        out,
-        top_k=args.top_k,
-        stride=args.stride,
-        scene_fps=args.fps_cena,
-        flags=flags,
-    )
-    worst = select_worst(records, args.top_k)
-    # 2ª passagem determinística: artefatos só dos selecionados.
-    # `frame` é o índice do arquivo — frames ilegíveis são pulados e
-    # a posição no vetor de registros deixa de coincidir com ele.
-    wanted = {w["frame"] for w in worst}
-    run_replay(
-        args.corpus,
-        out,
-        top_k=args.top_k,
-        stride=args.stride,
-        scene_fps=args.fps_cena,
-        flags=flags,
-        panel_frames=wanted,
-    )
-    by_idx = {r["frame"]: r for r in records}
-    index = [
-        {
-            **w,
-            "file": by_idx[w["frame"]]["file"],
-            "signals": {
-                k: by_idx[w["frame"]].get(k)
-                for k in (
-                    "sig_quad_jump_px",
-                    "sig_area_change",
-                    "sig_canvas_growth_px",
-                    "sig_presence_flip",
-                    "sig_tracker_jump_px",
-                    "sig_quad_aspect",
-                )
-            },
-            "panel": f"panel_{w['frame']:04d}.png",
-        }
-        for w in worst
-    ]
-    (out / "worst_index.json").write_text(json.dumps(index, indent=1))
-    print(json.dumps({"frames": len(records), "worst": index}, indent=1))
+    try:
+        flags = [f for f in args.flags.split(",") if f.strip()]
+        out = Path(args.out)
+        records = run_replay(
+            args.corpus,
+            out,
+            top_k=args.top_k,
+            stride=args.stride,
+            scene_fps=args.fps_cena,
+            flags=flags,
+        )
+        worst = select_worst(records, args.top_k)
+        # 2ª passagem determinística: artefatos só dos selecionados.
+        # `frame` é o índice do arquivo — frames ilegíveis são pulados e
+        # a posição no vetor de registros deixa de coincidir com ele.
+        wanted = {w["frame"] for w in worst}
+        run_replay(
+            args.corpus,
+            out,
+            top_k=args.top_k,
+            stride=args.stride,
+            scene_fps=args.fps_cena,
+            flags=flags,
+            panel_frames=wanted,
+        )
+        by_idx = {r["frame"]: r for r in records}
+        index = [
+            {
+                **w,
+                "file": by_idx[w["frame"]]["file"],
+                "signals": {
+                    k: by_idx[w["frame"]].get(k)
+                    for k in (
+                        "sig_quad_jump_px",
+                        "sig_area_change",
+                        "sig_canvas_growth_px",
+                        "sig_presence_flip",
+                        "sig_tracker_jump_px",
+                        "sig_quad_aspect",
+                    )
+                },
+                "panel": f"panel_{w['frame']:04d}.png",
+            }
+            for w in worst
+        ]
+        (out / "worst_index.json").write_text(json.dumps(index, indent=1))
+        print(json.dumps({"frames": len(records), "worst": index}, indent=1))
+    except (ValueError, RuntimeError, OSError, KeyError, cv2.error) as error:
+        ap.exit(2, f"erro: {error}\n")
     return 0
 
 
