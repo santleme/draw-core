@@ -16,7 +16,7 @@ import cv2
 import numpy as np
 
 from .._hvcam_mjpeg import decode_mjpeg as _imdecode_mjpeg_strict
-from ._lib import HvFrameHeader, _lib_or_fallback
+from ._lib import HvFrameHeader, _lib_or_fallback, _PurePythonHvcamLib
 from ._mjpeg import _sanitize_mjpeg
 from ._process import _terminate_host_process
 from ._transport import _listen_vsock_bounded
@@ -49,6 +49,7 @@ class Camera:
         listener=None,
         on_listening=None,
         abort_check=None,
+        connect_timeout_ms=None,
     ):
         if host is not None and listen:
             raise ValueError("hvcam: listen mode cannot use a TCP host")
@@ -56,23 +57,25 @@ class Camera:
             raise ValueError(f"porta hvcam invalida: {port!r}")
         lib = _lib_or_fallback()
         self._lib = lib
+        # O timeout de connect so existe no fallback Python puro: a
+        # libhvcam.so nativa tem ABI C fixa e nao aceita kwargs.
+        lib_kwargs = {}
+        if connect_timeout_ms is not None and isinstance(lib, _PurePythonHvcamLib):
+            lib_kwargs["timeout_ms"] = connect_timeout_ms
         if host is not None:
-            self.fd = lib.hvcam_connect_tcp(host.encode(), port)
+            self.fd = lib.hvcam_connect_tcp(host.encode(), port, **lib_kwargs)
         elif listen:
             if listener is None:
-                if on_listening is None and abort_check is None:
-                    self.fd = _listen_vsock_bounded(port, timeout_ms)
-                else:
-                    self.fd = _listen_vsock_bounded(
-                        port,
-                        timeout_ms,
-                        on_listening=on_listening,
-                        abort_check=abort_check,
-                    )
+                listen_kwargs = {}
+                if on_listening is not None:
+                    listen_kwargs["on_listening"] = on_listening
+                if abort_check is not None:
+                    listen_kwargs["abort_check"] = abort_check
+                self.fd = _listen_vsock_bounded(port, timeout_ms, **listen_kwargs)
             else:
                 self.fd = listener(port, timeout_ms)
         else:
-            self.fd = lib.hvcam_connect(port)
+            self.fd = lib.hvcam_connect(port, **lib_kwargs)
         if self.fd < 0:
             operation = "listen" if listen else "connect"
             detail = f"hvcam: {operation} failed ({self.fd})"
@@ -108,8 +111,7 @@ class Camera:
         timeout vencer (TimeoutError). O ndarray e uma view sobre o
         buffer persistente — to_bgr() ja materializa a imagem.
         """
-        lib = getattr(self, "_lib", None) or _lib_or_fallback()
-        n = lib.hvcam_grab_next(
+        n = self._lib.hvcam_grab_next(
             self.fd,
             ctypes.byref(self._hdr),
             self._buf,
@@ -184,8 +186,7 @@ class Camera:
 
     def close(self):
         if self.fd >= 0:
-            lib = getattr(self, "_lib", None) or _lib_or_fallback()
-            lib.hvcam_close(self.fd)
+            self._lib.hvcam_close(self.fd)
             self.fd = -1
 
     def __enter__(self):
@@ -234,10 +235,15 @@ def parse_hvcam_endpoint(source):
                 f"hvcam+reverse nao aceita host ({hostname!r}); "
                 "use hvcam:// para conexao direta"
             )
-        shown_port = port_text if (sep and port_text) else DEFAULT_PORT
+        try:
+            shown_port = parsed.port if parsed.port is not None else DEFAULT_PORT
+        except ValueError:
+            shown_port = port_text
+        # host:port e o formato de hvcam+tcp://; IPv6 precisa de colchetes.
+        tcp_host = f"[{hostname}]" if ":" in hostname else hostname
         raise ValueError(
             f"vsock nao tem host ({hostname!r}); para TCP use "
-            f"hvcam+tcp://{hostname}:{shown_port}"
+            f"hvcam+tcp://{tcp_host}:{shown_port}"
         )
     if not sep or not port_text:
         port = DEFAULT_PORT
@@ -267,15 +273,16 @@ class HvcamCapture:
         connect_timeout_ms=None,
         on_listening=None,
         abort_check=None,
-        host_process=None,
     ):
         self.source = str(source).strip()
         self._timeout_ms = timeout_ms
         self._connect_timeout_ms = connect_timeout_ms
         self._on_listening = on_listening
         self._abort_check = abort_check
-        self._host_proc = host_process
-        self._managed_host = on_listening is not None or host_process is not None
+        # O modo reverse prende o hvcam-host.exe aqui depois do open
+        # (_reverse.py atribui cap._host_proc); release() o encerra.
+        self._host_proc = None
+        self._managed_host = on_listening is not None
         self._cam = None
         self._opened = False
         self.last_frame_id = None
@@ -297,19 +304,22 @@ class HvcamCapture:
             return
         try:
             scheme = urlparse(self.source).scheme.lower()
+            kwargs = {"port": port}
             if host is not None:
-                self._cam = camera_factory(host=host, port=port)
-            elif scheme == "hvcam+reverse":
-                listen_kwargs = {"port": port, "listen": True}
+                kwargs["host"] = host
                 if self._connect_timeout_ms is not None:
-                    listen_kwargs["timeout_ms"] = self._connect_timeout_ms
+                    kwargs["connect_timeout_ms"] = self._connect_timeout_ms
+            elif scheme == "hvcam+reverse":
+                kwargs["listen"] = True
+                if self._connect_timeout_ms is not None:
+                    kwargs["timeout_ms"] = self._connect_timeout_ms
                 if self._on_listening is not None:
-                    listen_kwargs["on_listening"] = self._on_listening
+                    kwargs["on_listening"] = self._on_listening
                 if self._abort_check is not None:
-                    listen_kwargs["abort_check"] = self._abort_check
-                self._cam = camera_factory(**listen_kwargs)
-            else:
-                self._cam = camera_factory(port=port)
+                    kwargs["abort_check"] = self._abort_check
+            elif self._connect_timeout_ms is not None:
+                kwargs["connect_timeout_ms"] = self._connect_timeout_ms
+            self._cam = camera_factory(**kwargs)
         except OSError as error:
             self._cam = None
             self.open_error = error
