@@ -46,6 +46,7 @@ for _p in (str(_REPO_ROOT / "src"), str(_REPO_ROOT)):
         sys.path.insert(0, _p)
 
 from lab._cli import main_errors  # noqa: E402
+from lab.corpus.clip import ClipError  # noqa: E402
 
 # Glifos do requisito (c): traços horizontais curtos de E, T, S e H.
 SHORT_STROKE_GLYPHS = ("E", "T", "T2", "S", "H")
@@ -516,7 +517,18 @@ def run_clip(
     from draw import pipeline as pipeline_module
 
     clip_dir = Path(clip_dir)
-    meta = json.loads((clip_dir / "clip.json").read_text())
+    meta = json.loads((clip_dir / "clip.json").read_text(encoding="utf-8"))
+    if not isinstance(meta, dict):
+        raise ClipError(f"clip.json deve ser objeto JSON: {clip_dir / 'clip.json'}")
+    scene_fps = meta.get("scene_fps")
+    if (
+        not isinstance(scene_fps, (int, float))
+        or isinstance(scene_fps, bool)
+        or scene_fps <= 0
+    ):
+        raise ClipError(
+            f"clip.json em {clip_dir.name}: scene_fps deve ser > 0: {scene_fps!r}"
+        )
     config.apply_format("a4", meta.get("orientation", "retrato"))
     regions = None
     regions_path = clip_dir / "regions.json"
@@ -587,7 +599,7 @@ def run_clip(
                 flags=flags,
                 detector=detector,
                 page_clean=page_clean,
-                scene_fps=meta["scene_fps"],
+                scene_fps=scene_fps,
                 verify=verify,
                 frame_files=frame_files,
             )

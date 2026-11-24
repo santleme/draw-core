@@ -56,7 +56,9 @@ def build_manifest(root) -> dict:
         meta_path = clip_dir / "clip.json"
         try:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, ValueError) as exc:
+            # ValueError cobre JSONDecodeError e UnicodeDecodeError
+            # (clip.json salvo em UTF-16 pelo PowerShell).
             raise ClipError(f"clip.json ilegivel em {clip_dir.name}: {exc}") from exc
         if not isinstance(meta, dict):
             raise ClipError(f"clip.json deve ser objeto JSON: {meta_path}")
@@ -124,7 +126,7 @@ def verify_manifest(root) -> list[str]:
             problems.append(f"sha256 divergente em {name!r}")
         try:
             meta = json.loads((clip_dir / "clip.json").read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, ValueError) as exc:
             problems.append(f"clip.json ilegivel em {name!r}: {exc}")
             continue
         if not isinstance(meta, dict):

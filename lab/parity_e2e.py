@@ -128,7 +128,11 @@ def run_new(
             worker.pump()
             loop.collect_ink()
             if worker.error is not None:
-                raise RuntimeError("trabalhadora de tinta falhou") from worker.error
+                # A causa vai na mensagem: o erro: do main_errors nao
+                # exibe o __context__/__cause__ encadeado.
+                raise RuntimeError(
+                    f"trabalhadora de tinta falhou: {worker.error}"
+                ) from worker.error
             records.append(
                 {
                     "frame": idx,

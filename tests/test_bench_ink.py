@@ -398,6 +398,24 @@ def test_cli_clip_json_sem_scene_fps_sai_erro_2(tmp_path, monkeypatch, capsys):
     assert "erro:" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize(
+    "meta",
+    [[1, 2, 3], {"scene_fps": "abc", "frames": 10}, {"scene_fps": 0, "frames": 10}],
+    ids=["nao-objeto", "fps-string", "fps-zero"],
+)
+def test_cli_clip_json_malformado_sai_erro_2(tmp_path, monkeypatch, capsys, meta):
+    """clip.json malformado no --clips: não-objeto dava AttributeError,
+    scene_fps string dava TypeError e zero dava ZeroDivisionError —
+    todos fora de OPERATIONAL_ERRORS (traceback cru). Agora ClipError."""
+    _fake_models(monkeypatch)
+    clip = _fake_clip(tmp_path)
+    (clip / "clip.json").write_text(json.dumps(meta))
+    with pytest.raises(SystemExit) as error:
+        bench.main(["--clips", str(tmp_path)])
+    assert error.value.code == 2
+    assert "erro:" in capsys.readouterr().err
+
+
 def test_pencil_on_line_has_the_ruling_thickness_and_is_not_a_short_stroke(page):
     """O lápis fino sobre a linha tem a espessura da pauta (é o caso
     ambíguo) e fica de fora da meta (c), reportado à parte."""

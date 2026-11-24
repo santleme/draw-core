@@ -367,7 +367,11 @@ def run_replay(
         )
         loop.collect_ink()
         if ink_worker.error is not None:
-            raise RuntimeError("trabalhadora de tinta falhou") from ink_worker.error
+            # A causa vai na mensagem: o erro: do main_errors nao exibe
+            # o __context__/__cause__ encadeado.
+            raise RuntimeError(
+                f"trabalhadora de tinta falhou: {ink_worker.error}"
+            ) from ink_worker.error
         quad = (
             None
             if loop.tracker.corners is None
