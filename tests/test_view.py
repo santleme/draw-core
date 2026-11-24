@@ -63,19 +63,6 @@ def test_message_view_without_a_last_frame_uses_the_view_size():
     assert view.shape == (640, 1280, 3)
 
 
-def test_base_button_only_appears_in_baseline_mode():
-    cam = _camera()
-    canvas = np.full((1200, 850, 3), 255, np.uint8)
-    default = view_module.compose_view(cam, canvas)
-    baseline = view_module.compose_view(cam, canvas, show_base=True)
-    footer = slice(600, 640)
-    assert not np.array_equal(default[footer], baseline[footer])
-    # E o modo padrao continua estavel depois de o baseline ter rodado:
-    # os templates em cache nao se contaminam entre modos.
-    again = view_module.compose_view(cam, canvas)
-    assert np.array_equal(default, again)
-
-
 def test_composed_view_does_not_share_the_cached_template():
     cam = _camera()
     canvas = np.full((1200, 850, 3), 255, np.uint8)
@@ -217,22 +204,22 @@ def test_hud_moves_to_the_footer_when_the_camera_leaves_no_side_margin():
     assert ys.size and ys.min() > 1080 - 62
 
 
-def test_hud_footer_starts_after_the_last_button_with_show_base():
-    """Com show_base o rodape tem um botao a mais e o [Q] anda para a
-    direita: o HUD do rodape tinha que recomecar depois dele, mas media
-    o limite esquerdo pela fileira de 3 botoes e pintava por cima."""
+def test_hud_footer_starts_after_the_last_button():
+    """O HUD que cai no rodape recomeca depois do ultimo botao: se o
+    limite esquerdo fosse medido por uma fileira mais curta, o texto
+    nasceria sob o [Q], que e repintado por cima e o truncaria."""
     canvas = np.full((1200, 850, 3), 255, np.uint8)
     cam = np.full((1080, 1920, 3), 120, np.uint8)
     size = (1920, 1080)
-    base = view_module.compose_view(cam, canvas, size=size, show_base=True)
+    base = view_module.compose_view(cam, canvas, size=size)
     shown = view_module.compose_view(
-        cam, canvas, size=size, show_base=True, hud={"fps": 14.0, "latency": 50.0}
+        cam, canvas, size=size, hud={"fps": 14.0, "latency": 50.0}
     )
     ys, xs = np.nonzero((base != shown).any(axis=2))
     assert ys.size and ys.min() > 1080 - 62
     # Os botoes do rodape sao repintados depois do HUD: o texto que
-    # comeca sob o [Q] deslocado some atras dele e sobra truncado.
-    last = view_module.button_rects(size, show_base=True)[-1]
+    # comeca sob o [Q] some atras dele e sobra truncado.
+    last = view_module.button_rects(size)[-1]
     sc = min(size[0] / view_module._BASE_W, size[1] / view_module._BASE_H)
     pad = view_module._scale(sc)(24)
     assert xs.min() >= last[0] + last[2] + pad
