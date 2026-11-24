@@ -10,8 +10,11 @@ RuntimeError. Só o opt-out explícito DRAW_MODEL_STRICT=0 (ou
 """
 
 import hashlib
+import http.server
 import json
 import re
+import threading
+import urllib.request
 
 import pytest
 
@@ -298,6 +301,46 @@ class _FakeHttpResponse:
         self._offset += len(chunk)
         return chunk
 
+    def read1(self, size=-1):
+        return self.read(size)
+
+
+class _FakeClock:
+    """Relógio determinístico: o teste avança o tempo a cada read."""
+
+    def __init__(self, start=1000.0):
+        self.now = start
+
+    def monotonic(self):
+        return self.now
+
+
+class _DrippingResponse:
+    """Resposta que entrega 1 byte por read e avança o relógio em `step`.
+
+    Simula o servidor que goteja devagar demais para estourar o timeout
+    de cada operação de socket — só o deadline da transferência o pega.
+    """
+
+    def __init__(self, clock, step=30.0):
+        self._clock = clock
+        self._step = step
+        self.reads = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self, size=-1):
+        self.reads += 1
+        self._clock.now += self._step
+        return b"x"
+
+    def read1(self, size=-1):
+        return self.read(size)
+
 
 def test_download_model_verifies_sha256_and_size_and_writes_atomically(tmp_path):
     payload = b"pesos-oficiais-v3"
@@ -360,6 +403,121 @@ def test_download_model_rejects_oversized_stream_and_cleans_up(tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
+def test_download_model_deadline_zero_refuses_before_first_read(tmp_path):
+    """timeout=0 estoura o deadline antes da primeira leitura do socket."""
+    payload = b"pesos"
+    entry = {
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "bytes": len(payload),
+    }
+    response = _FakeHttpResponse(payload)
+    reads = []
+    original_read = response.read
+
+    def counting_read(size=-1):
+        reads.append(size)
+        return original_read(size)
+
+    response.read = counting_read
+    with pytest.raises(RuntimeError, match="deadline"):
+        manifest.download_model(
+            "page_clean_unet.onnx",
+            entry,
+            models_dir=tmp_path,
+            urlopen=lambda req, timeout=None: response,
+            timeout=0,
+        )
+    assert reads == []
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_download_model_deadline_stops_dripping_server(tmp_path, monkeypatch):
+    """Servidor que goteja 1 byte por read sem estourar o timeout de cada
+    operação de socket é cortado pelo deadline da transferência."""
+    clock = _FakeClock()
+    monkeypatch.setattr("draw.infra.manifest.time.monotonic", clock.monotonic)
+    response = _DrippingResponse(clock, step=30.0)
+    entry = {"sha256": "0" * 64, "bytes": 100}
+    with pytest.raises(RuntimeError, match="deadline"):
+        manifest.download_model(
+            "page_clean_unet.onnx",
+            entry,
+            models_dir=tmp_path,
+            urlopen=lambda req, timeout=None: response,
+            timeout=60,
+        )
+    # t=0 e t=30 ainda cabem no deadline de 60s; em t=60 ele estoura.
+    assert response.reads == 2
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_download_model_deadline_aborts_drip_on_real_socket(tmp_path):
+    """Servidor real gotejando 1 byte por vez: com socket de verdade,
+    read() ficaria preso num único recv atrás do drip. Só read1 + o
+    timeout de socket encolhido fazem o deadline valer de fato."""
+    stop = threading.Event()
+
+    class _DripHandler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(1 << 30))
+            self.end_headers()
+            while not stop.is_set():
+                try:
+                    self.wfile.write(b"x")
+                    self.wfile.flush()
+                except OSError:
+                    return
+                stop.wait(0.05)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), _DripHandler)
+    serving = threading.Thread(target=server.serve_forever, daemon=True)
+    serving.start()
+    port = server.server_address[1]
+    entry = {"sha256": "0" * 64, "bytes": 1 << 20}
+    outcome = {}
+    finished = threading.Event()
+
+    def run():
+        try:
+            manifest.download_model(
+                "page_clean_unet.onnx",
+                entry,
+                models_dir=tmp_path,
+                urlopen=lambda req, timeout=None: urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/page_clean_unet.onnx",
+                    timeout=timeout,
+                ),
+                timeout=0.5,
+            )
+        except Exception as error:  # o assert abaixo decide o tipo esperado
+            outcome["error"] = error
+        finally:
+            finished.set()
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    try:
+        # Sem o fix o download não terminaria nunca: o próprio wait é o
+        # limite de tempo do teste, não um assert sobre sleep. O erro é
+        # RuntimeError tanto quando o check do deadline dispara quanto
+        # quando o timeout de socket encolhido vence uma iteração antes
+        # (perto do fim, `remaining` fica menor que o intervalo do drip).
+        assert finished.wait(15)
+        assert isinstance(outcome.get("error"), RuntimeError)
+        assert list(tmp_path.iterdir()) == []
+    finally:
+        stop.set()
+        server.shutdown()
+        serving.join(timeout=5)
+        server.server_close()
+        worker.join(timeout=5)
+
+
 def test_download_model_rejects_path_traversal_and_non_https(tmp_path):
     entry = {"sha256": "0" * 64, "bytes": 4}
     with pytest.raises(RuntimeError, match="inválido"):
@@ -401,6 +559,30 @@ def test_ensure_models_downloads_only_missing_files(tmp_path):
     assert len(calls) == 1
     assert (tmp_path / "models" / "novo.onnx").read_bytes() == missing_payload
     assert existing.read_bytes() == b"ja-existe"
+
+
+def test_ensure_models_forwards_download_deadline(tmp_path):
+    """O deadline de ensure_models vale para cada download individual."""
+    missing_payload = b"novo-modelo"
+    manifest_path = _write_manifest(
+        tmp_path,
+        {
+            "novo.onnx": {
+                "sha256": hashlib.sha256(missing_payload).hexdigest(),
+                "bytes": len(missing_payload),
+            },
+        },
+    )
+    with pytest.raises(RuntimeError, match="deadline"):
+        manifest.ensure_models(
+            models_dir=tmp_path / "models",
+            manifest_path=manifest_path,
+            urlopen=lambda req, timeout=None: _FakeHttpResponse(missing_payload),
+            timeout=0,
+        )
+    assert not (tmp_path / "models" / "novo.onnx").exists()
+    # atomic_publish criou a pasta, mas o temporário foi removido no erro.
+    assert list((tmp_path / "models").iterdir()) == []
 
 
 def test_ensure_models_accepts_existing_external_symlink_without_rejecting(tmp_path):

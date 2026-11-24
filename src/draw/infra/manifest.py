@@ -48,6 +48,7 @@ um manifesto corrompido nunca vira "sem verificação".
 import hashlib
 import os
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -310,6 +311,12 @@ def download_model(
     Nunca publica arquivo parcial ou com hash divergente: o download vai
     para um temporário na mesma pasta e só substitui o destino se o
     tamanho e o sha256 baterem exatamente com `entry`.
+
+    `timeout` é o teto da transferência inteira (conexão + leituras), não
+    de cada operação de socket: um servidor que goteja um byte por vez sem
+    nunca estourar o timeout do socket é interrompido no deadline com
+    RuntimeError. `timeout=None` desliga o deadline (e o timeout do
+    socket).
     """
     folder = Path(models_dir) if models_dir is not None else DEFAULT_MODELS_DIR
     target = _validate_download_target(folder, name)
@@ -338,6 +345,10 @@ def download_model(
     opener = urllib.request.urlopen if urlopen is None else urlopen
     digest = hashlib.sha256()
     total = 0
+    # Deadline da transferência inteira: a conexão já desconta do
+    # orçamento. Sem ele, o timeout por operação de socket não pega um
+    # servidor que goteja bytes devagar sem nunca estourar o timeout.
+    deadline = None if timeout is None else time.monotonic() + float(timeout)
     try:
         with atomic_publish(target) as handle:
             try:
@@ -345,8 +356,30 @@ def download_model(
                     url, headers={"User-Agent": "draw-core/0.1"}
                 )
                 with opener(request, timeout=timeout) as response:
+                    # read() junta recvs até completar _CHUNK ou EOF: um
+                    # servidor gotejante ficaria preso dentro de uma única
+                    # chamada, fora do alcance do deadline. read1 faz no
+                    # máximo um recv por chamada — cada volta do loop é
+                    # limitada pelo timeout de socket encolhido abaixo.
+                    # Respostas sem read1 (fakes) caem no read normal.
+                    read_chunk = getattr(response, "read1", response.read)
                     while True:
-                        chunk = response.read(_CHUNK)
+                        if deadline is not None:
+                            remaining = deadline - time.monotonic()
+                            if remaining <= 0:
+                                raise RuntimeError(
+                                    f"download de {name} excedeu o deadline "
+                                    f"de {timeout}s ({url})"
+                                )
+                            # Encolhe o timeout do socket para o que resta:
+                            # sem isso o pior caso estica ~timeout a mais
+                            # além do deadline. Nem toda resposta expõe o
+                            # socket (fakes de teste) — aí fica como está.
+                            try:
+                                response.fp.raw._sock.settimeout(remaining)
+                            except (AttributeError, OSError):
+                                pass
+                        chunk = read_chunk(_CHUNK)
                         if not chunk:
                             break
                         total += len(chunk)
@@ -383,6 +416,7 @@ def ensure_models(
     manifest_path=None,
     release_url=None,
     urlopen=None,
+    timeout=_DOWNLOAD_TIMEOUT_S,
 ):
     """Garante que os modelos registrados em assets/manifest.json estão em models/.
 
@@ -390,7 +424,8 @@ def ensure_models(
     disco (inclusive symlinks válidos para um cache externo) não são
     sobrescritos (a verificação subsequente decide se conferem ou se
     falham no modo estrito). Devolve a lista de Paths baixados nesta
-    chamada.
+    chamada. `timeout` é o deadline de cada download individual (mesmo
+    sentido de download_model).
     """
     resolved_manifest, models = load_manifest(manifest_path)
     if not models:
@@ -419,6 +454,7 @@ def ensure_models(
             models_dir=folder,
             release_url=base_url,
             urlopen=urlopen,
+            timeout=timeout,
         )
         print(f"Modelo {name} salvo e verificado (sha256 confere).")
         downloaded.append(target)
