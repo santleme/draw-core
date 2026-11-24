@@ -638,6 +638,23 @@ def test_final_checkpoint_missing_terminal_event():
     assert "evento final" in final["status"]
 
 
+def test_eval_scenario_main_gt_ausente_sai_erro_2(tmp_path, capsys):
+    """GT inexistente: FileNotFoundError do np.load vira erro limpo."""
+    import lab.eval_scenario as es
+
+    with pytest.raises(SystemExit) as exc:
+        es.main(
+            [
+                "--video",
+                str(tmp_path / "v.mp4"),
+                "--gt",
+                str(tmp_path / "gt.npz"),
+            ]
+        )
+    assert exc.value.code == 2
+    assert "erro:" in capsys.readouterr().err
+
+
 def test_pipeline_summary_eh_json_serializavel():
     """anchors/registrations carregam ndarrays — sem o resumo o
     json.dumps do relatório quebrava e a auditoria não produzia

@@ -58,8 +58,29 @@ def test_main_end_to_end_otsu(tmp_path):
 
 
 def test_main_input_missing(tmp_path, capsys):
-    assert main([str(tmp_path / "nada.png"), "--out-dir", str(tmp_path)]) == 1
-    assert "não foi possível ler" in capsys.readouterr().err
+    assert main([str(tmp_path / "nada.png"), "--out-dir", str(tmp_path)]) == 2
+    err = capsys.readouterr().err
+    assert "erro:" in err and "não foi possível ler" in err
+
+
+def test_main_missing_onnx_exits_erro_2(tmp_path, capsys):
+    """--mask model sem .onnx: FileNotFoundError vira erro limpo, não traceback."""
+    page = tmp_path / "pagina.png"
+    _page(page)
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                str(page),
+                "--out-dir",
+                str(tmp_path / "out"),
+                "--mask",
+                "model",
+                "--onnx",
+                str(tmp_path / "nada.onnx"),
+            ]
+        )
+    assert exc.value.code == 2
+    assert "erro:" in capsys.readouterr().err
 
 
 def test_main_model_proof_records_calibrated_mask_threshold(tmp_path, monkeypatch):

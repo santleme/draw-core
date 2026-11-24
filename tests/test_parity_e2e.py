@@ -5,6 +5,7 @@ import json
 import os
 
 import numpy as np
+import pytest
 from lab.parity_e2e import compare
 
 
@@ -92,6 +93,30 @@ def test_compare_shape_transposta_conta_divergencia():
     assert report["divergences"][0]["canvas_shape"]
 
 
+def test_run_legacy_driver_falha_eh_runtime_error(monkeypatch, tmp_path):
+    """rc != 0 do driver virava SystemExit solto; agora é RuntimeError,
+    que o main converte em `erro:` + código 2."""
+    import subprocess
+
+    from lab import parity_e2e
+
+    def fake_run(cmd, env=None, **kw):
+        return subprocess.CompletedProcess(cmd, 1, "saida", "boom")
+
+    monkeypatch.setattr(parity_e2e.subprocess, "run", fake_run)
+    with pytest.raises(RuntimeError, match="driver legado falhou"):
+        parity_e2e.run_legacy(
+            tmp_path,
+            tmp_path,
+            tmp_path,
+            frames=1,
+            fps=1.0,
+            sheet_model="s.onnx",
+            ink_model="i.onnx",
+            hand_model="h.task",
+        )
+
+
 def test_run_legacy_limpa_env_draw(monkeypatch, tmp_path):
     import subprocess
 
@@ -163,6 +188,25 @@ def _fake_legacy_repo(tmp_path):
     (repo / "draw").mkdir(parents=True)
     (repo / "draw" / "loop.py").write_text("")
     return repo
+
+
+def test_main_repo_legado_ausente_sai_erro_2(tmp_path, capsys):
+    """--legacy-repo sem draw/loop.py: erro limpo, não traceback."""
+    from lab import parity_e2e
+
+    with pytest.raises(SystemExit) as exc:
+        parity_e2e.main(
+            [
+                "--corpus",
+                "corpus",
+                "--out",
+                str(tmp_path / "out"),
+                "--legacy-repo",
+                str(tmp_path / "vazio"),
+            ]
+        )
+    assert exc.value.code == 2
+    assert "erro:" in capsys.readouterr().err
 
 
 def test_main_hand_measured_exige_os_dois_lados(monkeypatch, tmp_path):
