@@ -39,6 +39,7 @@ import numpy as np
 
 from .export_vectors import (
     _dp_open,
+    _keep_component_pixel,
     filter_microfragments,
     simplify,
     traverse_graph,
@@ -115,10 +116,28 @@ def _decision_space():
     return np.array([MM_PER_PX_X / ref, MM_PER_PX_Y / ref]), ref, np.full(2, ref)
 
 
-THINNING_TYPES = {
-    "zhangsuen": cv2.ximgproc.THINNING_ZHANGSUEN,
-    "guohall": cv2.ximgproc.THINNING_GUOHALL,
-}
+# Nomes estaticos: o cv2.ximgproc so e resolvido dentro de thin(), para
+# que o import do modulo nao quebre num wheel opencv-*-headless sem
+# contrib (AttributeError em nivel de modulo matava o arquivo inteiro).
+THINNING_MODES = ("zhangsuen", "guohall")
+
+
+def _thinning_type(name):
+    """cv2.ximgproc.THINNING_* para `name`, resolvido no uso.
+
+    Sem ximgproc (wheel sem contrib), levanta RuntimeError explicando a
+    dependencia — o resto do modulo (grafo, primitivas, writers) segue
+    utilizavel sem ele.
+    """
+    if name not in THINNING_MODES:
+        raise ValueError(f"thinning desconhecido: {name!r}")
+    ximgproc = getattr(cv2, "ximgproc", None)
+    if ximgproc is None:
+        raise RuntimeError(
+            "cv2.ximgproc indisponivel: o afinamento de thin()/vectorize_mask "
+            "exige opencv-contrib-python-headless"
+        )
+    return getattr(ximgproc, "THINNING_" + name.upper())
 
 
 def load_ink(path):
@@ -145,10 +164,16 @@ def load_stamps(path):
 
 
 def thin(ink, thinning="zhangsuen"):
-    """Afina a máscara de tinta para um esqueleto de 1 px (booleano)."""
-    src = ink.astype(np.uint8) * np.uint8(255)
-    skel = cv2.ximgproc.thinning(src, None, THINNING_TYPES[thinning])
-    return skel > 0
+    """Afina a máscara de tinta para um esqueleto de 1 px (booleano).
+
+    Como zhang_suen_thin de export_vectors, conserva 1 px (o mais
+    proximo do centroide) de cada componente que o ximgproc apagou por
+    completo — um ponto 2x2 com min_area=0 nao some do resultado.
+    """
+    src = ink.astype(np.uint8)
+    thinning_type = _thinning_type(thinning)  # valida ximgproc antes do acesso
+    skel = cv2.ximgproc.thinning(src * np.uint8(255), None, thinning_type)
+    return _keep_component_pixel(src, skel > 0)
 
 
 def _polyline_arc_length(points):
@@ -1180,7 +1205,7 @@ def main(argv=None):
     )
     parser.add_argument(
         "--thinning",
-        choices=list(THINNING_TYPES),
+        choices=THINNING_MODES,
         default="zhangsuen",
         help="algoritmo de afinamento (padrao zhangsuen)",
     )

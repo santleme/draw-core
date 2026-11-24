@@ -828,3 +828,43 @@ def test_loop_connector_to_nearby_tee_is_not_contracted():
     strokes = vectorize._chain_strokes(graph, link) + graph.loose
     ends = [tuple(p) for s in strokes if not s["closed"] for p in s["points"][[0, -1]]]
     assert (60.0, 100.0) in ends, "o laço ficou sem conector"
+
+
+def test_thinning_modes_are_static_names_not_ximgproc_constants():
+    """THINNING_MODES guarda só os nomes: resolver cv2.ximgproc no
+    nível do módulo quebrava o import inteiro num wheel
+    opencv-*-headless sem contrib (AttributeError no carregamento)."""
+    assert vectorize.THINNING_MODES == ("zhangsuen", "guohall")
+    assert all(isinstance(m, str) for m in vectorize.THINNING_MODES)
+
+
+def test_thinning_type_rejects_unknown_name_before_touching_ximgproc():
+    with pytest.raises(ValueError, match="thinning"):
+        vectorize._thinning_type("bogus")
+
+
+def test_thin_raises_runtime_error_without_ximgproc(monkeypatch):
+    """Sem o contrib wheel, thin() falha com RuntimeError explicando a
+    dependência; o resto do módulo (grafo, primitivas, writers) segue
+    utilizável — que é o ponto do acesso lazy."""
+    monkeypatch.setattr(cv2, "ximgproc", None)
+    with pytest.raises(RuntimeError, match="ximgproc"):
+        vectorize.thin(np.zeros((10, 10), dtype=bool))
+    assert vectorize.traverse_graph(np.zeros((5, 5), bool)) == []
+
+
+def test_thin_keeps_two_by_two_dot_alive():
+    """ximgproc.thinning ZHANGSUEN apaga um ponto 2x2 inteiro; thin()
+    conserva 1 px (o mais próximo do centróide), como zhang_suen_thin.
+    Com min_area=0 o ponto chega a polilinha de 1 vértice."""
+    ink = np.zeros((60, 60), dtype=bool)
+    ink[10:12, 20:22] = True  # ponto 2x2
+    ink[30:35, 5:55] = True  # faixa que sobrevive ao afinamento
+    skel = vectorize.thin(ink)
+    assert skel[10:12, 20:22].sum() == 1
+
+    lines = vectorize.vectorize_mask(ink, min_area=0)
+    singles = [line for line in lines if len(line["points"]) == 1]
+    assert len(singles) == 1
+    px, py = singles[0]["points"][0]
+    assert 20 <= px <= 21 and 10 <= py <= 11

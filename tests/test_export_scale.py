@@ -12,8 +12,9 @@ replicam a entrada "a4" do legado.
 """
 
 import numpy as np
+import pytest
 
-from draw.exporters.export_vectors import _export_scale, write_svg
+from draw.exporters.export_vectors import _export_scale, write_dxf, write_svg
 
 # (nome, dimensoes_mm, grade_px, mm_por_px) — replica de draw.config["a4"].
 FORMATS = [("a4", (210.0, 297.0), (850, 1200), 297.0 / 1200)]
@@ -41,6 +42,64 @@ def test_no_formats_falls_back_to_per_axis():
     sx, sy = _export_scale(850, 1200, 210, 297)
     assert sx == 210 / 850
     assert sy == 297 / 1200
+
+
+def test_scalar_scale_broadcasts_to_uniform_pair():
+    """`scale` escalar é escala uniforme (s, s) — antes quebrava no
+    desempacotamento (TypeError) quando o chamador passava um float."""
+    assert _export_scale(400, 560, 210, 297, scale=0.5) == (0.5, 0.5)
+    assert _export_scale(400, 560, 210, 297, scale=2) == (2.0, 2.0)
+    # numbers.Real cobre os escalares numpy (np.float32/int64 nao sao
+    # float/int nativos).
+    assert _export_scale(400, 560, 210, 297, scale=np.float32(0.5)) == (0.5, 0.5)
+    assert _export_scale(400, 560, 210, 297, scale=np.int64(1)) == (1.0, 1.0)
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        0.0,
+        -0.5,
+        (0.5, -0.1),
+        (0.0, 0.0),
+        float("inf"),
+        (float("inf"), 0.5),
+        float("nan"),
+    ],
+)
+def test_non_positive_scale_rejected(bad):
+    with pytest.raises(ValueError, match="positivo"):
+        _export_scale(400, 560, 210, 297, scale=bad)
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        True,
+        "0.5",
+        "12",
+        b"12",
+        {0.5, 0.25},
+        {1: "a", 2: "b"},
+        (0.5, 0.5, 0.5),
+        object(),
+    ],
+)
+def test_malformed_scale_rejected_with_clear_error(bad):
+    """Nem par nem escalar: ValueError claro em vez de TypeError do
+    desempacotamento (bool fica de fora do broadcast apesar de int)."""
+    with pytest.raises(ValueError, match="escalar ou par"):
+        _export_scale(400, 560, 210, 297, scale=bad)
+
+
+def test_write_svg_and_dxf_accept_scalar_scale(tmp_path):
+    lines = [{"points": np.array([[0.0, 0.0], [100.0, 100.0]]), "closed": False}]
+    svg = tmp_path / "scalar.svg"
+    dxf = tmp_path / "scalar.dxf"
+    write_svg(lines, str(svg), 100, 100, 210, 297, 0.3, scale_mm_per_px=0.5)
+    write_dxf(lines, str(dxf), 100, 100, 210, 297, 0.3, scale_mm_per_px=0.5)
+    assert "M 0.00 0.00 L 50.00 50.00" in svg.read_text(encoding="utf-8")
+    assert "50.000" in dxf.read_text(encoding="utf-8")
 
 
 def test_svg_absolute_extent_off_grid(tmp_path):

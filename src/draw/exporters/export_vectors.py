@@ -11,6 +11,8 @@ vetorizado em numpy, neste arquivo. Os helpers de esqueleto, grafo e
 simplificacao compartilhados moram aqui; vectorize.py os importa.
 """
 
+import math
+import numbers
 import re
 from pathlib import Path
 
@@ -111,13 +113,35 @@ def _keep_component_pixel(src, skel):
     some inteiro e o export o omitia. Para o componente apagado,
     conserva o pixel mais proximo do centroide; componentes cujo
     esqueleto sobreviveu ficam intocados.
+
+    Passe unico: o bincount sobre os rotulos do esqueleto diz quais
+    componentes sumiram sem varrer a imagem por componente (o laco
+    `labels == i` custava O(H*W) cada — ~2000 pontinhos = ~2000
+    varreduras). So os pixels dos apagados entram no indice (LUT
+    booleana + argsort estavel, mesmo padrao de _index_node_components):
+    indexar a imagem inteira sairia mais caro que o rescan quando so
+    uns poucos componentes sumiram numa pagina densa.
     """
     n, labels, _, centroids = cv2.connectedComponentsWithStats(src, connectivity=8)
-    for i in range(1, n):
-        comp = labels == i
-        if (comp & skel).any():
-            continue
-        ys, xs = np.nonzero(comp)
+    if n <= 1:
+        return skel
+    present = np.bincount(labels[skel], minlength=n) > 0
+    missing = np.flatnonzero(~present[1:]) + 1
+    if missing.size == 0:
+        return skel
+    in_missing = np.zeros(n, dtype=bool)
+    in_missing[missing] = True
+    labels_flat = labels.ravel()
+    miss_flat = np.flatnonzero(in_missing[labels_flat])
+    miss_lbl = labels_flat[miss_flat]
+    order = np.argsort(miss_lbl, kind="stable")
+    sorted_flat = miss_flat[order]
+    counts = np.bincount(miss_lbl[order], minlength=n)
+    splits = np.cumsum(counts)
+    width = labels.shape[1]
+    for i in missing:
+        flat = sorted_flat[int(splits[i - 1]) : int(splits[i])]
+        xs, ys = flat % width, flat // width
         cx, cy = centroids[i]
         pick = int(np.argmin((xs - cx) ** 2 + (ys - cy) ** 2))
         skel[ys[pick], xs[pick]] = True
@@ -460,12 +484,34 @@ def _line_width_mm(line, sx, sy, default_mm):
 def _export_scale(img_w, img_h, paper_w_mm, paper_h_mm, scale=None, formats=None):
     """Escala mm/px; formats sao quadruplas (nome, dimensoes, grade, mm_por_px).
 
+    `scale` aceita um par (sx, sy) ou um escalar numerico — transmitido
+    como escala uniforme (s, s); valores nao positivos sao recusados.
+
     O chamador que tem draw.config monta a lista:
     [(n, dims, config.paper_grid(n), config.mm_per_px(n))
      for n, dims in config.FORMATS.items()].
     """
     if scale is not None:
-        return scale
+        # Escalar numerico vira escala uniforme; numbers.Real cobre os
+        # escalares numpy (np.float32/int64 nao sao float/int nativos).
+        if isinstance(scale, numbers.Real) and not isinstance(scale, bool):
+            scale = (scale, scale)
+        # O par precisa ser uma sequencia ordenada — iterar uma str
+        # devolve caracteres ("12" virava (1, 2) em silencio), e set/dict
+        # desempacotam em ordem arbitraria.
+        if not isinstance(scale, (tuple, list, np.ndarray)):
+            raise ValueError(
+                f"scale_mm_per_px precisa ser um escalar ou par (sx, sy): {scale!r}"
+            )
+        try:
+            sx, sy = (float(v) for v in scale)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"scale_mm_per_px precisa ser um escalar ou par (sx, sy): {scale!r}"
+            ) from None
+        if not (math.isfinite(sx) and math.isfinite(sy) and sx > 0 and sy > 0):
+            raise ValueError(f"scale_mm_per_px precisa ser positivo: {scale!r}")
+        return sx, sy
     for _name, dimensions, grid, unit in formats or ():
         if dimensions == (paper_w_mm, paper_h_mm):
             # A escala uniforme do formato so vale na grade canonica dele:
@@ -489,7 +535,11 @@ def write_svg(
     scale_mm_per_px=None,
     formats=None,
 ):
-    """SVG com <path> reais em mm (Y para baixo, como a imagem)."""
+    """SVG com <path> reais em mm (Y para baixo, como a imagem).
+
+    scale_mm_per_px: par (sx, sy) ou escalar (escala uniforme); None
+    deduz por `formats` (grade canonica) ou por eixo (paper_mm/img).
+    """
     sx, sy = _export_scale(
         img_w, img_h, paper_w_mm, paper_h_mm, scale_mm_per_px, formats
     )
@@ -533,7 +583,11 @@ def write_dxf(
     scale_mm_per_px=None,
     formats=None,
 ):
-    """DXF mínimo (AC1015) escrito à mão: LWPOLYLINE em mm, Y para cima."""
+    """DXF mínimo (AC1015) escrito à mão: LWPOLYLINE em mm, Y para cima.
+
+    scale_mm_per_px: par (sx, sy) ou escalar (escala uniforme); None
+    deduz por `formats` (grade canonica) ou por eixo (paper_mm/img).
+    """
     sx, sy = _export_scale(
         img_w, img_h, paper_w_mm, paper_h_mm, scale_mm_per_px, formats
     )
@@ -619,6 +673,11 @@ def write_dxf(
 
 # ------------------------------------------------- prova (round-trip IoU)
 
+# Numero W3C do SVG: ".5", expoente "1e-3"/"-2.5E+2" e sinais; o regex
+# antigo (-?\d+\.?\d*) lia "1e-3" como ["1", "-3"] e corromvia
+# coordenadas de SVGs externos.
+_SVG_NUMBER = r"[+-]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][+-]?\d+)?"
+
 
 def parse_svg_paths(svg_path, widths=None):
     """Lê de volta os <path> e os pontos isolados (<circle>) do SVG:
@@ -634,15 +693,15 @@ def parse_svg_paths(svg_path, widths=None):
         d_match = re.search(r'\bd="([^"]+)"', tag)
         if d_match is not None:
             d = d_match.group(1)
-            nums = [float(v) for v in re.findall(r"-?\d+\.?\d*", d)]
+            nums = [float(v) for v in re.findall(_SVG_NUMBER, d)]
             pts = np.array(nums, dtype=np.float64).reshape(-1, 2)
             out.append((pts, d.strip().upper().endswith("Z")))
             if widths is not None:
-                w = re.search(r'stroke-width="([\d.]+)"', tag)
+                w = re.search(r'stroke-width="(' + _SVG_NUMBER + ')"', tag)
                 widths.append(float(w.group(1)) if w else None)
             continue
-        cx = re.search(r'cx="([\d.]+)"', tag)
-        cy = re.search(r'cy="([\d.]+)"', tag)
+        cx = re.search(r'cx="(' + _SVG_NUMBER + ')"', tag)
+        cy = re.search(r'cy="(' + _SVG_NUMBER + ')"', tag)
         if cx is None or cy is None:
             continue
         out.append(
@@ -652,7 +711,7 @@ def parse_svg_paths(svg_path, widths=None):
             )
         )
         if widths is not None:
-            r = re.search(r'\br="([\d.]+)"', tag)
+            r = re.search(r'\br="(' + _SVG_NUMBER + ')"', tag)
             widths.append(float(r.group(1)) * 2 if r else None)
     return out
 
